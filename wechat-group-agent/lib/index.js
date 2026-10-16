@@ -17,7 +17,7 @@
 import { appendFileSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { homedir } from 'node:os'
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { BridgeClient } from './bridge-client.mjs'
 import {
   parseQuietWindows, isQuiet, detectTrigger, humanDelayMs,
@@ -105,6 +105,8 @@ const DEFAULT_CONFIG = {
   reasoningEffort: '',
   // ── 图像识别（群里发图 → 看懂 → 回一句）──────────────────
   visionOnImage: true,           // 收到图片/表情包时尝试取图并识别
+  visionOnEmoticon: true,        // 表情包也识别（想省调用可设 false：表情包含义通常固定）
+  visionCacheMax: 500,           // 识图结果缓存条数（同一张图只识别一次；超出丢最早的）
   visionProvider: 'opencodego-extra',
   visionModel: 'deepseek-v4-flash-vision-exp',
   imageReplyProbability: 0.5,    // 看到（识别出的）图片时回话的概率
@@ -360,11 +362,12 @@ const namesFile = join(dirname(memoryDir), 'members.json')
     // 图片/表情包：取图并识别内容
     //   表情包（type 47）：XML 里有 cdnurl，直接下载
     //   普通图片（type 3）：走本地 .dat 解密（我们自己实现，见 wx-bridge/lib/wechat-image.mjs）
-    if (['image', 'emoticon'].includes(m.typeName) && config.visionOnImage) {
+    if (['image', 'emoticon'].includes(m.typeName) && config.visionOnImage
+          && (m.typeName !== 'emoticon' || config.visionOnEmoticon)) {
       try {
         const media = await client.call('fetchMedia', { xml: m.xml || '', type: m.type, roomId: m.roomId || '', ts: m.ts || 0 }, 90_000)
         if (media?.file) {
-          const desc = await describeImage(media.file)
+          const desc = await describeImageCached(media.file)   // 带缓存：同一张只识别一次
           if (desc) {
             m.imageDesc = desc
             log(`识图成功：${desc}`)
@@ -823,6 +826,54 @@ let res = await callLlm(route, sys, usr, undefined)
    * 用视觉模型描述一张图 —— "群里发图能识别并回复"的核心。
    * 走 ctx.attachments 把图片入库成引用，再以 { type:'image', attachment } 送进视觉模型。
    */
+  // ── 识图结果缓存：同一张图/表情包只识别一次 ──────────────────────
+  // 之前每次收到图片或表情包都会调一次视觉模型 —— 同一个表情包发 10 次就识别 10 次：
+  // 浪费、慢，而且每次描述可能略有不同，导致机器人对同一张图反应不一致。
+  // 现在按「图片字节的 sha1」缓存描述，命中就直接复用，不再调模型。
+  const visionCacheFile = () =>
+    join(dirname(config.memoryDir || join(homedir(), '.dsh', 'data', 'wechat-bot', 'memory')), 'vision-cache.json')
+  let visionCache = null
+
+  function loadVisionCache() {
+    if (visionCache) return visionCache
+    try { visionCache = JSON.parse(readFileSync(visionCacheFile(), 'utf8')) || {} } catch { visionCache = {} }
+    return visionCache
+  }
+
+  function saveVisionCache() {
+    try {
+      const f = visionCacheFile()
+      mkdirSync(dirname(f), { recursive: true })
+      const keys = Object.keys(visionCache)
+      const max = Number(config.visionCacheMax) || 500
+      if (keys.length > max) {   // 超上限：丢掉最早的
+        keys.sort((a, b) => (visionCache[a]?.at || 0) - (visionCache[b]?.at || 0))
+        for (const k of keys.slice(0, keys.length - max)) delete visionCache[k]
+      }
+      writeFileSync(f, JSON.stringify(visionCache))
+    } catch { /* 缓存写失败不影响主流程 */ }
+  }
+
+  function hashFile(file) {
+    try { return createHash('sha1').update(readFileSync(file)).digest('hex').slice(0, 20) } catch { return '' }
+  }
+
+  /** 带缓存的识图：命中缓存就不调视觉模型（同一张图只识别一次） */
+  async function describeImageCached(file) {
+    const h = hashFile(file)
+    if (h) {
+      const c = loadVisionCache()
+      if (c[h]?.desc) { log('识图命中缓存（跳过模型调用）'); return c[h].desc }
+    }
+    const desc = await describeImage(file)
+    if (h && desc) {
+      const c = loadVisionCache()
+      c[h] = { desc, at: Date.now() }
+      saveVisionCache()
+    }
+    return desc
+  }
+
   async function describeImage(file) {
     if (!config.visionModel) return ''
     let buf
@@ -1580,7 +1631,7 @@ let res = await callLlm(route, sys, usr, undefined)
       const p = String(args?.path || '').trim()
       if (!p) return '需要 path'
       log('手动识图：' + p)
-      const desc = await describeImage(p)
+      const desc = await describeImageCached(p)
       return desc
         ? `识别结果：${desc}`
         : '识别失败：看插件日志（可能没有 attachments 服务，或视觉模型 ' + config.visionModel + ' 不可用）'
