@@ -139,6 +139,11 @@ export class DbPoller {
         if (this.stats.errors % 10 === 1) this.log(`轮询失败（${table}）：${String(e?.message || e).slice(0, 120)}`)
       }
     }
+    // 每轮只要成功读到数据库，就刷新登录状态：
+    // 登录标志会被 hook 的 login/logout 事件重置，而"能读到库"才是最强证据
+    if (got > 0 || this.tables.size > 0) {
+      if (typeof this.onReady === "function") { try { this.onReady(this.selfWxid) } catch { /* ignore */ } }
+    }
     this.stats.polls++
     return got
   }
