@@ -124,14 +124,14 @@ const DEFAULT_CONFIG = {
   // 问过的问题等多久算"还没人接"（这期间不再主动追问同一件事）
   pendingQuestionWaitMs: 45 * 60_000,
   minReplyGapMs: 6_000,          // 同群两次回复最小间隔（对话延续时只要求 2s）
-  maxRepliesPer10Min: 15,        // 同群 10 分钟上限（真人来回聊天很容易超 6 条）
+  maxRepliesPer10Min: 40,         // 10 分钟上限（长对话别变哑巴；原来是 15）
   // 敷衍模式：真人群聊大量回复是"哈哈/确实/6"这种低信息量反应；
   // 全交给 LLM 会让每条都"太聪明"，人机味就出来了 → 按概率直接短路
   cannedChance: 0.3,
   // 对话延续窗口：上一条我回过的人在这个时间内又说话，视为"接着聊"
-  conversationWindowMs: 120_000,
-  continuationChance: 0.7,       // 接话也不是无脑接：对方接着聊时有 70% 概率回
-  maxConsecutiveTurns: 4,        // 同一个人最多连续对聊 4 轮，之后要 @ 或点名才继续
+  conversationWindowMs: 300_000,      // 5 分钟：对方在这个窗口内又说话 = 还在对话中（超时则对话结束）
+  continuationChance: 1,          // 对话延续**必定回**（用户要求：聊起来就一直回）
+  maxConsecutiveTurns: 50,        // 连续对聊轮数上限（设很大 = 不掐断；原来是 4）
   // 防重复：同一句话（归一化后）在这个时间内回过就不再回；同样的回复内容也不会重复发
   repeatWindowMs: 10 * 60_000,
   quietHours: '23:00-08:00',     // 睡觉时段：23:00 睡、08:00 醒
