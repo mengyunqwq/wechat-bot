@@ -112,6 +112,7 @@ wechat-group-agent/         DSH 插件（人设大脑，可选）
 patches/                    对第三方微信 Hook 的补丁
 docs/                       补充文档
 install.ps1                 一键安装
+scripts/build-hook.ps1      自动构建我们改造过的 Hook（上游无 LICENSE，故不发二进制）
 config.example.json         配置模板
 ```
 

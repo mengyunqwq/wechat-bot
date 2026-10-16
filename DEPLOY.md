@@ -50,7 +50,23 @@ robocopy "D:\Program Files\Tencent\Weixin" "D:\wxhook\wx4110" /E
 
 **优点**：省事。**缺点**：官方版 **`QueryDB` 是坏的**（上游 bug：`g_IsLogin` 永远是 0）→ **拿不到群成员昵称**、**收不到消息**（公开源码里没有回调推送实现）。
 
-### 方案 B：打我们的补丁自己编译（推荐，功能完整）
+### 方案 B：跑脚本自动构建（推荐，功能完整）
+
+**一条命令搞定**（脚本会自动装 VS Build Tools → 克隆上游 → 打补丁 → 编译 → 部署）：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\build-hook.ps1
+```
+
+> **为什么本仓库不发编译好的 `version.dll`？**
+> 上游 aixed/WeChat-Hook **没有 LICENSE 文件**（默认"保留所有权利"），
+> 直接再分发其衍生二进制法律风险高。所以改成**脚本让你自己在本机构建** ——
+> 效果一样，但更干净。脚本会自动备份你原来的 `version.dll`。
+
+<details>
+<summary>想手动编译（等价于脚本做的事）</summary>
+
+
 
 ```powershell
 # 1) 克隆上游
@@ -72,6 +88,8 @@ copy E:\wxhook-src\WeChat-Hook\x64\Release\version.dll D:\wxhook\wx4110\version.
 ```
 
 补丁做了什么、为什么这么做，见 [docs/hook-patch-notes.md](docs/hook-patch-notes.md)。
+
+</details>
 
 ---
 
