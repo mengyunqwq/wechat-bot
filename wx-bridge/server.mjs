@@ -316,6 +316,20 @@ async function handle(op, a = {}) {
       return typeof bridge.selfNamesIn === 'function' ? bridge.selfNamesIn(a.roomId) : [bridge.selfName || bridge.selfWxid]
     case 'history':
       return bridge.history(a.roomId, a.limit || 20)
+    case 'searchMessages': {
+      // 检索历史消息（长记忆：群里提起以前说过的，就从微信数据库里查出来）
+      // 数据源是微信自己的库（轮询器已经在读），不用另建数据库。
+      if (!bridge.poller || typeof bridge.poller.searchMessages !== 'function') {
+        return { items: [], error: '轮询器未就绪（数据库不可用）' }
+      }
+      try {
+        const items = await bridge.poller.searchMessages(
+          a.roomId, a.query || '', a.limit || 20, a.scan || 800)
+        return { items, query: a.query || '' }
+      } catch (e) {
+        return { items: [], error: String(e?.message || e) }
+      }
+    }
     case 'sendText': {
       // 真 @：正文里出现 "@昵称" 时，自动查群成员映射转成 wxid 填进 hook 的 atlist，
       // 被 @ 的人才会真的收到提醒（红点）。显式传了 mentions 就用调用方的。
