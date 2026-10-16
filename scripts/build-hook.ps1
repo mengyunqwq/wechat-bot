@@ -94,6 +94,24 @@ if ($LASTEXITCODE -ne 0) { Bad "补丁应用失败 —— 上游可能已更新�
 Ok "补丁已应用："
 git diff --stat | ForEach-Object { Say "    $_" }
 
+# ── 3.5 生成偏移特征 ────────────────────────────────────────
+Say "`n[3.5/5] 生成偏移特征（从本机 Weixin.dll 提取，不入库）"
+$wxDll = Get-ChildItem (Join-Path $TargetDir '') -Recurse -Filter 'Weixin.dll' -ErrorAction SilentlyContinue |
+         Sort-Object Length -Descending | Select-Object -First 1
+if (-not $wxDll) {
+  Warn "没找到 Weixin.dll（在 $TargetDir 下）→ 跳过特征生成，将全部使用硬编码偏移"
+} else {
+  $gen = Join-Path $root 'scripts\gen-offset-patterns.py'
+  if (-not (Test-Path $gen)) { Warn "缺少 $gen → 跳过" }
+  else {
+    Ok "目标：$($wxDll.FullName)（$([math]::Round($wxDll.Length/1MB,1)) MB）"
+    & python $gen $wxDll.FullName (Join-Path $src 'include\offset_patterns.h')
+    if ($LASTEXITCODE -eq 2) { Warn "部分偏移取不到特征（会回退硬编码值，不影响运行）" }
+    elseif ($LASTEXITCODE -ne 0) { Warn "特征生成失败 → 全部回退硬编码偏移" }
+    else { Ok "特征已生成" }
+  }
+}
+
 # ── 4. 编译 ──────────────────────────────────────────────────
 Say "`n[4/5] 编译（Release x64）"
 & $msbuild 'x64_Version_dll.vcxproj' /m /t:Build /p:Configuration=Release /p:Platform=x64 /v:minimal

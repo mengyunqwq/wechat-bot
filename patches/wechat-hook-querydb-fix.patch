@@ -1,3 +1,171 @@
+diff --git a/include/global.h b/include/global.h
+index a732ea2..51c9006 100644
+--- a/include/global.h
++++ b/include/global.h
+@@ -1,33 +1,33 @@
+ #pragma once
+-#include <windows.h>
+-#include <string>
+-#include <cstdint>
+-
+-// 前向声明，不需要完整类型
+-class HttpServer;
+-
+-
+-
+-extern int g_receive_type;
+-extern int g_StartPort;
+-extern int g_MsgSendPort;
+-extern HMODULE g_hWeixinDll;
+-extern HMODULE g_hWeixinExe;
+-
+-
+-extern HANDLE g_hLoginMonitor;
+-extern HANDLE g_hAfterLoginInit;
+-
+-extern DWORD g_MainThreadId;
+-extern DWORD 进程PID;
+-extern DWORD 父进程PID;
++#include <windows.h>
++#include <string>
++#include <cstdint>
++
++// 前向声明，不需要完整类型
++class HttpServer;
++
++
++
++extern int g_receive_type;
++extern int g_StartPort;
++extern int g_MsgSendPort;
++extern HMODULE g_hWeixinDll;
++extern HMODULE g_hWeixinExe;
++
++
++extern HANDLE g_hLoginMonitor;
++extern HANDLE g_hAfterLoginInit;
++
++extern DWORD g_MainThreadId;
++extern DWORD 进程PID;
++extern DWORD 父进程PID;
+ extern HWND  g_WeixinMainHwnd;
+ extern volatile uint64_t g_IsLogin;   // 0=未登录 1=已登录
+ extern volatile uint64_t g_getprofile;
+ 
+-extern volatile bool g_LoginMonitorRunning;
+-extern std::string g_CallBack_Url;
+-extern CRITICAL_SECTION g_dbMgrCriticalSection;
++extern volatile bool g_LoginMonitorRunning;
++extern std::string g_CallBack_Url;
++extern CRITICAL_SECTION g_dbMgrCriticalSection;
+ 
+ extern std::wstring g_AppDataDir;
+ extern std::wstring g_DocumentDir;
+@@ -39,7 +39,7 @@ extern uint64_t g_MyModuleSize;
+ extern uint64_t g_MyModuleEnd;
+ 
+ 
+-struct SelfInfo_t
++struct SelfInfo_t
+ {
+     std::string wxid;
+     std::string alias;
+@@ -54,39 +54,41 @@ struct SelfInfo_t
+ 
+ 
+ };
+-// 全局唯一实例
+-extern SelfInfo_t SelfInfo;
+-
+-#define WX_ADDR(offset) ((void*)((uintptr_t)g_hWeixinDll + (offset)))
+-#define XWECHAT_MAIN_CLAZZ_OFFSET            ((void*)((uintptr_t)g_hWeixinDll + 0xA83AB20))
++// 全局唯一实例
++extern SelfInfo_t SelfInfo;
++
++#define WX_ADDR(offset) ((void*)((uintptr_t)g_hWeixinDll + (offset)))
++#define XWECHAT_MAIN_CLAZZ_OFFSET            ((void*)((uintptr_t)g_hWeixinDll + 0xA83AB20))
++
++inline std::wstring g_MyDir;
++
++inline HttpServer* g_httpServer = nullptr;
+ 
+-inline std::wstring g_MyDir;
+-
+-inline HttpServer* g_httpServer = nullptr;
+-
+-inline constexpr uint64_t g_Patch_Revoke = 0x22D09E7;
++inline uint64_t g_Patch_Revoke = 0x22D09E7;                      // 可被 offset_resolver 覆盖
++inline uint64_t g_xlogHookTarget = 0x108678;                     // xlog 钩子目标（原来硬编码在 inline_weixin_dll_load.cpp）
++inline uint64_t g_xwechatMainClazz = 0xA83AB20;                  // 主类对象地址
+ 
+ 
+-constexpr size_t XWECHAT_SQLITE3_VFS_OFFSET = 0xA6C0490;
+-constexpr size_t XWECHAT_SQLITE3_API_ROUTINES_OFFSET = 0x8BB0D38;
+-constexpr size_t XWECHAT_SQLCIPHER_API_ROUTINES_OFFSET = 0x8BB1570;
+-constexpr size_t XWECHAT_SQLITE3_CODEC_GET_KEY_FUNC = 0x4EE64D0;	//可以废弃不用
++inline size_t XWECHAT_SQLITE3_VFS_OFFSET = 0xA6C0490;            // 可被 offset_resolver 覆盖
++inline size_t XWECHAT_SQLITE3_API_ROUTINES_OFFSET = 0x8BB0D38;   // 可被覆盖
++inline size_t XWECHAT_SQLCIPHER_API_ROUTINES_OFFSET = 0x8BB1570; // 可被覆盖
++inline size_t XWECHAT_SQLITE3_CODEC_GET_KEY_FUNC = 0x4EE64D0;    // 可被覆盖	//可以废弃不用
+ 
+-namespace offset
++namespace offset
+ {
+-    inline constexpr uint64_t dec_pic_call = 0x493E70;
+-    inline constexpr uint64_t create_param2 = 0xDF40;
+-    inline constexpr uint64_t send_message = 0x1677A30;
+-    inline constexpr uint64_t param1_vtable = 0x84EC9C8; 
+-
+-    inline constexpr uint64_t param2 = 0xA0CE0B0;
+-    inline constexpr uint64_t param2_1 = 0x8595F58;
+-    inline constexpr uint64_t param2_2 = 0x8595E98; 
+-    inline constexpr uint64_t param2_3 = 0x8595DD8; 
+-    inline constexpr uintptr_t txt_message_ctr = 0x6B2C30; 
+-    inline constexpr uintptr_t txt_message_vtbl = 0x8279358;
+-    inline constexpr uint64_t img_msg_vtbl = 0x84F96B8; 
+-    inline constexpr uint64_t img_msg_vtb2 = 0x84F9748;
++    inline uint64_t dec_pic_call = 0x493E70;
++    inline uint64_t create_param2 = 0xDF40;
++    inline uint64_t send_message = 0x1677A30;
++    inline uint64_t param1_vtable = 0x84EC9C8; 
++
++    inline uint64_t param2 = 0xA0CE0B0;
++    inline uint64_t param2_1 = 0x8595F58;
++    inline uint64_t param2_2 = 0x8595E98; 
++    inline uint64_t param2_3 = 0x8595DD8; 
++    inline uintptr_t txt_message_ctr = 0x6B2C30; 
++    inline uintptr_t txt_message_vtbl = 0x8279358;
++    inline uint64_t img_msg_vtbl = 0x84F96B8; 
++    inline uint64_t img_msg_vtb2 = 0x84F9748;
+ }
+ 
+ 
+diff --git a/include/offset_resolver.h b/include/offset_resolver.h
+new file mode 100644
+index 0000000..d42fc8c
+--- /dev/null
++++ b/include/offset_resolver.h
+@@ -0,0 +1,20 @@
++// 偏移自动解析：启动时用"特征模式"在 Weixin.dll 里重新定位每个偏移。
++//
++// 为什么要它：hook 原来靠硬编码偏移（如 send_message = 0x1677A30），微信一升级就全废。
++// 现在每个偏移配一条特征（由 scripts/gen-offset-patterns.py 从当前版本提取）：
++//   搜到 → 用新地址（跨版本自适应）；搜不到 → 回退硬编码值（安全兜底，不会崩）。
++//
++// 两类目标的处理：
++//   代码目标：特征就是函数开头若干字节，命中的地址即函数入口。
++//   数据目标：特征是一条**引用它的指令**（形态 + 通配位移），运行时从指令反算真实地址。
++#pragma once
++#include <cstdint>
++
++// 解析全部偏移（启动时调用一次）。返回成功用特征解析出来的个数。
++int ResolveOffsets();
++
++// 取某个偏移的当前值（按名字，找不到返回 0）。仅用于日志/调试。
++uint64_t GetResolvedOffset(const char* name);
++
++// 是否已解析过
++bool OffsetsResolved();
 diff --git a/src/GetSelfProfile.cpp b/src/GetSelfProfile.cpp
 index 5bfc94f..ab7644c 100644
 --- a/src/GetSelfProfile.cpp
@@ -145,8 +313,293 @@ index 41a14a7..8438289 100644
 +
  
  }
+diff --git a/src/inline_weixin_dll_load.cpp b/src/inline_weixin_dll_load.cpp
+index c9fb879..0f86222 100644
+--- a/src/inline_weixin_dll_load.cpp
++++ b/src/inline_weixin_dll_load.cpp
+@@ -1,22 +1,23 @@
+ #include <cstdint>
+ #include <cstdio>
+-#include <string>
+-#include <Windows.h>
+-#include <winternl.h>
+-#include <cstring>
+-#include <sstream>
+-
+-#include "http_server.h"
+-#include "Hook_Method.h"
+-
+-#include "global.h"
+-#include <MinHook.h>
+-#include "tools.h"
+-#include "HookManager.h"
+-#include "json.hpp"
+-#include "wx_ini_reader.h"
+-#include "inline_weixin_dll_load.h"
+-#include "hook_xlog.h"
++#include <string>
++#include <Windows.h>
++#include <winternl.h>
++#include <cstring>
++#include <sstream>
++
++#include "http_server.h"
++#include "Hook_Method.h"
++
++#include "global.h"
++#include "offset_resolver.h"
++#include <MinHook.h>
++#include "tools.h"
++#include "HookManager.h"
++#include "json.hpp"
++#include "wx_ini_reader.h"
++#include "inline_weixin_dll_load.h"
++#include "hook_xlog.h"
+ 
+ 
+ 
+@@ -139,9 +140,9 @@ void Patch_Low_Version_m2()
+ }
+ 
+ 
+-//启用防撤回
+-void Patch_Revoke()
+-{
++//启用防撤回
++void Patch_Revoke()
++{
+     // 计算目标地址
+     DWORD_PTR targetAddress = (DWORD_PTR)g_hWeixinDll + g_Patch_Revoke;
+ 
+@@ -167,8 +168,8 @@ FnWcProbe g_Original = nullptr;
+ 
+ 
+ 
+-void Evt_WeixinLoad()
+-{
++void Evt_WeixinLoad()
++{
+     g_hWeixinDll = GetModuleHandleW(L"Weixin.dll");
+     if (!g_hWeixinDll)
+     {
+@@ -188,10 +189,10 @@ void Evt_WeixinLoad()
+     //过低版本 4.1.8.67
+     //Patch_Low_Version_m2();
+ 
+-    //get base DirPath
+-    //InitStandardPaths();
+-    
+-    Patch_Revoke();
++    //get base DirPath
++    //InitStandardPaths();
++    
++    Patch_Revoke();
+ 
+ 
+     // 创建并启动HTTP服务器
+@@ -202,14 +203,16 @@ void Evt_WeixinLoad()
+     }
+ #ifdef _DEBUG
+     //xLog 日志
+-    Hook_Call(WeixinDll_Offset(0x108678), 5, hook::MyCallHandler_xLog);
++    // 启动时用特征模式重新定位所有偏移（微信升级后自动适配；失败则回退硬编码）
++        ResolveOffsets();
++        Hook_Call(WeixinDll_Offset(g_xlogHookTarget), 5, hook::MyCallHandler_xLog);
+ #endif
+     
+ 
+     
+-    //取回调URL
+-    GetWxRecvUrl();         
+-}
++    //取回调URL
++    GetWxRecvUrl();         
++}
+ 
+ 
+ 
+diff --git a/src/offset_resolver.cpp b/src/offset_resolver.cpp
+new file mode 100644
+index 0000000..5400db6
+--- /dev/null
++++ b/src/offset_resolver.cpp
+@@ -0,0 +1,174 @@
++#include "offset_resolver.h"
++#include "offset_patterns.h"
++#include "global.h"
++
++#include <windows.h>
++#include <psapi.h>
++#include <cstring>
++#include <cstdio>
++#include <string>
++
++// ── 解析结果表（名字 → 当前值），供日志查询 ──────────────────
++namespace {
++    constexpr int MAX_RESOLVED = 64;
++    struct ResolvedEntry { const char* name; uint64_t value; bool fromPattern; };
++    ResolvedEntry g_resolved[MAX_RESOLVED];
++    int g_resolvedCount = 0;
++    bool g_done = false;
++
++    void AddResolved(const char* name, uint64_t value, bool fromPattern) {
++        if (g_resolvedCount >= MAX_RESOLVED) return;
++        g_resolved[g_resolvedCount++] = { name, value, fromPattern };
++    }
++
++    // 通配匹配：模式里 0xFF 表示"任意字节"
++    inline bool MatchAt(const uint8_t* p, const uint8_t* pat, size_t len) {
++        for (size_t i = 0; i < len; i++) {
++            if (pat[i] != 0xFF && p[i] != pat[i]) return false;
++        }
++        return true;
++    }
++
++    // 在 Weixin.dll 映像里扫描特征。用第一个"全非通配的 4 字节窗口"做锚点加速
++    // （否则 174MB 逐字节比对太慢）。返回首个命中地址（绝对），并回填命中数。
++    uint64_t ScanModule(const uint8_t* pat, size_t len, size_t* outCount) {
++        if (outCount) *outCount = 0;
++        if (!g_hWeixinDll || len == 0 || len > 256) return 0;
++
++        HMODULE mod = (HMODULE)g_hWeixinDll;
++        MODULEINFO mi{};
++        if (!GetModuleInformation(GetCurrentProcess(), mod, &mi, sizeof(mi))) return 0;
++        const uint8_t* base = (const uint8_t*)mi.lpBaseOfDll;
++        const size_t size = mi.SizeOfImage;
++        if (!base || size <= len) return 0;
++
++        // 找锚点
++        size_t anchor = SIZE_MAX;
++        for (size_t i = 0; i + 4 <= len; i++) {
++            if (pat[i] != 0xFF && pat[i + 1] != 0xFF && pat[i + 2] != 0xFF && pat[i + 3] != 0xFF) {
++                anchor = i;
++                break;
++            }
++        }
++        if (anchor == SIZE_MAX) return 0;
++
++        const uint8_t a0 = pat[anchor];
++        const uint8_t a1 = pat[anchor + 1];
++        const uint8_t a2 = pat[anchor + 2];
++        const uint8_t a3 = pat[anchor + 3];
++
++        size_t count = 0;
++        uint64_t first = 0;
++        for (size_t off = 0; off + len <= size; ) {
++            // memchr 找第一个字节
++            const uint8_t* start = base + off + anchor;
++            size_t remain = size - (off + anchor);
++            if (remain < 4) break;
++            const uint8_t* hit = (const uint8_t*)memchr(start, a0, remain - 3);
++            if (!hit) break;
++            size_t pos = (size_t)(hit - base) - anchor;
++            if (pos + len > size) break;
++            // 快速校验锚点后 3 字节，再全量比对
++            if (hit[1] == a1 && hit[2] == a2 && hit[3] == a3 && MatchAt(base + pos, pat, len)) {
++                count++;
++                if (!first) first = (uint64_t)(base + pos);
++                if (count > 64) break;      // 命中太多说明特征不够独特，早点退出
++            }
++            off = pos + 1;
++        }
++        if (outCount) *outCount = count;
++        return first;
++    }
++
++    // 名字 → 全局变量：解析成功后直接写回 global.h 里的变量
++    // （这些变量已从 constexpr 改成 inline，可运行时赋值）
++    void ApplyOffset(const char* name, uint64_t value) {
++        std::string n(name);
++        if (n == "XWECHAT_SQLITE3_VFS_OFFSET")           { XWECHAT_SQLITE3_VFS_OFFSET = (size_t)value; return; }
++        if (n == "XWECHAT_SQLITE3_API_ROUTINES_OFFSET")  { XWECHAT_SQLITE3_API_ROUTINES_OFFSET = (size_t)value; return; }
++        if (n == "XWECHAT_SQLCIPHER_API_ROUTINES_OFFSET"){ XWECHAT_SQLCIPHER_API_ROUTINES_OFFSET = (size_t)value; return; }
++        if (n == "XWECHAT_SQLITE3_CODEC_GET_KEY_FUNC")   { XWECHAT_SQLITE3_CODEC_GET_KEY_FUNC = (size_t)value; return; }
++        if (n == "dec_pic_call")                         { offset::dec_pic_call = value; return; }
++        if (n == "create_param2")                        { offset::create_param2 = value; return; }
++        if (n == "send_message")                         { offset::send_message = value; return; }
++        if (n == "param1_vtable")                        { offset::param1_vtable = value; return; }
++        if (n == "param2")                               { offset::param2 = value; return; }
++        if (n == "param2_1")                             { offset::param2_1 = value; return; }
++        if (n == "param2_2")                             { offset::param2_2 = value; return; }
++        if (n == "param2_3")                             { offset::param2_3 = value; return; }
++        if (n == "txt_message_ctr")                      { offset::txt_message_ctr = value; return; }
++        if (n == "txt_message_vtbl")                     { offset::txt_message_vtbl = value; return; }
++        if (n == "img_msg_vtbl")                         { offset::img_msg_vtbl = value; return; }
++        if (n == "img_msg_vtb2")                         { offset::img_msg_vtb2 = value; return; }
++        if (n == "g_Patch_Revoke")                       { g_Patch_Revoke = value; return; }
++        if (n == "xlog_hook_target")                     { g_xlogHookTarget = value; return; }
++        if (n == "XWECHAT_MAIN_CLAZZ_OFFSET")            { g_xwechatMainClazz = value; return; }
++    }
++}
++
++int ResolveOffsets() {
++    if (g_done) return g_resolvedCount;
++    g_done = true;
++    if (!g_hWeixinDll) {
++        OutputDebugStringA("[offset] Weixin.dll 未加载，跳过偏移解析（全部用硬编码值）\n");
++        return 0;
++    }
++
++    int fromPattern = 0;
++    char buf[256];
++    for (size_t i = 0; i < g_offsetPatternCount; i++) {
++        const OffsetPattern& p = g_offsetPatterns[i];
++        size_t matches = 0;
++        uint64_t hit = ScanModule(p.bytes, p.len, &matches);
++        uint64_t value = 0;
++        bool ok = false;
++
++        if (hit) {
++            if (p.ripRelative && p.dispOffset + 4 <= p.len) {
++                // 特征含上下文 → 命中点要换算回指令位置：指令 = hit + (dispOffset-3)，长 7 字节
++                // 指令末尾 = hit + dispOffset + 4；目标 = 指令末尾 + disp
++                int32_t disp = 0;
++                memcpy(&disp, (const void*)(hit + p.dispOffset), 4);
++                value = hit + p.dispOffset + 4 + (int64_t)disp;
++            } else {
++                value = hit - (uint64_t)g_hWeixinDll;   // 代码目标：转成模块偏移
++            }
++            ok = true;
++            fromPattern++;
++        }
++
++        // 数据目标（vtable/VFS 等）用"引用指令 + 反算地址"，风险较高：
++        // 反算错了会把好端端的偏移改坏（实测把 SQLITE3_VFS 改错 → 数据库扫描全废）。
++        // 所以**只对代码目标应用**特征结果；数据目标一律保留硬编码值（等以后有更可靠的校验再加）。
++        if (ok && p.ripRelative) {
++            ok = false;
++        }
++
++        if (ok) {
++            ApplyOffset(p.name, value);
++            AddResolved(p.name, value, true);
++            sprintf_s(buf, "[offset] %-38s 特征命中 %2zu 处 → 0x%llX（硬编码 0x%llX）\n",
++                      p.name, matches, (unsigned long long)value, (unsigned long long)p.fallback);
++        } else {
++            ApplyOffset(p.name, p.fallback);
++            AddResolved(p.name, p.fallback, false);
++            sprintf_s(buf, "[offset] %-38s 特征未命中 → 回退硬编码 0x%llX\n",
++                      p.name, (unsigned long long)p.fallback);
++        }
++        OutputDebugStringA(buf);
++    }
++
++    sprintf_s(buf, "[offset] 偏移解析完成：%d/%zu 个用特征定位成功（其余回退硬编码）\n",
++              fromPattern, g_offsetPatternCount);
++    OutputDebugStringA(buf);
++    return fromPattern;
++}
++
++uint64_t GetResolvedOffset(const char* name) {
++    for (int i = 0; i < g_resolvedCount; i++) {
++        if (strcmp(g_resolved[i].name, name) == 0) return g_resolved[i].value;
++    }
++    return 0;
++}
++
++bool OffsetsResolved() { return g_done; }
 diff --git a/x64_Version_dll.vcxproj b/x64_Version_dll.vcxproj
-index 037b10d..8fe7ab8 100644
+index 037b10d..426183b 100644
 --- a/x64_Version_dll.vcxproj
 +++ b/x64_Version_dll.vcxproj
 @@ -1,4 +1,4 @@
@@ -186,6 +639,85 @@ index 037b10d..8fe7ab8 100644
      <WholeProgramOptimization>false</WholeProgramOptimization>
      <CharacterSet>Unicode</CharacterSet>
    </PropertyGroup>
+@@ -73,12 +73,12 @@
+   </ImportGroup>
+   <PropertyGroup Label="UserMacros" />
+   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
+-    <IncludePath>.\xdb;.\minhook\src\hde;.\minhook\src;.\minhook\include;.\include;.\3rdparty;$(IncludePath)</IncludePath>
++    <IncludePath>.\xdb;.\minhook\src\hde;.\minhook\src;.\minhook\include;.\include;.\3rdparty;$(IncludePath)</IncludePath>
+     <TargetName>version</TargetName>
+     <EnableClServerMode>false</EnableClServerMode>
+   </PropertyGroup>
+   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+-    <IncludePath>.\xdb;.\minhook\src\hde;.\minhook\src;.\minhook\include;.\include;.\3rdparty;$(IncludePath)</IncludePath>
++    <IncludePath>.\xdb;.\minhook\src\hde;.\minhook\src;.\minhook\include;.\include;.\3rdparty;$(IncludePath)</IncludePath>
+     <TargetName>version</TargetName>
+     <EnableClServerMode>false</EnableClServerMode>
+   </PropertyGroup>
+@@ -120,11 +120,11 @@
+     <ClCompile>
+       <WarningLevel>Level3</WarningLevel>
+       <SDLCheck>true</SDLCheck>
+-      <PreprocessorDefinitions>_DEBUG;X64VERSIONDLL_EXPORTS;_WINDOWS;_USRDLL;%(PreprocessorDefinitions)</PreprocessorDefinitions>
++      <PreprocessorDefinitions>_DEBUG;X64VERSIONDLL_EXPORTS;_WINDOWS;_USRDLL;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+       <PrecompiledHeader>NotUsing</PrecompiledHeader>
+       <PrecompiledHeaderFile>pch.h</PrecompiledHeaderFile>
+       <LanguageStandard>stdcpp20</LanguageStandard>
+-      <AdditionalIncludeDirectories>%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
++      <AdditionalIncludeDirectories>%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+       <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
+       <ExceptionHandling>Async</ExceptionHandling>
+       <MultiProcessorCompilation>true</MultiProcessorCompilation>
+@@ -137,8 +137,8 @@
+       <EnableUAC>false</EnableUAC>
+       <ModuleDefinitionFile>version.def</ModuleDefinitionFile>
+       <LinkIncremental>true</LinkIncremental>
+-      <AdditionalLibraryDirectories>.\lib</AdditionalLibraryDirectories>
+-      <AdditionalDependencies>psapi.lib;gdiplus.lib;%(AdditionalDependencies)</AdditionalDependencies>
++      <AdditionalLibraryDirectories>.\lib</AdditionalLibraryDirectories>
++      <AdditionalDependencies>psapi.lib;gdiplus.lib;%(AdditionalDependencies)</AdditionalDependencies>
+       <IgnoreSpecificDefaultLibraries>LIBCMT</IgnoreSpecificDefaultLibraries>
+     </Link>
+   </ItemDefinitionGroup>
+@@ -148,11 +148,11 @@
+       <FunctionLevelLinking>true</FunctionLevelLinking>
+       <IntrinsicFunctions>true</IntrinsicFunctions>
+       <SDLCheck>true</SDLCheck>
+-      <PreprocessorDefinitions>NDEBUG;X64VERSIONDLL_EXPORTS;_WINDOWS;_USRDLL;%(PreprocessorDefinitions)</PreprocessorDefinitions>
++      <PreprocessorDefinitions>NDEBUG;X64VERSIONDLL_EXPORTS;_WINDOWS;_USRDLL;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+       <PrecompiledHeader>NotUsing</PrecompiledHeader>
+       <PrecompiledHeaderFile>pch.h</PrecompiledHeaderFile>
+       <LanguageStandard>stdcpp20</LanguageStandard>
+-      <AdditionalIncludeDirectories>%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
++      <AdditionalIncludeDirectories>%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+       <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
+       <ExceptionHandling>Async</ExceptionHandling>
+       <MultiProcessorCompilation>true</MultiProcessorCompilation>
+@@ -163,8 +163,8 @@
+       <GenerateDebugInformation>true</GenerateDebugInformation>
+       <EnableUAC>false</EnableUAC>
+       <ModuleDefinitionFile>version.def</ModuleDefinitionFile>
+-      <AdditionalLibraryDirectories>.\lib</AdditionalLibraryDirectories>
+-      <AdditionalDependencies>psapi.lib;gdiplus.lib;%(AdditionalDependencies)</AdditionalDependencies>
++      <AdditionalLibraryDirectories>.\lib</AdditionalLibraryDirectories>
++      <AdditionalDependencies>psapi.lib;gdiplus.lib;%(AdditionalDependencies)</AdditionalDependencies>
+       <IgnoreSpecificDefaultLibraries>LIBCMT</IgnoreSpecificDefaultLibraries>
+       <LinkTimeCodeGeneration>Default</LinkTimeCodeGeneration>
+       <OptimizeReferences>true</OptimizeReferences>
+@@ -207,6 +207,7 @@
+     <ClCompile Include="minhook\src\hde\hde64.c" />
+     <ClCompile Include="minhook\src\hook.c" />
+     <ClCompile Include="minhook\src\trampoline.c" />
++    <ClCompile Include="src\offset_resolver.cpp" />
+     <ClCompile Include="src\ForwardXMLMsg.cpp" />
+     <ClCompile Include="src\GetSelfProfile.cpp" />
+     <ClCompile Include="src\HookManager.cpp" />
+@@ -242,4 +243,4 @@
+   <ImportGroup Label="ExtensionTargets">
+     <Import Project="$(VCTargetsPath)\BuildCustomizations\masm.targets" />
+   </ImportGroup>
+-</Project>
++</Project>
 diff --git a/xdb/db_mgr.cpp b/xdb/db_mgr.cpp
 index 60bf5ba..cd331af 100644
 --- a/xdb/db_mgr.cpp
