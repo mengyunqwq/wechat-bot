@@ -646,11 +646,19 @@ let res = await callLlm(route, sys, usr, undefined)
     const quiet = isQuiet(quietWindows)
     const d = r.policy.decide({ priority, quiet, text: trigger.text || '' })
     if (!d.reply) {
-      stats.skipped++
-      log(`不回（${d.reason}）｜${r.roomName}｜${trigger.senderName}: ${trigger.text}`)
-      return
+      // 闲聊概率没命中 → **不再直接跳过**，继续交给模型判断
+      // （用户要求：不必每句都回，但每句都要看，由它理解后决定）
+      // 只有硬性原因才真跳过：频率上限 / 冷却中 / 刚连续自言自语 / 低信息量 / 重复
+      const hardBlock = /上限|冷却|连续发言|低信息|太短|重复|刷屏/.test(String(d.reason || ''))
+      if (hardBlock) {
+        stats.skipped++
+        log(`不回（${d.reason}）｜${r.roomName}｜${trigger.senderName}: ${trigger.text}`)
+        return
+      }
+      log(`交模型判断（${d.reason}）｜${r.roomName}｜${trigger.senderName}: ${trigger.text}`)
+    } else {
+      log(`决定回（${d.reason}）｜${r.roomName}｜${trigger.senderName}: ${trigger.text}`)
     }
-    log(`决定回（${d.reason}）｜${r.roomName}｜${trigger.senderName}: ${trigger.text}`)
 
     // 防重复①：这句话（归一化后）最近已经回过 → 不再回
     // （群里常见"有人把同一句/同一个问题重复发"，复读式回答最不像人）
@@ -729,6 +737,13 @@ let res = await callLlm(route, sys, usr, undefined)
       '铁律：绝不谈论任何系统或技术内部信息——接口名、数据库、日志、偏移量、配置文件、'
         + '测试内容、你自己的实现细节，一律不提、不复述、不评论。群里只当一个普通群友聊天。'
         + '有人问你是不是机器人/AI，就按人设自然带过，不解释实现。',
+      // 接话判断：把"要不要回"交给模型理解，而不是靠概率。
+      '接话判断（很重要）：每次先想一句"这条要不要我接"。',
+      '  · 跟你无关的闲聊、别人之间的对话、纯表情/图片刷屏、别人已经答过的问题 → 只输出 [不回]。',
+      '    我收到 [不回] 就什么都不发（这不算失礼，真人在群里也不会句句插嘴）。',
+      '  · 但**有人 @ 你、有人点你的名字（大肥鱼/肥鱼/蓝鱼）、或者正在跟你一来一回聊天时**，',
+      '    **必须回**，绝对不许输出 [不回]。',
+      '  · 拿不准的时候：如果是冲着你来的、或者你接一句会让气氛更好，就回；纯路人闲聊就别硬插。',
       '',
       '怎么说话（违反就露馅）：',
       `1. 短。绝大多数回复 2~12 个字，最多 ${config.maxReplyChars} 字。中文短句，少量语气词。`,
@@ -1032,6 +1047,19 @@ let res = await callLlm(route, sys, usr, undefined)
         log('搜索没拿到结果，按没搜到回')
         cleaned = sdir.text || '我查不到欸'
       }
+    }
+
+    // ── 模型判断"这条不用我接" → 它输出 [不回] ──
+    // 非硬性场景：返回空文本，调用方会自动不发（见 evaluate 里 `!reply?.text` 的判断）。
+    // 硬性场景（被@/被点名/正在对话）：忽略哨兵，用兜底话术保证"必回"。
+    if (/\[\s*(不回|不回复|skip|SKIP)\s*\]/.test(cleaned)) {
+      const hard = ['at', 'name', 'continuation'].includes(priority)
+      if (!hard) {
+        log(`模型判断不接话（${priority}）→ 不发`)
+        return { text: '', stickerOnly: false, wantSticker: false, skip: true }
+      }
+      log(`硬性必回（${priority}）但模型想跳过 → 用兜底话术`)
+      cleaned = pickCanned(priority) || '嗯嗯'
     }
 
     // 表情指令：从任意位置抠出 [表情]/[表情:情绪]/[表情:情绪|场景|气泡]，并从正文里删掉。
