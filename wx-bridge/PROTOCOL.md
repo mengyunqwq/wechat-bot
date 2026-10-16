@@ -59,7 +59,7 @@
 ### 请求 / 应答
 
 ```
-客户端 → 服务端：{"id":"1","op":"sendText","roomId":"47390425951@chatroom","text":"你好"}
+客户端 → 服务端：{"id":"1","op":"sendText","roomId":"12345678@chatroom","text":"你好"}
 服务端 → 客户端：{"t":"reply","id":"1","op":"sendText","ok":true,"result":{"rc":0}}
 失败时：        {"t":"reply","id":"1","op":"sendText","ok":false,"error":"..."}
 ```
@@ -122,20 +122,20 @@ curl http://127.0.0.1:17300/api/status
 
 # 群列表 / 群成员
 curl http://127.0.0.1:17300/api/rooms
-curl "http://127.0.0.1:17300/api/members?room=47390425951@chatroom"
+curl "http://127.0.0.1:17300/api/members?room=12345678@chatroom"
 
 # 读消息
-curl "http://127.0.0.1:17300/api/messages?room=47390425951@chatroom&limit=20"
+curl "http://127.0.0.1:17300/api/messages?room=12345678@chatroom&limit=20"
 
 # 发文字
 curl -X POST http://127.0.0.1:17300/api/send \
   -H 'content-type: application/json' \
-  -d '{"room":"47390425951@chatroom","text":"大家好"}'
+  -d '{"room":"12345678@chatroom","text":"大家好"}'
 
 # 发表情包（按语境挑一张）
 curl -X POST http://127.0.0.1:17300/api/sticker/send \
   -H 'content-type: application/json' \
-  -d '{"room":"47390425951@chatroom","text":"好累"}'
+  -d '{"room":"12345678@chatroom","text":"好累"}'
 
 # 生成表情包
 curl -X POST http://127.0.0.1:17300/api/sticker/gen \
@@ -144,7 +144,7 @@ curl -X POST http://127.0.0.1:17300/api/sticker/gen \
 
 # 取并解密群里最近的图
 curl -X POST http://127.0.0.1:17300/api/image \
-  -H 'content-type: application/json' -d '{"room":"47390425951@chatroom"}'
+  -H 'content-type: application/json' -d '{"room":"12345678@chatroom"}'
 ```
 
 `room` 参数可以是 **群名**、**roomId**，只有一个群时留空。所有响应都是 JSON。
@@ -172,7 +172,7 @@ curl -X POST http://127.0.0.1:17300/api/image \
 
 ```json
 {
-  "room": { "id": "47390425951@chatroom", "name": "某某群" },
+  "room": { "id": "12345678@chatroom", "name": "某某群" },
   "trigger": { "sender": "wxid_xxx", "senderName": "梦云", "text": "在吗", "typeName": "text", "isAtMe": true },
   "recent": [ { "senderName": "梦云", "text": "…" } ],
   "members": [ { "wxid": "wxid_xxx", "name": "梦云" } ],
@@ -201,13 +201,13 @@ agent 期望的响应：
 # 该不该回这条消息？
 curl -X POST http://127.0.0.1:17300/api/policy/decide \
   -H 'content-type: application/json' \
-  -d '{"room":"47390425951@chatroom","sender":"wxid_xxx","text":"在吗","priority":"at"}'
+  -d '{"room":"12345678@chatroom","sender":"wxid_xxx","text":"在吗","priority":"at"}'
 # → {"reply":true,"reason":"被@（必回）","delayMs":1200}
 
 # 帮我把这句话"拟人地"发出去（延迟 + 拆条）
 curl -X POST http://127.0.0.1:17300/api/policy/deliver \
   -H 'content-type: application/json' \
-  -d '{"room":"47390425951@chatroom","text":"在呢\n刚才在忙","priority":"at"}'
+  -d '{"room":"12345678@chatroom","text":"在呢\n刚才在忙","priority":"at"}'
 # → {"sent":2,"parts":["在呢","刚才在忙"],"totalDelayMs":3400}
 ```
 

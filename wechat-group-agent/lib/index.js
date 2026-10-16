@@ -55,7 +55,7 @@ function normText(s) {
 
 /**
  * 为什么自己造消息对象而**不** import @deepseek-ai/dsh-llm：
- * 插件装在 profile 的 node_modules 下（D:\dsh\data\profiles\web\node_modules\@dsh-external\...），
+ * 插件装在 DSH profile 的 node_modules 下，
  * 它的祖先链里没有 @deepseek-ai/*（那些在 npx-cache 里），模块级裸 import 会直接抛
  * ERR_MODULE_NOT_FOUND，插件根本加载不起来（表现为 loader 里的 [no-fiber]）。
  * 已注入的 dsh-video-gen 也是同样的"零外部依赖"写法。
@@ -182,7 +182,6 @@ export function apply(ctx, rawConfig) {
 function applyInner(ctx, rawConfig) {
   const config = { ...DEFAULT_CONFIG, ...(rawConfig ?? {}) }
   const SHORT = 'dsh-wechat-bot'
-const BUILD_VER = '2026-10-16.2'   // 带版本号的实例才允许踢掉旧连接（旧代码没这个字段）
   const dshHome = process.env.DSH_HOME || join(homedir(), '.dsh')
   const logFile = config.logFile || join(dshHome, 'super-injector', SHORT + '.log')
   const memoryDir = config.memoryDir || join(dshHome, 'wechat-bot', 'memory')
@@ -239,7 +238,7 @@ const namesFile = join(dirname(memoryDir), 'members.json')
     rooms.set(roomId, r)
     loadMemory(r)
     loadFacts(r)      // 载入长期记忆（本地文件，重启不丢）
-    void syncMembers(r)   // 拉群成员昵称（内部有 10 分钟节流，别 force，否则每次建房都拉一次会拖垮桥）
+    void syncMembers(r)   // 拉群成员昵称（内部有 10 分钟节流；别 force，否则每次建房都拉一次会拖垮桥）
     return r
   }
 
