@@ -303,6 +303,24 @@ const namesFile = join(dirname(memoryDir), 'members.json')
       case 'logout':
         log('微信已登出，等待重新注入')
         break
+      case 'wake': {
+        // 桥说数据库打不开了 → 自己发一句话，让微信写库、打开 message_0.db，轮询随即恢复。
+        // 这样**不用重启客户端**（重启可能要手机确认登录，用户明确说不想手动点）。
+        void (async () => {
+          try {
+            if (isQuiet(quietWindows)) { log('wake：安静时段，不冒泡（等白天）'); return }
+            const rooms = [...rooms.values()].filter((r) => r && r.roomId && r.roomId.endsWith('@chatroom'))
+            if (!rooms.length) { log('wake：还没有已知的群，跳过'); return }
+            const room = rooms[rooms.length - 1]
+            const text = pickProactive() || '我回来啦'
+            log(`wake：往「${room.roomName || room.roomId}」发一句唤醒数据库 → ${text}`)
+            await client.call('sendText', { roomId: room.roomId, text }, 30_000)
+          } catch (e) {
+            log('wake 失败：' + String(e?.message || e))
+          }
+        })()
+        break
+      }
       case 'error':
         log('bridge 错误：' + evt.message)
         break

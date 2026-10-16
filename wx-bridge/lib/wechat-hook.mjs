@@ -322,6 +322,12 @@ export class WeChatHookBridge {
         this.log('数据库轮询启动失败（第 ' + attempt + ' 次）：' + String(e?.message || e).slice(0, 90))
         // message_0.db 是**懒加载**的：微信只有在收发消息之后才会打开它。
         // 所以"失败就放弃"是错的 —— 必须一直重试，等群里来消息（或自己发一条）后自然就绪。
+        // 连续失败到第 4 次 → 请上层"唤醒"一下数据库（让机器人自己发条消息，
+        // 微信就会写库、打开 message_0.db，轮询随即恢复）。这样**不用重启客户端**，
+        // 也就不会触发"要手机确认登录"那一步。
+        if (attempt === 4 && typeof this.onNeedWake === 'function') {
+          try { this.onNeedWake() } catch { /* ignore */ }
+        }
         const wait = attempt <= 5 ? 15000 : 60000
         if (attempt <= 3 || attempt % 10 === 0) {
           this.log('数据库轮询等待中就绪（第 ' + attempt + ' 次，' + (wait / 1000) + 's 后重试）：' + String(e?.message || e).slice(0, 70))

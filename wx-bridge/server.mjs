@@ -498,6 +498,14 @@ async function handle(op, a = {}) {
 
 // ── HTTP + WS 服务 ──────────────────────────────────────────
 // 托管模式：别的 agent 只提供"说什么"，桥负责"像不像人"（见 lib/hosted.mjs）
+// 数据库长时间打不开时，请插件"自己说一句"来唤醒它（比重启客户端温和，且不需要手机确认）
+if (typeof bridge === 'object' && bridge) {
+  bridge.onNeedWake = () => {
+    log('数据库打不开 → 广播 wake，让插件自己发一句把库唤醒')
+    broadcast({ t: 'wake' })
+  }
+}
+
 const hosted = new HostedMode({
   handle: (op, args) => handle(op, args || {}),
   log: (t) => log('[托管] ' + t),
