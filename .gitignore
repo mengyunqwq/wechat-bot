@@ -1,0 +1,12 @@
+node_modules/
+data/
+logs/
+*.log
+*.tgz
+__pycache__/
+*.pyc
+*.stale
+config.json
+.DS_Store
+version.dll
+*.dll

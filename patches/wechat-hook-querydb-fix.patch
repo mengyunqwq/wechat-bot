@@ -1,0 +1,269 @@
+diff --git a/src/GetSelfProfile.cpp b/src/GetSelfProfile.cpp
+index 5bfc94f..ab7644c 100644
+--- a/src/GetSelfProfile.cpp
++++ b/src/GetSelfProfile.cpp
+@@ -27,6 +27,12 @@ void RegisterGetSelfProfile(httplib::Server& svr)
+         {
+             json resp;
+ 
++            // 双保险：能取到自己的 wxid 就说明已登录，顺手把标志置上
++            // （上游 g_IsLogin 永远为 0，导致 QueryDB 一直不可用）
++            if (!SelfInfo.wxid.empty()) {
++                g_IsLogin = 1;
++            }
++
+             resp["wxid"] = SelfInfo.wxid;
+             resp["alias"] = SelfInfo.alias;
+             resp["nickname"] = SelfInfo.nickname;
+diff --git a/src/QueryDB.cpp b/src/QueryDB.cpp
+index 41a14a7..8438289 100644
+--- a/src/QueryDB.cpp
++++ b/src/QueryDB.cpp
+@@ -4,11 +4,47 @@
+ #include "tools.h"
+ #include "global.h"
+ #include "db_mgr.h"
++#include "SundaySearch.h"
+ 
+ #include "QueryDB.h"
+ 
+ 
+ using json = nlohmann::json;
++
++// ── 调试辅助（用 IsBadReadPtr 守卫，不用 SEH：__try 不能和带析构的 C++ 对象共存）──
++static size_t SafeModuleSize(size_t base)
++{
++    if (IsBadReadPtr((LPVOID)base, sizeof(IMAGE_DOS_HEADER))) return 0;
++    auto dos = (IMAGE_DOS_HEADER*)base;
++    if (dos->e_magic != IMAGE_DOS_SIGNATURE) return 0;
++    if (IsBadReadPtr((LPVOID)(base + dos->e_lfanew), sizeof(IMAGE_NT_HEADERS))) return 0;
++    auto nt = (IMAGE_NT_HEADERS*)(base + dos->e_lfanew);
++    if (nt->Signature != IMAGE_NT_SIGNATURE) return 0;
++    return nt->OptionalHeader.SizeOfImage;
++}
++
++static int SafeCountPtrsInModule(size_t base, size_t modSize, uint64_t* out8)
++{
++    const size_t addr = base + XWECHAT_SQLITE3_API_ROUTINES_OFFSET;
++    if (IsBadReadPtr((LPVOID)addr, 8 * sizeof(void*))) return -1;
++    auto** p = (void**)addr;
++    int inMod = 0;
++    for (int i = 0; i < 8; i++) {
++        uint64_t v = (uint64_t)p[i];
++        out8[i] = v;
++        if (modSize && v > base && v < base + modSize) inMod++;
++    }
++    return inMod;
++}
++
++// ScanPattern 内部用 ReadProcessMemory（读不了就跳过），本身是安全的
++static int SafeScanHits(size_t base)
++{
++    std::vector<LPVOID> hits;
++    size_t vfsVal = base + XWECHAT_SQLITE3_VFS_OFFSET;
++    ScanPattern(GetCurrentProcess(), (BYTE*)&vfsVal, sizeof(LPVOID), hits);
++    return (int)hits.size();
++}
+ //static xmgr::DatabaseMgr& g_dbMgr = xmgr::DatabaseMgr::getInstance();
+ 
+ static std::string BytesToHex(const uint8_t* data, size_t len)
+@@ -133,5 +169,77 @@ void Route_QueryDB(httplib::Server& svr)
+         res.set_content(resp.dump(4, ' ', false), "application/json");
+         });
+ 
++    // ── 调试路由：判断偏移对不对、扫描能不能命中 ──────────────────
++    // 用来定位 "GetAllDBName 返回 []" 的根因：是偏移错了，还是扫描没命中，
++    // 还是客户端根本没打开数据库。
++    svr.Get("/QueryDB/debug", [](const httplib::Request&, httplib::Response& res) {
++        json j;
++        const size_t base = (size_t)g_hWeixinDll;
++        j["base"] = (uint64_t)base;
++        j["IsLogin"] = g_IsLogin;
++
++        const size_t modSize = SafeModuleSize(base);
++        j["module_size"] = (uint64_t)modSize;
++
++        // ① 校验 sqlite3_api_routines 偏移：结构体开头是一串函数指针，
++        //    偏移正确的话它们应该全部落在 Weixin.dll 代码段内。
++        const size_t rtAddr = base + XWECHAT_SQLITE3_API_ROUTINES_OFFSET;
++        j["api_routines_addr"] = (uint64_t)rtAddr;
++        uint64_t ptrs[8] = { 0 };
++        const int inMod = SafeCountPtrsInModule(base, modSize, ptrs);
++        json jp = json::array();
++        for (int i = 0; i < 8; i++) jp.push_back(ptrs[i]);
++        j["api_first_ptrs"] = jp;
++        j["api_ptrs_in_module"] = inMod;          // 期望 8
++
++        // ② VFS 偏移处的值
++        const size_t vfsAddr = base + XWECHAT_SQLITE3_VFS_OFFSET;
++        j["vfs_addr"] = (uint64_t)vfsAddr;
++        j["vfs_value"] = IsBadReadPtr((LPVOID)vfsAddr, sizeof(void*)) ? 0 : (uint64_t)*(void**)vfsAddr;
++
++        // ③ 实跑一遍扫描，看命中多少候选
++        j["scan_hits"] = SafeScanHits(base);
++
++        // ③b 逐个候选查详情：是假命中，还是真句柄但取不到数据库名
++        {
++            json detail = json::array();
++            auto* rt = xmgr::DatabaseMgr::getInstance().getSqlite3Rountines();
++            std::vector<LPVOID> hits;
++            size_t vfsVal = base + XWECHAT_SQLITE3_VFS_OFFSET;
++            ScanPattern(GetCurrentProcess(), (BYTE*)&vfsVal, sizeof(LPVOID), hits);
++            int n = 0;
++            for (auto h : hits) {
++                if (n++ >= 8) break;
++                json d;
++                d["handle"] = (uint64_t)h;
++                const bool bad = IsBadReadPtr(h, sizeof(void*)) != 0;
++                d["bad_ptr"] = bad;
++                if (!bad && rt) {
++                    d["errcode"] = rt->errcode(h);
++                    sqlite3_stmt* stmt = nullptr;
++                    int rc = rt->prepare(h, "PRAGMA database_list", -1, &stmt, 0);
++                    d["prepare_rc"] = rc;
++                    if (rc == SQLITE_OK && stmt) {
++                        json rows = json::array();
++                        int guard = 0;
++                        while (rt->step(stmt) == SQLITE_ROW && guard++ < 20) {
++                            const unsigned char* t0 = rt->column_text(stmt, 0);
++                            const unsigned char* t1 = rt->column_text(stmt, 1);
++                            rows.push_back(std::string(t0 ? (const char*)t0 : "") + "|" + std::string(t1 ? (const char*)t1 : ""));
++                        }
++                        rt->finalize(stmt);
++                        d["rows"] = rows;
++                    }
++                }
++                detail.push_back(d);
++            }
++            j["scan_detail"] = detail;
++        }
++
++        // ④ 扫描结果里的数据库
++        j["dbs"] = xmgr::DatabaseMgr::getInstance().getDatabaseInfo();
++        res.set_content(j.dump(2, ' ', false), "application/json");
++        });
++
+ 
+ }
+diff --git a/x64_Version_dll.vcxproj b/x64_Version_dll.vcxproj
+index 037b10d..8fe7ab8 100644
+--- a/x64_Version_dll.vcxproj
++++ b/x64_Version_dll.vcxproj
+@@ -1,4 +1,4 @@
+-﻿<?xml version="1.0" encoding="utf-8"?>
++<?xml version="1.0" encoding="utf-8"?>
+ <Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+   <ItemGroup Label="ProjectConfigurations">
+     <ProjectConfiguration Include="Debug|Win32">
+@@ -30,26 +30,26 @@
+   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'" Label="Configuration">
+     <ConfigurationType>DynamicLibrary</ConfigurationType>
+     <UseDebugLibraries>true</UseDebugLibraries>
+-    <PlatformToolset>v145</PlatformToolset>
++    <PlatformToolset>v143</PlatformToolset>
+     <CharacterSet>Unicode</CharacterSet>
+   </PropertyGroup>
+   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'" Label="Configuration">
+     <ConfigurationType>DynamicLibrary</ConfigurationType>
+     <UseDebugLibraries>false</UseDebugLibraries>
+-    <PlatformToolset>v145</PlatformToolset>
++    <PlatformToolset>v143</PlatformToolset>
+     <WholeProgramOptimization>true</WholeProgramOptimization>
+     <CharacterSet>Unicode</CharacterSet>
+   </PropertyGroup>
+   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'" Label="Configuration">
+     <ConfigurationType>DynamicLibrary</ConfigurationType>
+     <UseDebugLibraries>true</UseDebugLibraries>
+-    <PlatformToolset>v145</PlatformToolset>
++    <PlatformToolset>v143</PlatformToolset>
+     <CharacterSet>Unicode</CharacterSet>
+   </PropertyGroup>
+   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'" Label="Configuration">
+     <ConfigurationType>DynamicLibrary</ConfigurationType>
+     <UseDebugLibraries>false</UseDebugLibraries>
+-    <PlatformToolset>v145</PlatformToolset>
++    <PlatformToolset>v143</PlatformToolset>
+     <WholeProgramOptimization>false</WholeProgramOptimization>
+     <CharacterSet>Unicode</CharacterSet>
+   </PropertyGroup>
+diff --git a/xdb/db_mgr.cpp b/xdb/db_mgr.cpp
+index 60bf5ba..756485a 100644
+--- a/xdb/db_mgr.cpp
++++ b/xdb/db_mgr.cpp
+@@ -184,18 +184,23 @@ namespace xmgr {
+ 
+ 	const std::map<std::string, LPVOID>& DatabaseMgr::searchDatabases() {
+ 		std::lock_guard<std::mutex> lg(m_searchDbMtx);
+-		if (!g_IsLogin) {
+-			m_dbs.clear();
+-			return m_dbs;
+-		}
+-		for (auto& it : m_dbs) {
+-			if (IsBadReadPtr(it.second, sizeof(LPVOID)) || m_sqlite3Rountines->errcode(it.second) == SQLITE_MISUSE) {
+-				m_dbs.clear();
+-				break;
+-			}
+-		}
++		// ── 修复上游 bug ──────────────────────────────────────────────
++		// 原版：if (!g_IsLogin) { m_dbs.clear(); return m_dbs; }
++		// 但全项目**没有任何地方把 g_IsLogin 置 1**（AfterLoginInitThread 定义了却从未被调用），
++		// 于是 QueryDB 永远返回空 —— 表现就是 GetAllDBName 返回 []、
++		// execute 报 "get database handle which named MicroDB.db failed"。
++		// 改成自愈：不靠这个标志，直接扫描；扫到数据库就反推"已登录"。
+ 		if (m_dbs.size() > 0) {
+-			return m_dbs;
++			for (auto& it : m_dbs) {
++				if (IsBadReadPtr(it.second, sizeof(LPVOID)) || m_sqlite3Rountines->errcode(it.second) == SQLITE_MISUSE) {
++					m_dbs.clear();
++					break;
++				}
++			}
++			if (m_dbs.size() > 0) {
++				g_IsLogin = 1;      // 句柄还有效 → 已登录
++				return m_dbs;
++			}
+ 		}
+ 		std::vector<LPVOID> results;
+ 		size_t vfs_addr = (size_t)g_hWeixinDll + XWECHAT_SQLITE3_VFS_OFFSET;
+@@ -206,7 +211,14 @@ namespace xmgr {
+ 				int rc = m_sqlite3Rountines->errcode(result);
+ 				if (rc == SQLITE_OK) {
+ 					nlohmann::ordered_json queryResult = execute(result, "PRAGMA database_list");
+-					std::string dbpath = queryResult["data"][0]["file"].get<std::string>();
++					// 加固：候选句柄里大多数不是真数据库，data 可能是空数组/null，
++					// 原来直接 ["data"][0]["file"].get<string>() 会抛异常，把整个扫描打断。
++					if (!queryResult.contains("data") || !queryResult["data"].is_array() || queryResult["data"].empty())
++						continue;
++					auto& row = queryResult["data"][0];
++					if (!row.contains("file") || !row["file"].is_string())
++						continue;
++					std::string dbpath = row["file"].get<std::string>();
+ 					if (dbpath.empty())
+ 						continue;
+ 					auto pos = dbpath.find_last_of("\\");
+@@ -215,6 +227,10 @@ namespace xmgr {
+ 				}
+ 			}
+ 		}
++		// 扫到任何数据库就说明已经登录了（自愈，见上面的说明）
++		if (m_dbs.size() > 0) {
++			g_IsLogin = 1;
++		}
+ 		return m_dbs;
+ 	}
+ 
+@@ -228,12 +244,8 @@ namespace xmgr {
+ 
+ 	nlohmann::ordered_json DatabaseMgr::getDatabaseInfo() {
+ 		nlohmann::ordered_json jdbs = nlohmann::ordered_json::array();
+-		if (!g_IsLogin)
+-		{
+-			//OutputDebugStringA("[getDatabaseInfo] 用户未登录\n");
+-			return jdbs;
+-		}
+-			// do force research
++		// 原版这里有 if (!g_IsLogin) return jdbs; —— 但 g_IsLogin 永远为 0，
++		// 首次调用必然返回空。去掉这个门（扫描本身会判断有没有数据库）。
+ 
+ 		//OutputDebugStringA("[getDatabaseInfo] 用户已登录\n");
+ 

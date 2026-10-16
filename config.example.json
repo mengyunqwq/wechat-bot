@@ -1,0 +1,20 @@
+{
+  "wechatExe": "D:\\wxhook\\wx4110\\Weixin.exe",
+  "apiPort": 30001,
+  "cbPort": 18998,
+  "bridgePort": 17300,
+  "pythonExe": "python",
+  "dataDir": "./data",
+  "wechatAttachDir": "",
+  "hosted": {
+    "enabled": false,
+    "webhookUrl": "",
+    "botName": "蓝色大肥鱼",
+    "aliases": ["大肥鱼", "肥鱼"],
+    "replyProbability": 0.3,
+    "minReplyGapMs": 6000,
+    "maxRepliesPer10Min": 15,
+    "quietHours": "23:00-08:00",
+    "quietAllow": ["at", "name"]
+  }
+}
