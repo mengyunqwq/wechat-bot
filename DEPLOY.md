@@ -191,7 +191,7 @@ curl -X POST http://127.0.0.1:17300/api/hosted -H 'content-type: application/jso
 > 下面是一段给 AI agent 的可执行说明。**请逐条执行并在每步后验证**，不要跳步。
 
 ```
-任务：在本机部署 dsh-wechat-bot（微信群聊机器人）。系统是 Windows。请按顺序执行，每步验证后再继续。
+务务：在本机部署 dsh-wechat-bot（微信群聊机器人）。系统是 Windows。请按顺序执行，每步验证后再继续。
 
 前置检查：
 1. 确认 node -v >= 18、python --version >= 3.10；缺则用 winget 安装。
@@ -227,6 +227,6 @@ curl -X POST http://127.0.0.1:17300/api/hosted -H 'content-type: application/jso
 ## 8. 可选：常驻运行
 
 ```powershell
-# 用任务计划程序开机自启（示例）
+# 用务务计划程序开机自启（示例）
 schtasks /create /tn "wx-bridge" /tr "node <绝对路径>\wx-bridge\server.mjs" /sc onlogon /rl highest
 ```

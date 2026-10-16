@@ -1,4 +1,4 @@
-# dsh-wechat-bot · 微信群聊拟人机器人
+# 微信机器人
 
 把微信变成一个有性格、有记忆、会发表情包、看得懂图的**群聊机器人**，并提供 **MCP / WebSocket / HTTP** 三种接口，让**任意 AI agent** 都能驱动它。
 
@@ -69,8 +69,8 @@
 ```powershell
 # 1) 前置：Node 18+、Python 3.10+（含 pycryptodome）
 # 2) 克隆
-git clone <本仓库地址> dsh-wechat-bot
-cd dsh-wechat-bot
+git clone <本仓库地址> wechat-bot
+cd wechat-bot
 
 # 3) 一键安装（装依赖 + 生成配置模板 + 检查环境）
 powershell -ExecutionPolicy Bypass -File .\install.ps1
