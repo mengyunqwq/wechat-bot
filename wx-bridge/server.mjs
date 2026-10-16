@@ -144,7 +144,7 @@ if (MOCK) {
     apiPort: Number(opt('api-port', '30001')),
     pollMs: Number(opt('poll-ms', '1500')),
     stickers, dataDir: DATA_DIR,
-    wechatExe: opt('wechat', process.env.WECHAT_EXE || ''),
+    wechatExe: opt('wechat', 'D:\\wxhook\\hook-run\\Weixin.exe'),
     emit: (e, p) => events[e]?.(p),
     log: (s) => log(s),
   })
@@ -173,10 +173,10 @@ if (MOCK) {
     sockPort: Number(opt('sock-port', '18999')),
     httpPort: Number(opt('cb-port', '18998')),
     stickers, dataDir: DATA_DIR,
-    dllPath: opt('dll', ''),
-    pythonExe: opt('python', process.env.PYTHON_EXE || 'python'),
-    injector: opt('injector', ''),
-    wechatExe: opt('wechat', process.env.WECHAT_EXE || ''),
+    dllPath: opt('dll', 'D:\\wxhook\\wxhook.dll'),
+    pythonExe: opt('python', 'D:\\Python311\\python.exe'),
+    injector: opt('injector', 'D:\\wxhook\\inject_ctypes.py'),
+    wechatExe: opt('wechat', 'D:\\wxhook\\weixin-run\\Weixin.exe'),
     emit: (e, p) => events[e]?.(p),
     log: (s) => log(s),
   })
@@ -261,7 +261,7 @@ async function processGenRetry() {
       if (bubble) {
         const out = r.file.replace(/\.(jpg|jpeg|png)$/i, '') + '-bubble.png'
         try {
-          execFileSync(process.env.PYTHON_EXE || 'python',
+          execFileSync(process.env.PYTHON_EXE || 'D:\\Python311\\python.exe',
             [join(ROOT_DIR, 'add-bubble.py'), r.file, out, bubble, '--pos', 'top'], { stdio: 'ignore', timeout: 30_000 })
           file = out
         } catch { /* 气泡失败就用原图 */ }
@@ -284,6 +284,14 @@ async function handle(op, a = {}) {
     case 'rooms':
       return bridge.rooms()
     case 'members': {
+      // 缓存：群成员查询要走数据库（较慢），20 秒内重复调用直接返回缓存。
+      // 注意**不要**返回空列表 —— 那会让调用方以为"群里没人"。
+      {
+        const now = Date.now()
+        if (globalThis.__membersCache && now - globalThis.__membersCacheAt < 20000) {
+          return { ...globalThis.__membersCache, source: (globalThis.__membersCache.source || '') + '+cached' }
+        }
+      }
       const roomId = a.roomId
       // 修好 hook 的 QueryDB 后，优先走数据库拿真实昵称（备注优先）
       if (typeof bridge.groupMembers === 'function') {
@@ -292,7 +300,10 @@ async function handle(op, a = {}) {
           if (list.length) {
             const nameMap = {}
             for (const m of list) nameMap[m.wxid] = m.name || m.nick || m.wxid
-            return { members: list, nameMap, selfWxid: bridge.selfWxid, source: 'contact.db' }
+            const out = { members: list, nameMap, selfWxid: bridge.selfWxid, source: 'contact.db' }
+            globalThis.__membersCache = out
+            globalThis.__membersCacheAt = Date.now()
+            return out
           }
         } catch (e) { log('数据库取群成员失败，回退旧路径：' + String(e?.message || e)) }
       }
@@ -305,7 +316,22 @@ async function handle(op, a = {}) {
     case 'history':
       return bridge.history(a.roomId, a.limit || 20)
     case 'sendText': {
-      const rc = await bridge.sendText(a.roomId, a.text, a.mentions || [])
+      // 真 @：正文里出现 "@昵称" 时，自动查群成员映射转成 wxid 填进 hook 的 atlist，
+      // 被 @ 的人才会真的收到提醒（红点）。显式传了 mentions 就用调用方的。
+      let mentions = Array.isArray(a.mentions) ? a.mentions.filter(Boolean) : []
+      if (!mentions.length) {
+        try {
+          const nm = globalThis.__membersCache?.nameMap
+          if (nm) {
+            const rev = {}
+            for (const [wxid, name] of Object.entries(nm)) if (name) rev[name] = wxid
+            const ats = [...String(a.text || '').matchAll(/@([^\s@]{1,24})/g)].map((m) => m[1])
+            mentions = ats.map((n) => rev[n]).filter(Boolean)
+            if (mentions.length) log(`真 @：解析出 ${mentions.length} 个 wxid → atlist`)
+          }
+        } catch { /* 解析失败就退化为纯文本 @ */ }
+      }
+      const rc = await bridge.sendText(a.roomId, a.text, mentions)
       counters.msgsOut++
       return { rc }
     }
@@ -363,7 +389,7 @@ async function handle(op, a = {}) {
       const text = String(a.text || '').trim()
       if (!src || !text) return { ok: false, error: '需要 file 和 text' }
       const out = src.replace(/\.(jpg|jpeg|png)$/i, '') + '-bubble.png'
-      const py = process.env.PYTHON_EXE || 'python'
+      const py = process.env.PYTHON_EXE || 'D:\\Python311\\python.exe'
       try {
         execFileSync(py, [join(ROOT_DIR, 'add-bubble.py'), src, out, text, '--pos', String(a.pos || 'top')], { stdio: 'ignore', timeout: 30_000 })
         const item = stickers.add({ srcPath: out, context: '气泡 ' + text, kind: 'image', source: 'gen', senderName: 'AI 生成' })
@@ -405,7 +431,7 @@ async function handle(op, a = {}) {
       }
       if (bubble) {
         const out = r.file.replace(/\.(jpg|jpeg|png)$/i, '') + '-bubble.png'
-        const py = process.env.PYTHON_EXE || 'python'
+        const py = process.env.PYTHON_EXE || 'D:\\Python311\\python.exe'
         const script = join(ROOT_DIR, 'add-bubble.py')
         try {
           execFileSync(py, [script, r.file, out, bubble, '--pos', String(a.bubblePos || 'top')], { stdio: 'ignore', timeout: 30_000 })
@@ -500,7 +526,11 @@ wss.on('connection', (ws, req) => {
       log('identify 收到: ' + ws.ident + ' pid=' + (args.pid || '?'))
       let evicted = 0
       // 只有插件本体能接管事件流：调试脚本自报身份时不该把插件顶掉（我自己踩过）
-      if (ws.ident === 'dsh-wechat-bot') {
+      // 只有"带版本号的新式实例"才允许踢人：
+      // 热重载会留下旧实例（旧代码没有 ver），它会不停重连并踢掉新实例 → 新实例连不上 → 不回复消息
+      const isModern = args.ver !== undefined && args.ver !== null
+      ws.isModern = isModern
+      if (ws.ident === 'dsh-wechat-bot' && isModern) {
         // 防呆：托管模式和 DSH 插件是**两个大脑**，同时开会双重回复
         if (hosted && hosted.cfg.enabled) {
           log('⚠️ 警告：DSH 插件已接管，但托管模式(hosted)也开着 → 会双重回复！'
