@@ -241,6 +241,28 @@ const namesFile = join(dirname(memoryDir), 'members.json')
       seenIds: new Set(),    // 处理过的 msgid（防回调重推导致同一条被处理两次）
     }
     rooms.set(roomId, r)
+    // ── 重启后"记得聊到哪"：从微信数据库把最近的群聊拉回来填进上下文 ──
+    // 名字映射和长期事实是持久化的，但最近对话只在内存里 → 一重启就失忆，
+    // 表现成"不认识人 / 不记得之前说过什么"。数据库里这些消息一直都在。
+    void (async () => {
+      try {
+        if (r.msgs.length) return
+        const res = await client.call('searchMessages',
+          { roomId, query: '', limit: Number(config.contextSeed) || 20 }, 25_000)
+        const items = (res?.items || []).slice().reverse()   // 数据库给的是倒序
+        if (!items.length) return
+        for (const it of items) {
+          r.msgs.push({
+            ts: it.ts, isSelf: !!it.isSelf, sender: it.sender || '',
+            senderName: it.isSelf ? '我' : (it.senderName || ''), typeName: 'text',
+            text: String(it.text || ''),
+          })
+        }
+        log(`重启后补齐上下文：从数据库取回 ${items.length} 条（${r.roomName || roomId}）`)
+      } catch (e) {
+        log('补上下文失败（不影响正常回复）：' + String(e?.message || e))
+      }
+    })()
     loadMemory(r)
     loadFacts(r)      // 载入长期记忆（本地文件，重启不丢）
     void syncMembers(r)   // 拉群成员昵称（内部有 10 分钟节流；别 force，否则每次建房都拉一次会拖垮桥）
