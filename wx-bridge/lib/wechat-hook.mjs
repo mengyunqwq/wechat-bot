@@ -17,7 +17,7 @@
  */
 import http from 'node:http'
 import { execFileSync, spawn } from 'node:child_process'
-import { existsSync, mkdirSync, writeFileSync, readFileSync, renameSync, rmSync } from 'node:fs'
+import { existsSync, mkdirSync, writeFileSync, readFileSync, readdirSync, renameSync, rmSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { resolveDataRoot, findLatestDat, decryptDat } from './wechat-image.mjs'
@@ -39,8 +39,7 @@ export class WeChatHookBridge {
     this.emit = opts.emit || (() => {})
     this.stickers = opts.stickers || null
     this.dataDir = opts.dataDir || process.cwd()
-    this.wechatExe = opts.wechatExe || process.env.WECHAT_EXE || ''
-    if (!this.wechatExe) throw new Error('没配置微信客户端路径：设环境变量 WECHAT_EXE，或用 --wechat=<路径> 启动')
+    this.wechatExe = opts.wechatExe || 'D:\\wxhook\\wx4110\\Weixin.exe'
     this.clientDir = this.wechatExe.replace(/[\\/][^\\/]+$/, '')
     this.log = opts.log || (() => {})
 
@@ -269,6 +268,11 @@ export class WeChatHookBridge {
     if (!up) throw new Error(`WeChat-Hook HTTP(${this.apiPort}) 未就绪`)
     this.ready = true
     this.log('WeChat-Hook HTTP 就绪（回调口 ' + this.cbPort + '）')
+    // 从 data/bridge-config.json 读 selfWxid（配置优先，避免用错"我是谁"）
+    try {
+      const cfg = JSON.parse(readFileSync(join(this.dataDir, 'bridge-config.json'), 'utf8'))
+      if (cfg?.selfWxid) { this.selfWxidCfg = String(cfg.selfWxid); this.log('配置里的 selfWxid=' + this.selfWxidCfg) }
+    } catch { /* ignore */ }
     // 运行时再注册一次回调（无害，保证地址正确）
     try { await this.api('/set_callback', { url: `http://127.0.0.1:${this.cbPort}` }) } catch { /* ignore */ }
     // 主动探一次账号：否则要等群里有人说话（回调）才判定"已登录"，
@@ -307,12 +311,25 @@ export class WeChatHookBridge {
         },
       })
     }
-    try {
-      await this.poller.init()
-      this.poller.start()
-    } catch (e) {
-      this.log('数据库轮询启动失败（不影响发送）：' + String(e?.message || e))
+    // 轮询启动：DB 可能暂时不可用（hook 重扫很慢/句柄未就绪）→ 失败就反复重试，
+    // 一旦数据库可用就自动开始收消息（否则机器人会永久失聪）
+    const startPoller = async (attempt = 1) => {
+      try {
+        await this.poller.init()
+        this.poller.start()
+        this.log('数据库轮询已启动（第 ' + attempt + ' 次尝试）')
+      } catch (e) {
+        this.log('数据库轮询启动失败（第 ' + attempt + ' 次）：' + String(e?.message || e).slice(0, 90))
+        // message_0.db 是**懒加载**的：微信只有在收发消息之后才会打开它。
+        // 所以"失败就放弃"是错的 —— 必须一直重试，等群里来消息（或自己发一条）后自然就绪。
+        const wait = attempt <= 5 ? 15000 : 60000
+        if (attempt <= 3 || attempt % 10 === 0) {
+          this.log('数据库轮询等待中就绪（第 ' + attempt + ' 次，' + (wait / 1000) + 's 后重试）：' + String(e?.message || e).slice(0, 70))
+        }
+        setTimeout(() => { void startPoller(attempt + 1) }, 15000)
+      }
     }
+    void startPoller()
     this.emit('started', { port: this.apiPort, loggedIn: this.loggedIn, self: this.selfWxid, transport: 'wechat-hook' })
     return true
   }
@@ -331,14 +348,16 @@ export class WeChatHookBridge {
         if (ok) { this.dbFailStreak = 0; return }
         this.dbFailStreak++
         this.log('数据库探测失败（第 ' + this.dbFailStreak + ' 次）')
-        if (this.dbFailStreak >= 3) {
-          this.dbFailStreak = 0
-          this.log('数据库连续失效 → 重启客户端以恢复（自愈）')
-          try { this.killOwnClient() } catch { /* ignore */ }
-          setTimeout(() => { try { this.startClient() } catch { /* ignore */ } }, 4000)
+        // 注意：**不要**在这里自动重启客户端！
+        // 教训：DB 重扫本身很慢（全内存扫描），探测超时会被误判成"失效"，
+        // 于是每 3 分钟杀一次客户端 → 用户看到微信反复掉线（实测 2 小时重启 31 次）。
+        // 现在只告警，由人决定是否重启。
+        if (this.dbFailStreak === 5) {
+          this.log('数据库连续探测失败 5 次（可能只是重扫很慢，也可能是 Hook 失效）。'
+            + '不会自动重启客户端；需要恢复请手动：停桥 → 杀客户端 → 重新启动客户端 → 起桥')
         }
       })()
-    }, 60000).unref?.()
+    }, 300000).unref?.()   // 5 分钟一次，减少对 hook 的压力
     if (this._wd) return
     this._wd = setInterval(() => {
       void (async () => {
@@ -422,7 +441,7 @@ export class WeChatHookBridge {
   /** 数据库是否真的可用（不只是 API 活着）——扫描失效时 GetAllDBName 会返回空 */
   async dbHealthy() {
     try {
-      const r = await this.api('/QueryDB/GetAllDBName', {}, 'POST', 25000)
+      const r = await this.api('/QueryDB/GetAllDBName', {}, 'POST', 30000)   // 别太久：会占用 hook，拖慢回调
       return Array.isArray(r) && r.length > 0
     } catch { return false }
   }
@@ -435,7 +454,35 @@ export class WeChatHookBridge {
   }
 
   /** 补全自己的 wxid（群消息回调拿不到，用资料接口碰一下；该接口有时返回缓存，不可靠） */
+  /**
+   * 确定"我是谁"。优先级：
+   *   ① 环境变量/配置 WECHAT_SELF_WXID（最可靠）
+   *   ② 数据目录名 <xwechat_files>\wxid_xxx_hash（自动）
+   *   ③ /GetSelfProfile —— **最后才用**，官方版这个接口会返回别人的缓存数据（实测返回过群成员的 wxid）
+   */
   async probeSelfWxid() {
+    if (this.selfWxid) return this.selfWxid
+    const fromCfg = process.env.WECHAT_SELF_WXID || this.selfWxidCfg || ''
+    if (fromCfg) { this.selfWxid = fromCfg; this.log('self 取自配置：' + fromCfg); return fromCfg }
+    // 从 xwechat_files 目录名推
+    try {
+      const roots = [
+        join(process.env.USERPROFILE || '', 'xwechat_files'),
+        join(process.env.USERPROFILE || '', 'Documents', 'xwechat_files'),
+        'D:\\Users\\Administrator\\xwechat_files',
+      ]
+      for (const r of roots) {
+        if (!existsSync(r)) continue
+        for (const d of readdirSync(r)) {
+          const m = /^(wxid_[0-9a-z]+)_/.exec(d)
+          if (m) { this.selfWxid = m[1]; this.log('self 取自数据目录：' + m[1]); return m[1] }
+        }
+      }
+    } catch { /* ignore */ }
+    return this._probeSelfLegacy()
+  }
+
+  async _probeSelfLegacy() {
     try {
       const p = await this.api('/GetSelfProfile', {}, 'POST', 8000)
       const wxid = String(p?.wxid || '')
@@ -485,9 +532,16 @@ export class WeChatHookBridge {
     return true
   }
 
-  async sendText(roomId, text) {
+  /**
+   * 发文字。mentions 里放被 @ 的人的 **wxid**（不是昵称）—— 会填进 hook 的 atlist 字段，
+   * 这样对方才会真的收到提醒（红点）；否则只是正文里看着像 @。
+   */
+  async sendText(roomId, text, mentions = []) {
     if (!this.#guard()) return -1
-    const r = await this.api('/SendTextMsg', { wxidorgid: roomId, msg: text })
+    const atlist = Array.isArray(mentions) ? mentions.filter(Boolean).join(',') : String(mentions || '')
+    const payload = { wxidorgid: roomId, msg: text }
+    if (atlist) payload.atlist = atlist
+    const r = await this.api('/SendTextMsg', payload)
     return Number(r?.ret) === 0 ? 0 : (r?.ret ?? -1)
   }
 
@@ -587,7 +641,7 @@ export class WeChatHookBridge {
           if (!out) {
             // 密钥可能轮换了（换登录/重启后会变）→ 重扫一次内存再试
             this.log('解密失败，尝试重新扫描图片密钥…')
-            try { execFileSync(process.env.PYTHON_EXE || 'python', [join(dirname(fileURLToPath(import.meta.url)), 'decode-wechat-image.py'), '--find-key'], { timeout: 300_000, stdio: 'ignore' }) } catch { /* ignore */ }
+            try { execFileSync(process.env.PYTHON_EXE || 'D:\\Python311\\python.exe', [join(dirname(fileURLToPath(import.meta.url)), 'decode-wechat-image.py'), '--find-key'], { timeout: 300_000, stdio: 'ignore' }) } catch { /* ignore */ }
             out = decryptDat(f.path, { tag: 'chat-retry' })
           }
           if (out) {

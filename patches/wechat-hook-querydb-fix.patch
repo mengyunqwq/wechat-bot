@@ -166,6 +166,20 @@ index 0000000..d42fc8c
 +
 +// 是否已解析过
 +bool OffsetsResolved();
+diff --git a/include/wx_send.h b/include/wx_send.h
+index 682bd78..029334d 100644
+--- a/include/wx_send.h
++++ b/include/wx_send.h
+@@ -4,6 +4,8 @@
+ namespace WeixinSend
+ {
+     void SendImage(const std::string& wxid, const std::string& imgPath);
+-    void SendText(const std::string& wxidorgid, const std::string& msg);
++    // atlist：真 @ 用。填被 @ 的人的 wxid（多个用英文逗号分隔），对方才会收到提醒。
++    void SendText(const std::string& wxidorgid, const std::string& msg,
++                  const std::string& atlist = std::string());
+     void DecodePic(const std::string& enc_pic_path, const std::string& dec_pic_path);
+ }
 diff --git a/src/GetSelfProfile.cpp b/src/GetSelfProfile.cpp
 index 5bfc94f..ab7644c 100644
 --- a/src/GetSelfProfile.cpp
@@ -313,6 +327,57 @@ index 41a14a7..8438289 100644
 +
  
  }
+diff --git a/src/SendTextMsg.cpp b/src/SendTextMsg.cpp
+index cf0d3b0..9073b98 100644
+--- a/src/SendTextMsg.cpp
++++ b/src/SendTextMsg.cpp
+@@ -1,8 +1,8 @@
+-#include "httplib.h"
+-#include "json.hpp"
+-#include <windows.h>
+-#include "wx_send.h"
+-#include "SendTextMsg.h"
++#include "httplib.h"
++#include "json.hpp"
++#include <windows.h>
++#include "wx_send.h"
++#include "SendTextMsg.h"
+ 
+ using json = nlohmann::json;
+ 
+@@ -27,8 +27,20 @@ void Route_SendTextMsg(httplib::Server& svr)
+ 
+             std::string wxidorgid = reqJson.value("wxidorgid", "");
+             std::string msg = reqJson.value("msg", "");
++            // 真 @：atlist 可以传字符串 "wxid1,wxid2"，也可以传数组 ["wxid1","wxid2"]
++            std::string atlist;
++            if (reqJson.contains("atlist")) {
++                if (reqJson["atlist"].is_array()) {
++                    for (auto& x : reqJson["atlist"]) {
++                        if (!atlist.empty()) atlist += ",";
++                        atlist += x.get<std::string>();
++                    }
++                } else if (reqJson["atlist"].is_string()) {
++                    atlist = reqJson["atlist"].get<std::string>();
++                }
++            }
+ 
+-            WeixinSend::SendText(wxidorgid, msg);
++            WeixinSend::SendText(wxidorgid, msg, atlist);
+ 
+ 
+             resp["ret"] = 0;
+@@ -37,8 +49,8 @@ void Route_SendTextMsg(httplib::Server& svr)
+             res.set_content(resp.dump(), "application/json");
+         });
+ 
+-    svr.Post("/Decode_Pic", [](const httplib::Request& req, httplib::Response& res)
+-        {
++    svr.Post("/Decode_Pic", [](const httplib::Request& req, httplib::Response& res)
++        {
+             json reqJson;
+             json resp;
+ 
 diff --git a/src/inline_weixin_dll_load.cpp b/src/inline_weixin_dll_load.cpp
 index c9fb879..0f86222 100644
 --- a/src/inline_weixin_dll_load.cpp
@@ -598,6 +663,138 @@ index 0000000..5400db6
 +}
 +
 +bool OffsetsResolved() { return g_done; }
+diff --git a/src/wx_send.cpp b/src/wx_send.cpp
+index 61074c3..f0d8d7f 100644
+--- a/src/wx_send.cpp
++++ b/src/wx_send.cpp
+@@ -1,16 +1,16 @@
+-#include "wx_send.h"
+-#include <windows.h>
+-#include <string>
+-#include <cstddef>
+-#include <cstring>
+-#include <objbase.h>
++#include "wx_send.h"
++#include <windows.h>
++#include <string>
++#include <cstddef>
++#include <cstring>
++#include <objbase.h>
+ #include "global.h"
+ #include "tools.h"
+ 
+-using WeixinCall = __int64(*)(...);
+-
+-
+-namespace Memory
++using WeixinCall = __int64(*)(...);
++
++
++namespace Memory
+ {
+     // 分配内存（在当前进程）
+     inline void* Allocate(size_t size)
+@@ -127,25 +127,25 @@ namespace WeixinSend
+         uint64_t length;
+         uint64_t cap; 
+     };
+-    struct TextMessage
+-    {
+-        uint64_t pad0[22] = { 0 };          // 0x000
+-        WeixinString receiver;              // 0x0B0
+-        uint64_t pad1[1] = { 0 };           // 0x0D0
+-        uint64_t type;                      // 0x0D8
+-        uint64_t pad2[21] = { 0 };          // 0x0E0
+-        uint64_t msg_len;                   // 0x188
+-        uint64_t pad3[163] = { 0 };         // 0x190
+-        WeixinString uuid;                  // 0x6A8
+-        uint64_t pad4[8] = { 0 };           // 0x6C8
+-        WeixinString content;               // 0x708
+-        WeixinString atlist;                // 0x728
+-    };
+-
+-    static_assert(sizeof(WeixinString) == 0x20);
+-    static_assert(offsetof(TextMessage, receiver) == 0x0B0);
+-    static_assert(offsetof(TextMessage, uuid) == 0x6A8);
+-    static_assert(offsetof(TextMessage, content) == 0x708);
++    struct TextMessage
++    {
++        uint64_t pad0[22] = { 0 };          // 0x000
++        WeixinString receiver;              // 0x0B0
++        uint64_t pad1[1] = { 0 };           // 0x0D0
++        uint64_t type;                      // 0x0D8
++        uint64_t pad2[21] = { 0 };          // 0x0E0
++        uint64_t msg_len;                   // 0x188
++        uint64_t pad3[163] = { 0 };         // 0x190
++        WeixinString uuid;                  // 0x6A8
++        uint64_t pad4[8] = { 0 };           // 0x6C8
++        WeixinString content;               // 0x708
++        WeixinString atlist;                // 0x728
++    };
++
++    static_assert(sizeof(WeixinString) == 0x20);
++    static_assert(offsetof(TextMessage, receiver) == 0x0B0);
++    static_assert(offsetof(TextMessage, uuid) == 0x6A8);
++    static_assert(offsetof(TextMessage, content) == 0x708);
+ 
+     struct UnknownBlock
+     {
+@@ -385,10 +385,10 @@ namespace WeixinSend
+     {
+         uintptr_t WeixinDLL_baseAddr = GetWeixinDllBase();
+ 
+-        uint64_t* msgStruct = (uint64_t*)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, 0x7C0);
+-        if (!msgStruct) {
+-            return;
+-        }
++        uint64_t* msgStruct = (uint64_t*)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, 0x7C0);
++        if (!msgStruct) {
++            return;
++        }
+ 
+         BuildSendParam1_sub(msgStruct, wxid, imgPath);
+ 
+@@ -406,7 +406,8 @@ namespace WeixinSend
+ 
+ 
+ 
+-    void BuildTextMessage(uint64_t* ptr, const std::string& text, const std::string& wxid)
++    void BuildTextMessage(uint64_t* ptr, const std::string& text, const std::string& wxid,
++                          const std::string& atlist = std::string())
+     {
+         uintptr_t base = GetWeixinDllBase();
+ 
+@@ -422,6 +423,13 @@ namespace WeixinSend
+ 
+         SetWeixinString(&msg->receiver, wxid);
+         SetWeixinString(&msg->content, text);
++        // ── 真 @ 的关键 ──
++        // atlist 里放被 @ 的人的 wxid（多个用英文逗号分隔）。
++        // 只有填了这个字段，被 @ 的人才会真的收到提醒（红点）；
++        // 只把 "@名字" 写进正文的话，对方是收不到提醒的（只是看着像 @）。
++        if (!atlist.empty()) {
++            SetWeixinString(&msg->atlist, atlist);
++        }
+         msg->msg_len = text.length();
+         msg->type = 1;
+     }
+@@ -470,13 +478,14 @@ namespace WeixinSend
+         );
+     }
+ 
+-    void SendText(const std::string& wxidorgid, const std::string& msg)
++    void SendText(const std::string& wxidorgid, const std::string& msg,
++                  const std::string& atlist)
+     {
+         uintptr_t base = GetWeixinDllBase();
+ 
+ 		//不同版本需要调整 msgBuf 大小，过小会导致发送失败，过大会浪费内存 
+         uint64_t* msgBuf = HeapAlloc_mb<uint64_t>(0x768);
+-        BuildTextMessage(msgBuf, msg, wxidorgid);
++        BuildTextMessage(msgBuf, msg, wxidorgid, atlist);
+ 
+         uint64_t* data = HeapAlloc_mb<uint64_t>(0x20);
+         data[0] = (uint64_t)(msgBuf + 2);
 diff --git a/x64_Version_dll.vcxproj b/x64_Version_dll.vcxproj
 index 037b10d..426183b 100644
 --- a/x64_Version_dll.vcxproj
