@@ -574,9 +574,22 @@ wss.on('connection', (ws, req) => {
       // 只有插件本体能接管事件流：调试脚本自报身份时不该把插件顶掉（我自己踩过）
       // 只有"带版本号的新式实例"才允许踢人：
       // 热重载会留下旧实例（旧代码没有 ver），它会不停重连并踢掉新实例 → 新实例连不上 → 不回复消息
-      const isModern = args.ver !== undefined && args.ver !== null
-      ws.isModern = isModern
-      if (ws.ident === 'dsh-wechat-bot' && isModern) {
+        const isModern = args.ver !== undefined && args.ver !== null
+        ws.isModern = isModern
+        const ver = String(args.ver || '')
+        if (ws.ident === 'dsh-wechat-bot' && isModern) {
+          // 版本比较：只有 ver 不低于当前活动实例的才允许接管。
+          // 热重载会留下旧实例，它会不停重连并踢掉新实例 -> 两个实例 ping-pong 互踢，
+          // 谁正在发消息谁就失败（实测消息直接丢失，表现成不动了）。
+          // 旧实例这里只拒绝、不踢：踢了它会立刻重连，反而形成重连风暴。
+          const curVer = String(activeClient?.ver || '')
+          if (curVer && ver && ver < curVer) {
+            log(`拒绝旧实例接管（ver=${ver} < 当前 ${curVer}）—— 不踢它，让它安静待着`)
+            if (id) ws.send(JSON.stringify({ t: 'reply', id, op, ok: true,
+              result: { identified: ws.ident, rejected: true, reason: 'older version', active: false } }))
+            return
+          }
+          ws.ver = ver
         // 防呆：托管模式和 DSH 插件是**两个大脑**，同时开会双重回复
         if (hosted && hosted.cfg.enabled) {
           log('⚠️ 警告：DSH 插件已接管，但托管模式(hosted)也开着 → 会双重回复！'

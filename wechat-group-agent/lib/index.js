@@ -187,6 +187,7 @@ export function apply(ctx, rawConfig) {
 function applyInner(ctx, rawConfig) {
   const config = { ...DEFAULT_CONFIG, ...(rawConfig ?? {}) }
   const SHORT = 'dsh-wechat-bot'
+const BUILD_VER = '2026-10-16.3'   // 带版本号的实例才允许接管（旧代码没这个字段）
   const dshHome = process.env.DSH_HOME || join(homedir(), '.dsh')
   const logFile = config.logFile || join(dshHome, 'super-injector', SHORT + '.log')
   const memoryDir = config.memoryDir || join(dshHome, 'wechat-bot', 'memory')
