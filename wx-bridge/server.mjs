@@ -232,6 +232,12 @@ if (MOCK) {
 // ── Agnes 排队爆满时的后台补生成队列 ────────────────────────────
 // 503 "image queue is full" 是常态。失败就排进队列，过几分钟自动重试；
 // 成功即入库，之后同题材直接命中缓存 —— 机器人回话完全不被阻塞。
+// 进程级兜底：桥是独立进程，之前一个漏网的未处理拒绝就会让整个桥退出
+// （Node >=15 默认 unhandledRejection=throw）→ 机器人断线，直到有人手动重启桥。
+// 现在记录并继续跑 —— 桥是无状态传输层，带病续命比整体死亡好。
+process.on('uncaughtException', (e) => log('未捕获异常（桥保持运行）：' + (e?.stack || String(e))))
+process.on('unhandledRejection', (e) => log('未处理拒绝（桥保持运行）：' + (e?.stack || String(e))))
+
 const genRetry = new Map()   // 题材 → { extra, bubble, tries, nextAt }
 
 function enqueueGenRetry(emotion, opts = {}) {

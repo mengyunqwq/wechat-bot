@@ -439,7 +439,9 @@ const namesFile = join(dirname(memoryDir), 'members.json')
       r.timer = track(setTimeout(() => {
         r.timer = null
         const batch = r.pending.splice(0)
-        if (batch.length) void evaluate(r, batch)
+        // 修复：这里必须有 catch —— 没有的话 evaluate 里任何一个未处理拒绝
+        // 会沿 Promise 链逃逸，被宿主的 fail-loud 处理器接住 = 整个宿主 exit(1)（机器人全停）
+        if (batch.length) void evaluate(r, batch).catch((e) => log('评估异常：' + String(e?.message || e)))
       }, config.debounceMs))
     }
   }
@@ -725,7 +727,7 @@ let res = await callLlm(route, sys, usr, undefined)
     if (priority !== 'continuation' && Math.random() < config.cannedChance) {
       const text = pickCanned(priority)
       log(`敷衍模式 → ${JSON.stringify(text)}`)
-      await deliver(r, trigger, priority, { text, stickerOnly: false })
+      try { await deliver(r, trigger, priority, { text, stickerOnly: false }) } catch (e) { log('投递异常：' + String(e?.message || e)) }
       return
     }
 
@@ -741,7 +743,7 @@ let res = await callLlm(route, sys, usr, undefined)
       log('模型没给出可用回复，放弃')
       return
     }
-    await deliver(r, trigger, priority, reply)
+    try { await deliver(r, trigger, priority, reply) } catch (e) { log('投递异常：' + String(e?.message || e)) }
   }
 
   // ── 生成 ────────────────────────────────────────────────────
@@ -1534,13 +1536,13 @@ let res = await callLlm(route, sys, usr, undefined)
 
   // 主动找话题：定时检查"哪个群安静太久了"
   ctx.effect(() => {
-    const iv = setInterval(() => { void proactiveLoop() }, config.proactiveCheckMs)
+    const iv = setInterval(() => { void proactiveLoop().catch((e) => log('主动发言循环异常：' + String(e?.message || e))) }, config.proactiveCheckMs)
     return () => clearInterval(iv)
   }, SHORT + ': proactive')
 
   // 作息边界：每分钟看一眼是不是刚跨过 23:00 / 08:00
   ctx.effect(() => {
-    const iv = setInterval(() => { void scheduleTick() }, 60_000)
+    const iv = setInterval(() => { void scheduleTick().catch((e) => log('作息检查异常：' + String(e?.message || e))) }, 60_000)
     return () => clearInterval(iv)
   }, SHORT + ': sleep schedule')
 
