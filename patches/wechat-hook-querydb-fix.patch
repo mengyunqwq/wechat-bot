@@ -166,6 +166,43 @@ index 0000000..d42fc8c
 +
 +// 是否已解析过
 +bool OffsetsResolved();
+diff --git a/include/tools.h b/include/tools.h
+index 5725142..edd6bf5 100644
+--- a/include/tools.h
++++ b/include/tools.h
+@@ -1,3 +1,4 @@
++#include <windows.h>
+ #pragma once
+ #include <cstdint>
+ #include <string>
+@@ -69,3 +70,27 @@ std::string 编码_URL编码(const std::string& 欲编码的文本, bool 不编
+ uint64_t 到整数(std::string value);
+ std::string 到文本(uint64_t value);
+ uint64_t 右移(uint64_t value, int bits);
++
++
++// ── 判断一段内存是否真的可读（默认查 4KB）────────────────────────────
++// 不用 IsBadReadPtr 的原因：它只探测第一个字节，且不完整处理 PAGE_GUARD/NOACCESS。
++// 而我们要拿这些地址去调 sqlite3 API（会深入解引用），探测不够就会崩。
++inline bool IsReadableRegion(const void* p, size_t len = 0x1000) {
++    if (p == nullptr || len == 0) return false;
++    const unsigned char* cur = (const unsigned char*)p;
++    const unsigned char* end = cur + len;
++    int guard = 0;
++    while (cur < end && guard++ < 64) {
++        MEMORY_BASIC_INFORMATION mbi{};
++        if (VirtualQuery(cur, &mbi, sizeof(mbi)) != sizeof(mbi)) return false;
++        if (mbi.State != MEM_COMMIT) return false;
++        if ((mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD)) != 0) return false;
++        if ((mbi.Protect & (PAGE_READONLY | PAGE_READWRITE | PAGE_WRITECOPY
++                            | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY)) == 0)
++            return false;
++        const unsigned char* regionEnd = (const unsigned char*)mbi.BaseAddress + mbi.RegionSize;
++        if (regionEnd <= cur) return false;
++        cur = regionEnd;
++    }
++    return cur >= end;
++}
 diff --git a/include/wx_send.h b/include/wx_send.h
 index 682bd78..770aa97 100644
 --- a/include/wx_send.h
@@ -1154,7 +1191,7 @@ index 037b10d..426183b 100644
 -</Project>
 +</Project>
 diff --git a/xdb/db_mgr.cpp b/xdb/db_mgr.cpp
-index 60bf5ba..8dbe1bd 100644
+index 60bf5ba..047fdba 100644
 --- a/xdb/db_mgr.cpp
 +++ b/xdb/db_mgr.cpp
 @@ -1,8 +1,169 @@
@@ -1339,7 +1376,7 @@ index 60bf5ba..8dbe1bd 100644
  		LPVOID patchAddress = (LPVOID)((size_t)m_sqlite3Rountines->backup_init + 0xAD);
  		std::vector<BYTE> nopData(14, 0x90);
  		m_backupAsmCode.resize(nopData.size(), 0);
-@@ -184,19 +350,37 @@ namespace xmgr {
+@@ -184,29 +350,55 @@ namespace xmgr {
  
  	const std::map<std::string, LPVOID>& DatabaseMgr::searchDatabases() {
  		std::lock_guard<std::mutex> lg(m_searchDbMtx);
@@ -1359,7 +1396,7 @@ index 60bf5ba..8dbe1bd 100644
 +		// 改成自愈：不靠这个标志，直接扫描；扫到数据库就反推"已登录"。
 +		if (m_dbs.size() > 0) {
 +			for (auto& it : m_dbs) {
-+				if (IsBadReadPtr(it.second, sizeof(LPVOID)) || m_sqlite3Rountines->errcode(it.second) == SQLITE_MISUSE) {
++				if (!IsReadableRegion(it.second, 0x1000) || m_sqlite3Rountines->errcode(it.second) == SQLITE_MISUSE) {
 +					m_dbs.clear();
 +					break;
 +				}
@@ -1387,7 +1424,11 @@ index 60bf5ba..8dbe1bd 100644
  		std::vector<LPVOID> results;
  		size_t vfs_addr = (size_t)g_hWeixinDll + XWECHAT_SQLITE3_VFS_OFFSET;
  		ScanPattern(GetCurrentProcess(), (BYTE*)&vfs_addr, sizeof(LPVOID), results);
-@@ -206,7 +390,14 @@ namespace xmgr {
+ 		for (size_t i = 0; i < results.size(); i++) {
+ 			auto result = results[i];
+-			if (IsBadReadPtr(result, sizeof(LPVOID)) == 0) {
++			// 只探测一个指针大小远远不够：sqlite 会深入解引用，假句柄会踩到未映射页
++			if (IsReadableRegion(result, 0x1000)) {
  				int rc = m_sqlite3Rountines->errcode(result);
  				if (rc == SQLITE_OK) {
  					nlohmann::ordered_json queryResult = execute(result, "PRAGMA database_list");
@@ -1403,7 +1444,7 @@ index 60bf5ba..8dbe1bd 100644
  					if (dbpath.empty())
  						continue;
  					auto pos = dbpath.find_last_of("\\");
-@@ -215,25 +406,49 @@ namespace xmgr {
+@@ -215,25 +407,49 @@ namespace xmgr {
  				}
  			}
  		}
