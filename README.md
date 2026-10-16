@@ -10,7 +10,7 @@
 
 | 组成 | 来源 | 我们的工作 |
 |---|---|---|
-| **微信 Hook（`version.dll`）** | 第三方开源项目 [aixed/WeChat-Hook](https://github.com/aixed/WeChat-Hook) | **我们修改了它的 C++ 源码并自行编译部署**（修 `QueryDB`、加调试路由）。**源码与算法版权归原作者**，我们只提供补丁 `patches/wechat-hook-querydb-fix.patch`，**不分发其二进制** |
+| **微信 Hook（`version.dll`）** | 第三方项目 [aixed/WeChat-Hook](https://github.com/aixed/WeChat-Hook)（**无 LICENSE**） | **我们改了它的 C++ 源码并自行编译部署**（共 5 处：修 QueryDB 门禁/自愈/JSON 加固/懒加载重扫 + 调试路由）。**源码与算法版权归原作者**；本仓库**只给补丁、不给二进制**，你需自行获取源码后 `git apply` |
 | **微信客户端** | 腾讯 | 仅本地调用，**不修改、不分发** |
 | **接入层 / 拟人策略 / MCP / REST / 托管模式 / 图片解密工具** | 本项目原创 | 全部自研 |
 | **DSH 插件形态** | 运行于 [DeepSeek Harness](https://github.com/deepseek-ai) 的插件体系 | 按平台规范自研 |

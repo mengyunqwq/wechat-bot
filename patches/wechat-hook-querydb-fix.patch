@@ -187,10 +187,17 @@ index 037b10d..8fe7ab8 100644
      <CharacterSet>Unicode</CharacterSet>
    </PropertyGroup>
 diff --git a/xdb/db_mgr.cpp b/xdb/db_mgr.cpp
-index 60bf5ba..756485a 100644
+index 60bf5ba..cd331af 100644
 --- a/xdb/db_mgr.cpp
 +++ b/xdb/db_mgr.cpp
-@@ -184,18 +184,23 @@ namespace xmgr {
+@@ -1,4 +1,6 @@
+ #include "db_mgr.h"
++#include <atomic>
++#include <chrono>
+ #include "xwechat_offsets.h"
+ #include "SundaySearch.h"
+ #include "global.h"
+@@ -184,18 +186,23 @@ namespace xmgr {
  
  	const std::map<std::string, LPVOID>& DatabaseMgr::searchDatabases() {
  		std::lock_guard<std::mutex> lg(m_searchDbMtx);
@@ -225,7 +232,7 @@ index 60bf5ba..756485a 100644
  		}
  		std::vector<LPVOID> results;
  		size_t vfs_addr = (size_t)g_hWeixinDll + XWECHAT_SQLITE3_VFS_OFFSET;
-@@ -206,7 +211,14 @@ namespace xmgr {
+@@ -206,7 +213,14 @@ namespace xmgr {
  				int rc = m_sqlite3Rountines->errcode(result);
  				if (rc == SQLITE_OK) {
  					nlohmann::ordered_json queryResult = execute(result, "PRAGMA database_list");
@@ -241,7 +248,7 @@ index 60bf5ba..756485a 100644
  					if (dbpath.empty())
  						continue;
  					auto pos = dbpath.find_last_of("\\");
-@@ -215,6 +227,10 @@ namespace xmgr {
+@@ -215,25 +229,41 @@ namespace xmgr {
  				}
  			}
  		}
@@ -252,7 +259,32 @@ index 60bf5ba..756485a 100644
  		return m_dbs;
  	}
  
-@@ -228,12 +244,8 @@ namespace xmgr {
+ 	LPVOID DatabaseMgr::getDatabaseHandle(const std::string& dbname)
+ 	{
+ 		auto& dbs = searchDatabases();
+-		if (m_dbs.find(dbname) == m_dbs.end())
+-			return nullptr;
+-		return m_dbs[dbname];
++		if (m_dbs.find(dbname) != m_dbs.end())
++			return m_dbs[dbname];
++
++		// 微信的数据库是**懒加载**的：message_0.db 只有在收发过消息之后才会被打开。
++		// 首次扫描时它还不存在，缓存里自然没有 → 原来这里直接返回 nullptr，
++		// 结果"轮询收消息"永远起不来。改为：找不到就清缓存重扫一次。
++		// 重扫是**全内存扫描**（较慢），所以做 30 秒节流，避免被高频调用时反复扫。
++		static std::atomic<long long> lastRescan{ 0 };
++		long long now = (long long)std::chrono::duration_cast<std::chrono::milliseconds>(
++			std::chrono::steady_clock::now().time_since_epoch()).count();
++		long long prev = lastRescan.load();
++		if (now - prev > 30000 && lastRescan.compare_exchange_strong(prev, now)) {
++			OutputDebugStringA("[db_mgr] 缓存里没有目标库，触发重扫\n");
++			m_dbs.clear();
++			searchDatabases();
++			if (m_dbs.find(dbname) != m_dbs.end())
++				return m_dbs[dbname];
++		}
++		return nullptr;
+ 	}
  
  	nlohmann::ordered_json DatabaseMgr::getDatabaseInfo() {
  		nlohmann::ordered_json jdbs = nlohmann::ordered_json::array();

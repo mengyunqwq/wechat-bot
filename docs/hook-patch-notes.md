@@ -22,7 +22,7 @@ if (!g_IsLogin) { m_dbs.clear(); return m_dbs; }   // 门禁
 
 后果：**拿不到群成员真实昵称**（只能靠 @ 提及慢慢猜）。
 
-## 二、补丁改了什么（4 个文件，+149 / -23 行）
+## 二、补丁改了什么（4 个文件，+170 / -26 行）
 
 ### 1. `xdb/db_mgr.cpp` — 自愈登录标志 + 扫描加固
 
@@ -42,7 +42,24 @@ if (!SelfInfo.wxid.empty()) g_IsLogin = 1;
 VFS 扫描命中数、每个候选句柄的 `errcode`/`prepare_rc`、已发现的数据库列表。
 **判断"当前加载的是不是补丁版"就看这条路由存不存在**（只读，无副作用）。
 
-### 4. `x64_Version_dll.vcxproj` — 工具集降级
+### 4. `xdb/db_mgr.cpp`（第二轮）— **找不到数据库就重扫**
+
+微信的数据库是**懒加载**的：`message_0.db` 只有在**收发过消息之后**才会被打开。
+而 `getDatabaseHandle()` 找不到目标库时**直接返回 nullptr**，缓存又是"一次性扫描"的结果 →
+**轮询收消息永远起不来**（报 `get database handle which named message_0.db failed`）。
+
+```cpp
+if (m_dbs.find(dbname) != m_dbs.end()) return m_dbs[dbname];
+// 懒加载的库首次扫描时还不存在 → 清缓存重扫一次（30 秒节流，避免频繁全内存扫描）
+if (now - prev > 30000 && lastRescan.compare_exchange_strong(prev, now)) {
+    m_dbs.clear(); searchDatabases();
+    if (m_dbs.find(dbname) != m_dbs.end()) return m_dbs[dbname];
+}
+```
+
+**实测**：客户端启动后前 4 次尝试失败（库还没打开）→ 群里来消息/自己发一条 → 第 5 次触发重扫 → **成功**。
+
+### 5. `x64_Version_dll.vcxproj` — 工具集降级
 
 `<PlatformToolset>v145</PlatformToolset>` → `v143`（适配 VS 2022 Build Tools，MSVC 14.44）
 
@@ -102,3 +119,25 @@ WHERE r.username = '<群id>'
 | **真 @ 提醒**（现在只是文本"@名字"） | `BuildTextMessage` 里填 `atlist` 字段（数据格式需动态调试确认） | 中 |
 | 原生表情包发送 | 修 `ForwardXMLMsg`（现在一调就崩） | 中高 |
 | 群图片 CDN 下载 | 需构造 fileid + a8key 链路 | 高 |
+
+
+---
+
+## 七、如何跟随微信版本更新
+
+微信升级后 `Weixin.dll` 里的函数地址全变，Hook 会失效。**我们只需要 3~8 个偏移**（收消息走数据库轮询、图片解密走内存模式扫描，都不依赖偏移），所以重新定位的工作量比上游小得多。
+
+**推荐流程**（Ghidra 自带版本追踪，专为此设计）：
+
+1. 装一份新版微信客户端到独立目录（不动旧版）
+2. 用 Ghidra 的 **Version Tracking** 对比新旧 `Weixin.dll`
+   → 自动给出"旧版函数在新版里对应哪个地址"
+3. 把新地址填回源码的偏移表（`global.h` / `WeixinDll_Offset(...)` 调用处）
+4. 重新编译 → 部署 → 验证：`/QueryDB/debug` 应存在，`GetAllDBName` 应返回 20+ 个库
+5. （进阶）把"固定偏移"改成"特征模式自动定位"，以后升级近乎自动
+
+**验证补丁版是否加载成功**：`curl http://127.0.0.1:30001/QueryDB/debug`
+—— 这条路由**只有我们编译的版本才有**（官方 release 返回 404）。
+
+**关键提示**：`message_0.db` 是懒加载的，客户端刚启动时它**不存在**。
+必须等群里来消息、或自己发一条消息之后，它才会被微信打开。

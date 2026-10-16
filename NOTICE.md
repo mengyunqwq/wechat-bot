@@ -7,6 +7,9 @@
 但**微信 Hook（`version.dll`）来自第三方开源项目** [aixed/WeChat-Hook](https://github.com/aixed/WeChat-Hook)：
 
 - 我们**修改了它的 C++ 源码**（修复 `QueryDB`、新增调试路由），补丁见 `patches/wechat-hook-querydb-fix.patch`
+- ⚠️ **该项目没有 LICENSE 文件** —— 按著作权法默认即「保留所有权利」，**并未授予再分发许可**。
+  因此：本仓库**只提供补丁（diff）**，**不重新分发**其源码或任何编译产物（`version.dll`）。
+  你需要**自行从上游获取源码**，再应用本补丁。补丁中的少量上下文行仅为定位改动所必需。
 - **该项目的版权归原作者所有**；本仓库**不包含、也不分发**其编译产物（`version.dll`）
 - 你需要**自行获取并自行编译**，并遵守原项目的许可条款
 
