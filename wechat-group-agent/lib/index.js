@@ -116,7 +116,7 @@ const DEFAULT_CONFIG = {
   atChance: 0.3,                 // 想 @ 别人时，真的带上 @ 的概率（别每条都 @）
 
   // 拟人节流
-  replyProbability: 0.3,         // 闲聊插话概率
+  replyProbability: 0.8,          // 闲聊插话概率（用户要求：80%，很爱插话）
   useDbMembers: true,             // 用数据库里的真实群成员昵称（我们修好了 hook 的 QueryDB）
   memoryExtract: true,            // 定期从群聊里提炼长期记忆（本地保存，每次对话都带上）
   // 问过的问题等多久算"还没人接"（这期间不再主动追问同一件事）

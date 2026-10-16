@@ -11,7 +11,7 @@
     "webhookUrl": "",
     "botName": "蓝色大肥鱼",
     "aliases": ["大肥鱼", "肥鱼"],
-    "replyProbability": 0.3,
+    "replyProbability": 0.8,
     "minReplyGapMs": 6000,
     "maxRepliesPer10Min": 15,
     "quietHours": "23:00-08:00",
