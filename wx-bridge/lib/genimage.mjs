@@ -14,7 +14,7 @@
  *     extra_body:{ image:['data:image/jpeg;base64,...'], response_format:'url' } }
  *   返回 data[0].url（图片在 platform-outputs.agnes-ai.space）
  */
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, writeFileSync, unlinkSync } from 'node:fs'
 import { join } from 'node:path'
 import { homedir } from 'node:os'
 
@@ -234,6 +234,13 @@ export async function generateStickerImage({
     const out = join(outDir, `agnes-${emotion}-${Date.now()}.jpg`)
     writeFileSync(out, await img.getBuffer('image/jpeg', { quality: 88 }))
     log(`生成完成：${out}（${Math.round((await import('node:fs')).statSync(out).size / 1024)}KB）`)
+    // 成品已经压好了 → 删掉原始 PNG。
+    // 用户要求：入库后不留原图（否则每生成一张就多堆一个 1MB+ 的中间文件，实测攒了 31 个 / 23.8MB）。
+    try {
+      if (raw && raw !== out) { unlinkSync(raw); log('已删除原始图：' + raw) }
+    } catch (e) {
+      log('删除原始图失败（不影响使用）：' + String(e?.message || e))
+    }
     return { file: out, raw, url }
   } catch (e) {
     log('缩放失败，直接用原图：' + String(e?.message || e))

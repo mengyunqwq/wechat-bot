@@ -471,7 +471,22 @@ async function handle(op, a = {}) {
         source: 'gen',
         senderName: 'AI 生成',
       })
-      counters.stickersCaptured++
+      counters.stickersCaptured++
+      // ── 入库后删掉中间文件（用户要求：入库后不留原图）──
+      // stickers.add 已经把图**复制**进 files/ 了，所以删源文件不会影响库。
+      // 实测不删的话，每生成一张就多堆一个 1MB+ 的中间文件（攒了 31 个 / 23.8MB）。
+      // 用动态 import 取 fs，避免动文件顶部的导入行。
+      try {
+        const fsm = await import('node:fs')
+        for (const p of [file, r.raw]) {
+          const s = String(p || '')
+          if (s && fsm.existsSync(s)
+              && !s.includes('stickers\\files') && !s.includes('stickers/files')) {
+            fsm.unlinkSync(s)
+            log('入库后删除中间文件：' + s)
+          }
+        }
+      } catch (e) { log('删中间文件失败（不影响使用）：' + String(e?.message || e)) }
       return { cached: false, emotion, extra, bubble, stickerId: item?.id, file, remoteUrl: r.url }
     }
     case 'pruneStickers':
