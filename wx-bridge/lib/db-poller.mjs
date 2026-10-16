@@ -116,6 +116,12 @@ export class DbPoller {
     }
     if (typeof this.onReady === 'function') { try { this.onReady(this.selfWxid) } catch { /* ignore */ } }
     this.log(`数据库轮询就绪：${this.tables.size} 个会话（${unknown} 个未匹配到 wxid）｜发送者映射 ${this.senderMap.size} 条`)
+    // 关键：0 个会话**不算成功** —— 微信会把闲置的数据库关掉，这时列表就是空的。
+    // 以前把它当成功返回，轮询器便空转、永不重试 → 永久失聪（实测就是"不理我"）。
+    // 抛错让它走重试；重试到第 4 次会触发 onNeedWake（机器人自己发一句把库唤醒）。
+    if (this.tables.size === 0) {
+      throw new Error('没找到任何会话表（数据库可能还没打开，等唤醒后重试）')
+    }
     return this.tables.size
   }
 
@@ -182,6 +188,30 @@ export class DbPoller {
 
   /** 轮询一轮 */
   async tick() {
+    // ── 每 5 分钟重扫会话表（防"拿着过期列表静默空转"）──────────────
+    // 微信会重建/更换数据库文件；轮询器一旦拿着过期的表列表，就会一直空转，
+    // 日志还显示"就绪"，但一条消息都收不到（实测踩过）。
+    {
+      const now = Date.now()
+      if (!this._lastReinitAt || now - this._lastReinitAt > 300000) {
+        this._lastReinitAt = now
+        const oldIds = new Map()
+        for (const [t, info] of this.tables) oldIds.set(t, info.lastId)
+        try {
+          const n = await this.init()
+          // 同表沿用旧进度，避免把这段时间的消息漏掉
+          for (const [t, info] of this.tables) {
+            const old = oldIds.get(t)
+            if (old !== undefined && old < info.lastId) info.lastId = old
+          }
+          this.log(`已重扫会话表：${n} 个会话（防止过期列表空转）`)
+        } catch (e) {
+          this.log('重扫会话表失败（继续按原列表轮询）：' + String(e?.message || e))
+        }
+      }
+    }
+
+
     if (this.stopped) return 0
     let got = 0
     for (const [table, info] of this.tables) {
