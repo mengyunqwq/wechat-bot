@@ -119,6 +119,67 @@ export class DbPoller {
     return this.tables.size
   }
 
+  /**
+   * 检索历史消息 —— 长记忆的"提起了就查"。
+   *
+   * 数据来源就是**微信自己的数据库**（不用另建库：历史本来就在里面）。
+   * 关键词匹配在 JS 里做 —— 消息内容是 hex/zstd 压缩的，SQL LIKE 匹配不到。
+   *
+   * @param {string} roomId  群/会话 id
+   * @param {string} query   关键词（空格/逗号分隔多个，任一命中即可）；空串 = 只要最近的
+   * @param {number} limit   最多返回多少条
+   * @param {number} scan    最多回溯多少条原始消息（越大越慢，默认 800）
+   */
+  async searchMessages(roomId, query, limit = 20, scan = 800) {
+    let table = ''
+    for (const [t, info] of this.tables) {
+      if (info.roomId === roomId) { table = t; break }
+    }
+    if (!table) {
+      // 兜底①：直接用 md5(roomId) 拼表名（不依赖 hash→roomId 映射 —— 映射可能因版本差异对不上）
+      const guess = `Msg_${md5(roomId)}`
+      if (this.tables.has(guess)) {
+        table = guess
+      } else {
+        // 兜底②：表可能存在但没登记，问一次数据库
+        try {
+          const r = await this.q('message_0.db',
+            `SELECT name FROM sqlite_master WHERE type='table' AND name='${guess}'`)
+          if (r.length) table = guess
+        } catch { /* ignore */ }
+      }
+    }
+    if (!table) {
+      const known = [...this.tables.values()].map((v) => v.roomId).filter(Boolean)
+      throw new Error('没找到这个会话的表；已知会话：' + known.join(', ') + '；本表名猜测：' + `Msg_${md5(roomId)}`)
+    }
+    const n = Math.max(50, Math.min(3000, Number(scan) || 800))
+    const rows = await this.q('message_0.db',
+      'SELECT local_id, local_type, create_time, real_sender_id, message_content, source'
+      + ` FROM ${table} ORDER BY local_id DESC LIMIT ${n}`, 30000)
+    const kws = String(query || '').trim().split(/[\s,，、]+/).filter(Boolean)
+    const out = []
+    for (const r of rows) {
+      const text = decodeContent(r.message_content)
+      const xml = decodeContent(r.source)
+      const hay = text + ' ' + xml
+      if (kws.length && !kws.some((k) => hay.includes(k))) continue
+      const wxid = this.senderMap.get(String(r.real_sender_id)) || ''
+      let ts = Number(r.create_time) || 0
+      if (ts && ts < 1e12) ts *= 1000          // 秒 → 毫秒（不同版本存的不一样）
+      out.push({
+        localId: Number(r.local_id) || 0,
+        ts,
+        sender: wxid,
+        senderName: wxid === this.selfWxid ? '我' : (wxid || '未知'),
+        isSelf: wxid === this.selfWxid,
+        text: String(text || '').slice(0, 200),
+      })
+      if (out.length >= limit) break
+    }
+    return out
+  }
+
   /** 轮询一轮 */
   async tick() {
     if (this.stopped) return 0

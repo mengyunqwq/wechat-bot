@@ -237,3 +237,15 @@ curl -X POST http://127.0.0.1:17300/api/policy/deliver \
 
 **手动恢复**：停桥 → 杀掉 `D:\wxhook\wx4110\Weixin.exe` → 启动它（工作目录必须是客户端目录）→ 起桥。
 验证：`curl http://127.0.0.1:30001/QueryDB/debug` 应有响应（这是自编译版的标记，官方版没有这条路由）。
+
+### 检索历史消息（长记忆）
+
+```json
+{ "id": "9", "op": "searchMessages", "roomId": "12345678@chatroom", "query": "梦云 游戏", "limit": 5 }
+```
+
+返回 `{ "items": [ { "localId": 123, "ts": 1699999999000, "senderName": "张三", "text": "…", "isSelf": false } ] }`
+
+- `query` 空串 = 取最近的；多个关键词用空格分隔，任一命中即可
+- 数据源就是微信自己的数据库（轮询器在读），不需要另建库
+- ⚠️ **参数必须放在顶层**（跟 `roomId` 同级），**不要**包在 `args` 里 —— 实测包了会拿不到参数

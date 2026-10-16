@@ -160,6 +160,9 @@ const DEFAULT_CONFIG = {
   proactiveHours: '08:00-23:00', // 只在这个时间段主动（配合作息：醒了才冒泡，睡了就安静）
   // 记忆与日志
   contextMessages: 24,
+  historyLookup: true,             // 群里提起以前的事时，从微信数据库翻历史（本地查询，0 token）
+  historyLimit: 4,                 // 最多带几条历史进提示词（每条截 60 字，约 100~200 tokens）
+  historyScan: 600,                // 最多回溯多少条原始消息去匹配
   memoryDir: '',
   logFile: '',
   dryRun: false,                 // true = 只决策不发送（演练模式）
@@ -764,6 +767,8 @@ let res = await callLlm(route, sys, usr, undefined)
       '9b. **需要最新信息时可以联网查**：群里问新闻、天气、股价、比赛结果、某个东西的最新情况，',
       '    或者你自己不确定的事实时，就在回复最后单独加一行 [搜索:关键词]（关键词短而具体）。',
       '    我查到结果后会再让你说一遍。**日常闲聊、吐槽、玩笑绝对不要搜** —— 那会很出戏。',
+      '9d. 有时我会给你一段【群里以前说过的】—— 那是从群聊记录里翻出来的真事。',
+      '    可以自然地用（"你上次不是说要…"），但**别照抄、别念记录、别提"记录/档案/数据库"这类词**。',
       '9c. **别揪着一件事反复问**：问过一次就够了；对方答了（或群里有人接话）就别再问同一件事。',
       '    有值得长期记住的事（谁是谁、谁喜欢什么、约定、重要事件）时，在回复最后加一行 [记住:内容]。',
       '10. 想发表情包时：库里挑一张就输出 [表情]；想**按当前情境现画一张**（以你的形象为主体），',
@@ -789,6 +794,55 @@ let res = await callLlm(route, sys, usr, undefined)
       '',
       '只输出你要发的那一条消息本身，不要任何解释。',
     ].filter(Boolean).join('\n')
+  }
+
+  // ── 长记忆检索：把"以前说过的"从微信数据库翻出来 ────────────────
+  // 检索本身是本地 SQL（0 token）；结果并进当前这次调用，不额外调模型。
+  const HIST_STOP = new Set(['上次', '之前', '那天', '刚才', '昨天', '前天', '早说', '说过', '提过',
+    '记得', '那个', '这个', '什么', '怎么', '为什么', '是不是', '有没有', '还有', '然后', '就是',
+    '可以', '不是', '我们', '你们', '他们', '现在', '今天', '明天', '晚上', '早上'])
+
+  /** 粗分词：取中文/字母数字连续段，去停用词（中文没有空格，这是最省事的做法） */
+  function extractTopics(text) {
+    const runs = String(text || '').match(/[\u4e00-\u9fa5A-Za-z0-9]{2,}/g) || []
+    return runs.filter((w) => !HIST_STOP.has(w)).slice(0, 4)
+  }
+
+  /** 这条消息"提起"了什么 → 用来查历史。空数组 = 不必查 */
+  function pickHistoryKeywords(trigger, r) {
+    const text = String(trigger.text || '')
+    const kws = []
+    // ① 提到群里某个人的名字（最强信号）
+    const names = (r.selfNames || []).concat(Object.values(config.memberNames || {}))
+    for (const n of names) {
+      if (n && n.length >= 2 && text.includes(n)) kws.push(n)
+    }
+    // ② 出现"回忆类"词 → 把消息里的话题词也拿去查
+    if (/上次|之前|那天|刚才|昨天|前天|早说|说过|提过|记得|前面|刚刚/.test(text)) {
+      kws.push(...extractTopics(text))
+    }
+    return [...new Set(kws)].slice(0, 4)
+  }
+
+  /** 查历史（失败就返回空，绝不影响正常回复） */
+  async function lookupHistory(r, trigger) {
+    if (config.historyLookup === false) return []
+    try {
+      const kws = pickHistoryKeywords(trigger, r)
+      if (!kws.length) return []
+      const res = await client.call('searchMessages', {
+        roomId: r.roomId,
+        query: kws.join(' '),
+        limit: config.historyLimit || 4,
+        scan: config.historyScan || 600,
+      }, 20_000)
+      const items = (res?.items || []).filter((x) => x && x.text)
+      if (items.length) log(`翻到 ${items.length} 条相关历史（关键词：${kws.join('、')}）`)
+      return items.slice(0, config.historyLimit || 4)
+    } catch (e) {
+      log('查历史失败（不影响回复）：' + String(e?.message || e))
+      return []
+    }
   }
 
   function buildUser(r, batch, trigger, priority) {
@@ -819,6 +873,10 @@ let res = await callLlm(route, sys, usr, undefined)
       '最近群聊：',
       ...lines,
       '',
+      ...((trigger.historyHits || []).length
+        ? ['', '【群里以前说过的（供你参考，自然引用即可；别照抄，也别提"记录/档案"这类词）】',
+           ...trigger.historyHits.map((h) => `- ${h.senderName}: ${String(h.text || '').slice(0, 60)}`)]
+        : []),
       `现在的情况：${trig}`,
       priority === 'continuation'
         ? '接着他的话回一句（像聊天一样自然接住，别重复你刚说过的）：'
@@ -1008,6 +1066,8 @@ let res = await callLlm(route, sys, usr, undefined)
     const route = resolveRoute()
     stats.llmCalls++
     const systemText = buildSystem(r)
+    // 长记忆检索：提起以前的事就翻数据库，结果并进这次提示词（不额外调模型）
+    trigger.historyHits = await lookupHistory(r, trigger)
     const userText = buildUser(r, batch, trigger, priority)
     const effort = config.reasoningEffort || undefined
     let { text, diag } = await callLlm(route, systemText, userText, effort)
