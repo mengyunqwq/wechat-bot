@@ -916,10 +916,10 @@ index 037b10d..426183b 100644
 -</Project>
 +</Project>
 diff --git a/xdb/db_mgr.cpp b/xdb/db_mgr.cpp
-index 60bf5ba..83a9346 100644
+index 60bf5ba..8dbe1bd 100644
 --- a/xdb/db_mgr.cpp
 +++ b/xdb/db_mgr.cpp
-@@ -1,8 +1,114 @@
+@@ -1,8 +1,169 @@
  #include "db_mgr.h"
 +#include <atomic>
 +#include <chrono>
@@ -965,6 +965,61 @@ index 60bf5ba..83a9346 100644
 +            g_opened[(LPVOID)*ppDb] = baseName(std::string(filename));
 +        }
 +        return rc;
++    }
++
++
++    // ── 方式三（应该能真正生效）：hook prepare ────────────────────────
++    // prepare 是每次查询都必走的路径，因此一定能拿到 sqlite3* 句柄。
++    // 拿到句柄后用 db_filename 问出文件名（只对没登记过的句柄做，之后零开销）。
++    typedef int (*prepare_t)(sqlite3*, const char*, int, sqlite3_stmt**, const char**);
++    prepare_t g_origPrepare = nullptr;
++    bool g_installedPrepare = false;
++    std::map<LPVOID, std::string> g_unknownHandles;   // 查不到文件名的句柄（避免反复查）
++
++    sqlite3_api_routines* g_api = nullptr;
++
++    void noteHandle(sqlite3* db, sqlite3_api_routines* api) {
++        if (db == nullptr || api == nullptr || api->db_filename == nullptr) return;
++        {
++            std::lock_guard<std::mutex> lg(g_mtx);
++            if (g_opened.count((LPVOID)db) || g_unknownHandles.count((LPVOID)db)) return;
++        }
++        const char* fn = api->db_filename(db, "main");   // 第二个参数是连接内的库名（默认库 "main"）
++        std::lock_guard<std::mutex> lg(g_mtx);
++        if (fn != nullptr && *fn != '\0') {
++            g_opened[(LPVOID)db] = baseName(std::string(fn));
++        } else {
++            g_unknownHandles[(LPVOID)db] = "";   // 记下来，别再查
++        }
++    }
++
++    int detourPrepare(sqlite3* db, const char* sql, int n, sqlite3_stmt** stmt, const char** tail) {
++        int rc = g_origPrepare ? g_origPrepare(db, sql, n, stmt, tail) : 1;
++        // 只在成功且句柄未知时才登记（noteHandle 内部会先查表，开销可忽略）
++        if (db != nullptr) {
++            noteHandle(db, g_api);
++        }
++        return rc;
++    }
++
++    void installPrepare(sqlite3_api_routines* api) {
++        if (g_installedPrepare || api == nullptr || api->prepare == nullptr) return;
++        g_installedPrepare = true;
++        g_api = api;
++        MH_STATUS st = MH_Initialize();
++        if (st != MH_OK && st != MH_ERROR_ALREADY_INITIALIZED) { g_installedPrepare = false; return; }
++        void* target = (void*)api->prepare;
++        if (MH_CreateHook(target, (LPVOID)&detourPrepare, (LPVOID*)&g_origPrepare) != MH_OK) {
++            OutputDebugStringA("[db_registry] MH_CreateHook(prepare) 失败\n");
++            g_installedPrepare = false;
++            return;
++        }
++        if (MH_EnableHook(target) != MH_OK) {
++            OutputDebugStringA("[db_registry] MH_EnableHook(prepare) 失败\n");
++            g_installedPrepare = false;
++            return;
++        }
++        OutputDebugStringA("[db_registry] prepare 钩子已安装（句柄按真实查询记录）\n");
 +    }
 +
 +    // ── 方式二（真正生效的那个）：直接 hook open_v2 的函数代码 ──────────
@@ -1034,7 +1089,7 @@ index 60bf5ba..83a9346 100644
  
  static void codec_get_key(sqlite3CodecGetKey func, sqlite3* db, int index, void** pKey, int* pLen) {
  	__try {
-@@ -34,6 +140,10 @@ namespace xmgr {
+@@ -34,6 +195,11 @@ namespace xmgr {
  		m_sqlite3Rountines = (sqlite3_api_routines*)(module_base + XWECHAT_SQLITE3_API_ROUTINES_OFFSET);
  		m_sqlcipherRountines = (sqlcipher_api_routines*)(module_base + XWECHAT_SQLCIPHER_API_ROUTINES_OFFSET);
  		m_codecGetKey = (sqlite3CodecGetKey)(module_base + XWECHAT_SQLITE3_CODEC_GET_KEY_FUNC);
@@ -1042,10 +1097,11 @@ index 60bf5ba..83a9346 100644
 +		// 这样就不必再靠"扫内存找指针值"——那种方式实测命中数会从 219 跳到 3，一跳就全废。
 +		db_registry::install(m_sqlite3Rountines);        // 改 API 表（对走扩展的库有效）
 +		db_registry::installCode(m_sqlite3Rountines);    // 直接 hook 函数代码（主路径）
++		db_registry::installPrepare(m_sqlite3Rountines); // hook prepare：每次查询必走，最可靠
  		LPVOID patchAddress = (LPVOID)((size_t)m_sqlite3Rountines->backup_init + 0xAD);
  		std::vector<BYTE> nopData(14, 0x90);
  		m_backupAsmCode.resize(nopData.size(), 0);
-@@ -184,19 +294,37 @@ namespace xmgr {
+@@ -184,19 +350,37 @@ namespace xmgr {
  
  	const std::map<std::string, LPVOID>& DatabaseMgr::searchDatabases() {
  		std::lock_guard<std::mutex> lg(m_searchDbMtx);
@@ -1093,7 +1149,7 @@ index 60bf5ba..83a9346 100644
  		std::vector<LPVOID> results;
  		size_t vfs_addr = (size_t)g_hWeixinDll + XWECHAT_SQLITE3_VFS_OFFSET;
  		ScanPattern(GetCurrentProcess(), (BYTE*)&vfs_addr, sizeof(LPVOID), results);
-@@ -206,7 +334,14 @@ namespace xmgr {
+@@ -206,7 +390,14 @@ namespace xmgr {
  				int rc = m_sqlite3Rountines->errcode(result);
  				if (rc == SQLITE_OK) {
  					nlohmann::ordered_json queryResult = execute(result, "PRAGMA database_list");
@@ -1109,7 +1165,7 @@ index 60bf5ba..83a9346 100644
  					if (dbpath.empty())
  						continue;
  					auto pos = dbpath.find_last_of("\\");
-@@ -215,25 +350,49 @@ namespace xmgr {
+@@ -215,25 +406,49 @@ namespace xmgr {
  				}
  			}
  		}
