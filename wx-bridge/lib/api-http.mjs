@@ -93,7 +93,12 @@ export function createApiHandler({ handle, rooms, log, bridge, counters, started
         const roomId = await resolveRoom(arg('room'))
         const text = String(arg('text'))
         if (!text) throw new Error('需要 text')
-        return sendJson(res, 200, await handle('sendText', { roomId, text }))
+        return sendJson(res, 200, await handle('sendText', {
+        roomId, text,
+        // split=true → 长文本自动拆成多条发
+        split: arg('split') === true || arg('split') === 'true',
+        maxLines: Number(arg('maxLines')) || undefined,
+      }))
       }
       if (path === '/api/sticker/send') {
         const roomId = await resolveRoom(arg('room'))

@@ -22,6 +22,7 @@ import { WebSocketServer } from 'ws'
 import { StickerLibrary } from './lib/stickers.mjs'
 import { createApiHandler } from './lib/api-http.mjs'
 import { HostedMode } from './lib/hosted.mjs'
+import { splitMessage, gapMs } from './lib/policy.mjs'
 import { WcfBridge } from './lib/wcf.mjs'
 import { MockBridge } from './lib/mock.mjs'
 import { WxhelperBridge } from './lib/wxhelper.mjs'
@@ -331,9 +332,17 @@ async function handle(op, a = {}) {
           }
         } catch { /* 解析失败就退化为纯文本 @ */ }
       }
-      const rc = await bridge.sendText(a.roomId, a.text, mentions)
-      counters.msgsOut++
-      return { rc }
+      // split: true → 长文本自动拆成多条发（每条之间用拟人间隔）
+      const parts = a.split
+        ? splitMessage(a.text, { maxParts: a.maxLines || 3, chance: 0 })
+        : [a.text]
+      let rc = 0
+      for (let i = 0; i < parts.length; i++) {
+        rc = await bridge.sendText(a.roomId, parts[i], i === 0 ? mentions : [])
+        counters.msgsOut++
+        if (i < parts.length - 1) await new Promise((r) => setTimeout(r, gapMs()))
+      }
+      return { rc, parts: parts.length }
     }
     case 'sendSticker': {
       const item = a.stickerId ? stickers.get(a.stickerId) : stickers.pick({ text: a.text || '', roomId: a.roomId })

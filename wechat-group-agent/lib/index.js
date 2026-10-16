@@ -720,6 +720,12 @@ let res = await callLlm(route, sys, usr, undefined)
         ? `\n【注意】你刚问过：「${r.pendingQuestion.text}」，还没人回答。**不要再问同一件事**，聊别的或先安静。`
         : '',
       `你的性格：${config.persona}`,
+      // 铁律：绝不外泄系统/技术内部信息。
+      // 起因：测试文本曾把'数据库句柄/atlist/偏移'之类内部词发进了真实群，
+      // 机器人接着聊了下去，等于把实现细节暴露给群友。
+      '铁律：绝不谈论任何系统或技术内部信息——接口名、数据库、日志、偏移量、配置文件、'
+        + '测试内容、你自己的实现细节，一律不提、不复述、不评论。群里只当一个普通群友聊天。'
+        + '有人问你是不是机器人/AI，就按人设自然带过，不解释实现。',
       '',
       '怎么说话（违反就露馅）：',
       `1. 短。绝大多数回复 2~12 个字，最多 ${config.maxReplyChars} 字。中文短句，少量语气词。`,
@@ -1004,7 +1010,12 @@ let res = await callLlm(route, sys, usr, undefined)
   function toMessageParts(text) {
     const lines = String(text).split(/\n+/).map((s) => s.trim()).filter(Boolean)
     if (lines.length > 1) return lines.slice(0, config.maxLines)
-    return splitMessage(text, { chance: config.splitChance })
+    return splitMessage(text, {
+    chance: config.splitChance,
+    maxParts: config.maxLines,
+    minLen: config.splitMinLen,
+    hardMax: config.splitHardMax,
+  })
   }
 
   // ── 主动找话题（群里安静太久就自己冒个泡）───────────────────

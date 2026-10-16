@@ -194,13 +194,92 @@ export function inActiveHours(spec, date = new Date()) {
 }
 
 /** 要不要把一条回复拆成两条发（真人常这样），以及怎么拆 */
-export function splitMessage(text, { chance = 0.15, rand = Math.random(), maxParts = 2, minLen = 14 } = {}) {
-  const t = String(text).trim()
-  if ([...t].length < minLen || rand >= chance) return [t]
-  const parts = t.split(/(?<=[。！？!?~…])/).map((s) => s.trim()).filter(Boolean)
-  if (parts.length < 2) return [t]
-  if (parts.length > maxParts) return [parts.slice(0, maxParts - 1).join(''), parts.slice(maxParts - 1).join('')]
-  return parts
+const SENTENCE_END = /(?<=[。！？!?~…\n])/;
+const SOFT_END = /(?<=[，、,;；:：])/;
+
+/** 按分隔符切句，去空白、丢空段 */
+function cutBy(t, re) {
+  return t.split(re).map((s) => s.trim()).filter(Boolean);
+}
+
+/** 把过短的碎段并进相邻段（避免出现"嗯。"这种一两个字的独立消息） */
+function mergeTiny(parts, hardMax) {
+  const out = [];
+  for (const p of parts) {
+    const last = out[out.length - 1];
+    if (last && [...p].length < 8 && [...last].length + [...p].length <= hardMax) {
+      out[out.length - 1] = last + p;
+    } else {
+      out.push(p);
+    }
+  }
+  return out;
+}
+
+/** 仍然超过 hardMax 的段按长度硬切 */
+function splitOversize(parts, hardMax) {
+  const out = [];
+  for (const p of parts) {
+    const cs = [...p];
+    if (cs.length <= hardMax) { out.push(p); continue; }
+    for (let i = 0; i < cs.length; i += hardMax) out.push(cs.slice(i, i + hardMax).join(''));
+  }
+  return out;
+}
+
+/** 段数超上限：多余的尾巴并进最后一段 */
+function capParts(parts, maxParts) {
+  const cap = Math.max(1, Number(maxParts) || 1);
+  if (parts.length <= cap) return parts;
+  return [...parts.slice(0, cap - 1), parts.slice(cap - 1).join('')];
+}
+
+/**
+ * 把一条回复拆成多条消息（真人常常分两三条发）。
+ *
+ * 规则（**长度优先**，其次才是概率）：
+ *   ① 文本超过 splitMinLen（默认 30 字）→ **必定拆**。
+ *      长回复一次发出去又长又不像人；拆开更像在打字聊天。
+ *   ② 短文本 → 按 splitChance 概率拆（保留"偶尔分两条"的拟人感）。
+ *   ③ 断句优先级：句末标点（。！？!?~… 换行）> 逗号顿号 > 按长度硬切。
+ *   ④ 每段尽量不超过 splitHardMax（默认 40 字）；过短的碎段与相邻段合并。
+ *   ⑤ 段数上限 maxParts（默认 3），超出的尾巴并入最后一段。
+ *
+ * @returns {string[]} 至少 1 条
+ */
+export function splitMessage(text, {
+  chance = 0.15,
+  rand = Math.random(),
+  maxParts = 3,
+  minLen = 30,
+  hardMax = 40,
+} = {}) {
+  const t = String(text ?? '').trim();
+  if (!t) return [];
+  const len = [...t].length;
+
+  if (len < minLen) {
+    if (rand >= chance) return [t];
+    // 单句短文本只有句末标点，切不出 2 段 → 退到逗号顿号，否则概率拆永远不生效
+    let sp = cutBy(t, SENTENCE_END);
+    if (sp.length < 2) sp = cutBy(t, SOFT_END);
+    if (sp.length < 2) return [t];
+    return capParts(sp, maxParts);
+  }
+
+  let parts = cutBy(t, SENTENCE_END);
+  if (parts.length < 2) parts = cutBy(t, SOFT_END);
+  if (parts.length < 2) {
+    // 连标点都没有：按"长度的一半"硬切，保证长文本至少拆成 2 条
+    // （原来直接用 hardMax 切，40 字刚好不超上限 → 仍然一整条发出去）
+    parts = splitOversize([t], Math.max(1, Math.min(hardMax, Math.ceil(len / 2))));
+  }
+  parts = mergeTiny(parts, hardMax);
+  parts = splitOversize(parts, hardMax);
+  parts = capParts(parts, maxParts);
+  // 段数上限只是"尽量"：合并尾巴后若某条仍超过 hardMax，宁可多一条也不要发巨长的一条
+  parts = splitOversize(parts, hardMax);
+  return parts;
 }
 
 /** 两条消息之间的间隔（拆句/文字后补表情包用） */
