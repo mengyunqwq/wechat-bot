@@ -127,6 +127,36 @@ notepad config.json
 
 ## 4. 启动
 
+### 4.1 一键启动脚本（推荐）
+
+仓库自带启动器：会**按正确参数**拉起微信（`RecvType=1` + 回调地址）再启动 bridge；
+已经在跑的两端都会**跳过**（避免开出第二个 bridge 抢同一个端口）。
+
+```powershell
+# 只需设置一次微信客户端路径（就是第 1、2 节准备好的那份）
+setx WECHAT_EXE "D:\wxhook\wx4110\Weixin.exe"
+
+# 之后双击 scripts\start-bot.cmd，或：
+powershell -ExecutionPolicy Bypass -File .\scripts\start-bot.ps1
+```
+
+可选环境变量（都有默认值）：
+
+| 变量 | 默认 | 说明 |
+|---|---|---|
+| `WECHAT_EXE` | —（必填） | 你复制的 hooked 微信的 `Weixin.exe` |
+| `WECHAT_BOT_DATA` | `<仓库>\wx-bridge\data` | 数据目录（表情包库、日志等） |
+| `WECHAT_BOT_PORT` | `17300` | bridge 的 WS/HTTP 端口（插件连这个） |
+| `WECHAT_HOOK_PORT` | `30001` | Hook 的 HTTP 端口 |
+| `WECHAT_CB_PORT` | `18998` | Hook 的回调端口 |
+
+> ⚠️ **为什么是「一个 `.ps1` + 一个纯 ASCII 的 `.cmd` 壳」，而不是单个 `.cmd`**：
+> 批处理是按**控制台当前码页**解析文件字节的。只要路径里出现中文，双击运行（码页 936）
+> 和从 PowerShell 里调用（码页 65001）就会一个正常一个乱码，严重时中文碎片还会被当成命令执行。
+> PowerShell 脚本用 UTF-8+BOM，与码页无关，所以中文路径交给它。
+
+### 4.2 手动启动
+
 ```powershell
 cd wx-bridge
 npm start
