@@ -223,7 +223,7 @@ export class StickerLibrary {
    * @param {number} [p.minScore] 低于此分不发（避免乱发图）
    * @param {number} [p.random] 0-1 随机数（便于测试注入）
    */
-  pick({ text = '', roomId, minScore = 3, random = Math.random(), onlySendable = true, allowedSources = ['gen', 'import'] } = {}) {
+  pick({ text = '', roomId, minScore = 3, requireTag = false, random = Math.random(), onlySendable = true, allowedSources = ['gen', 'import'] } = {}) {
     // 只发"指定来源"的表情（默认：Agnes 生成的 + 用户自己投递的），
     // 群里自动收藏的原生表情和早期测试图都不参与挑选。
     const allow = new Set(allowedSources || [])
@@ -233,9 +233,20 @@ export class StickerLibrary {
       return true
     })
     if (!pool.length) return null
+    if (!pool.length) return null
+    // requireTag：只考虑"至少命中一个语境标签"的图。
+    // 为什么需要它：见过次数(最多+2)和用过次数(最多+3)的加分能让**完全不相关**的图
+    // 拿到 5 分，轻松越过 minScore —— 表现就是"拿一张莫名其妙的旧图糊弄"。
+    // 打开它以后：不匹配就返回 null（宁可不发图，也不乱发）。
+    let candidates = pool
+    if (requireTag) {
+      const wantSet = new Set(tokenize(text))
+      candidates = pool.filter((it) => (it.tags || []).some((t) => wantSet.has(t)))
+      if (!candidates.length) return null
+    }
     const want = new Set(tokenize(text))
     const now = Date.now()
-    const scored = pool.map((it) => {
+    const scored = candidates.map((it) => {
       let score = 0
       for (const t of it.tags || []) if (want.has(t)) score += 3
       if (roomId && (it.rooms || []).includes(roomId)) score += 1

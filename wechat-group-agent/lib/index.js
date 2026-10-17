@@ -173,7 +173,8 @@ const DEFAULT_CONFIG = {
   contextMessages: 24,
   historyLookup: true,             // 群里提起以前的事时，从微信数据库翻历史（本地查询，0 token）
   historyLimit: 4,                 // 最多带几条历史进提示词（每条截 60 字，约 100~200 tokens）
-  historyScan: 600,                // 最多回溯多少条原始消息去匹配
+  historyScan: 600,
+  backfillLimit: 10,            // 客户端重启后回补多少条最近消息进上下文                // 最多回溯多少条原始消息去匹配
   memoryDir: '',
   logFile: '',
   dryRun: false,                 // true = 只决策不发送（演练模式）
@@ -330,10 +331,13 @@ const namesFile = join(dirname(memoryDir), 'members.json')
         if (evt.status) log('bridge 状态：模式=' + (evt.mock ? 'mock' : '真实') + '｜登录=' + evt.status.loggedIn + '｜自己=' + evt.status.self + '｜表情包=' + (evt.status.stickers?.count ?? 0))
         if (evt.status?.self) bridgeSelf = evt.status.self
         break
-      case 'login':
+      case 'login': {
         log('微信登录成功 self=' + evt.self)
         if (evt.self) bridgeSelf = evt.self
+        // 客户端（重）启动过 → 轮询有短暂空窗，期间的消息不会进上下文 → 主动回补
+        void backfillAfterLogin().catch((e) => log('回补上下文异常：' + String(e?.message || e)))
         break
+      }
       case 'logout':
         log('微信已登出，等待重新注入')
         break
@@ -342,13 +346,13 @@ const namesFile = join(dirname(memoryDir), 'members.json')
         // 这样**不用重启客户端**（重启可能要手机确认登录，用户明确说不想手动点）。
         void (async () => {
           try {
-            if (isQuiet(quietWindows)) { log('wake：安静时段，不冒泡（等白天）'); return }
-            const rooms = [...rooms.values()].filter((r) => r && r.roomId && r.roomId.endsWith('@chatroom'))
-            if (!rooms.length) { log('wake：还没有已知的群，跳过'); return }
-            const room = rooms[rooms.length - 1]
+            // 唤醒是【技术动作】（让微信写库、打开 message_0.db），不是社交发言：
+            // 发到文件传输助手，群里完全看不到 → 因此不受安静时段限制
+            // （以前发群里，半夜被静音掉 → 库打不开 → 机器人一直听不见 ✗）
+            const wakeRoom = config.wakeRoom || 'filehelper'
             const text = pickProactive() || '我回来啦'
-            log(`wake：往「${room.roomName || room.roomId}」发一句唤醒数据库 → ${text}`)
-            await client.call('sendText', { roomId: room.roomId, text }, 30_000)
+            log(`wake：往 ${wakeRoom} 发一句唤醒数据库 → ${text}`)
+            await client.call('sendText', { roomId: wakeRoom, text }, 30_000)
           } catch (e) {
             log('wake 失败：' + String(e?.message || e))
           }
@@ -1370,7 +1374,8 @@ let res = await callLlm(route, sys, usr, undefined)
     const t0 = Date.now()
     try {
       log(`后台开始生成：${emotion}${scene ? '｜' + scene : ''}${bubble ? '｜气泡「' + bubble + '」' : ''}（${why}）`)
-      const gen = await client.call('genSticker', { emotion, extra: scene || '', bubble: bubble || '' }, 220_000)
+      const force = Math.random() < (config.genForceChance ?? 0.5)
+      const gen = await client.call('genSticker', { emotion, extra: scene || '', bubble: bubble || '', force }, 220_000)
       if (gen?.stickerId) {
         const sec = ((Date.now() - t0) / 1000).toFixed(0)
         log(`后台生成完成（${sec}s，${gen.cached ? '复用' : '新画'}）→ 稍后补发`)
@@ -1392,7 +1397,7 @@ let res = await callLlm(route, sys, usr, undefined)
     }
     // 兜底：生成失败也让它有图可发
     try {
-      const picked = await client.call('pickSticker', { text: emotion + ' ' + scene, roomId, minScore: 0 })
+      const picked = await client.call('pickSticker', { text: emotion + ' ' + scene, roomId, minScore: 3, requireTag: true })
       if (picked?.id) {
         const sent = await client.call('sendSticker', { roomId, stickerId: picked.id })
         if (sent?.rc === 0) {
@@ -1411,6 +1416,37 @@ let res = await callLlm(route, sys, usr, undefined)
    * 这是活人感最强的一招：答应的事有下文，而不是说完就消失。
    * 守安静时段与 10 分钟上限；内部全兜，绝不让异常逃逸（逃逸会杀掉宿主）。
    */
+  /**
+   * 客户端重启后回补最近消息（只补上下文，**不触发回复**）。
+   * 为什么要它：客户端一重启，数据库轮询会有短暂空窗（懒加载/句柄还没就绪），
+   * 空窗期间群里说的话不会进上下文 → 它会表现得"不知道刚才聊了什么"。
+   * 这里主动把最近几条拉回来并去重合并；绝不在这里生成回复（避免对旧消息补答）。
+   */
+  async function backfillAfterLogin() {
+    for (const r of rooms.values()) {
+      try {
+        if (!String(r.roomId || '').endsWith('@chatroom')) continue
+        const res = await client.call('searchMessages',
+          { roomId: r.roomId, query: '', limit: Number(config.backfillLimit) || 10 }, 25_000)
+        const items = (res?.items || []).slice().reverse()   // 数据库给的是倒序
+        if (!items.length) continue
+        const have = new Set(r.msgs.map((m) => String(m.ts) + '|' + String(m.text)))
+        let added = 0
+        for (const it of items) {
+          const key = String(it.ts) + '|' + String(it.text)
+          if (have.has(key)) continue
+          push(r, {
+            ts: it.ts, isSelf: !!it.isSelf, sender: it.sender || '',
+            senderName: it.isSelf ? '我' : (it.senderName || ''), text: String(it.text || ''),
+          })
+          added++
+        }
+        if (added) log(`重启后回补上下文 ${added} 条（${r.roomName || r.roomId}）`)
+      } catch (e) {
+        log('回补上下文失败（不影响正常回复）：' + String(e?.message || e))
+      }
+    }
+  }
   async function sendFollowUp(r, note) {
     try {
       if (stopped || !config.enabled) return
@@ -1500,7 +1536,7 @@ let res = await callLlm(route, sys, usr, undefined)
         let how = ''
         // ① 只要情绪、没要场景 → 先用图库里现成的（秒发）
         if (reply.emotion && !reply.scene) {
-          const lib = await client.call('pickSticker', { text: reply.emotion, roomId, minScore: 1 })
+          const lib = await client.call('pickSticker', { text: reply.emotion, roomId, minScore: 3, requireTag: true })
           if (lib?.id) { stickerId = lib.id; how = `图库(情绪匹配 ${reply.emotion})` }
         }
         // ② 需要现场画（指定了场景，或图库没匹配上）→ **丢后台**，好了再补发；不阻塞本条回复
@@ -1534,7 +1570,8 @@ let res = await callLlm(route, sys, usr, undefined)
           const picked = await client.call('pickSticker', {
             text: (reply.text || '') + ' ' + (trigger.text || ''),
             roomId,
-            minScore: 0,
+            minScore: 3,
+            requireTag: true,
           })
           stickerId = picked?.id || ''
           how = '图库'

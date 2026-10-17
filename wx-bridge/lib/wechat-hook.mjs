@@ -325,7 +325,7 @@ export class WeChatHookBridge {
         // 连续失败到第 4 次 → 请上层"唤醒"一下数据库（让机器人自己发条消息，
         // 微信就会写库、打开 message_0.db，轮询随即恢复）。这样**不用重启客户端**，
         // 也就不会触发"要手机确认登录"那一步。
-        if (attempt === 4 && typeof this.onNeedWake === 'function') {
+        if ((attempt === 4 || attempt % 10 === 0) && typeof this.onNeedWake === 'function') {
           try { this.onNeedWake() } catch { /* ignore */ }
         }
         const wait = attempt <= 5 ? 15000 : 60000
