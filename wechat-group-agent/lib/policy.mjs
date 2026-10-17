@@ -417,7 +417,7 @@ export function cleanReply(raw, { maxLen = 60, maxLines = 1 } = {}) {
   if (!t) return ''
   t = t.replace(/^```[\s\S]*?\n/, '').replace(/```$/, '').trim()
   const lines = t.split(/\r?\n/).map((s) => s.trim()).filter(Boolean)
-  const kept = lines.slice(0, Math.max(1, maxLines))
+  const kept = maxLines > 0 ? lines.slice(0, Math.max(1, maxLines)) : lines   // maxLines<=0 = 不丢行
   const out = []
   for (const line of kept) {
     out.push(cleanOneLine(line, maxLen))
@@ -435,7 +435,7 @@ function cleanOneLine(raw, maxLen) {
   t = t.replace(/^["'“”‘’]+|["'“”‘’]+$/g, '').trim()
   // 去括号舞台提示（整句都是括号时保留内容）
   t = t.replace(/^[（(](.{0,20})[)）]$/, '$1').trim()
-  if ([...t].length > maxLen) {
+  if (maxLen > 0 && [...t].length > maxLen) {   // maxLen<=0 = 不截断（不限制输出字数）
     const chars = [...t]
     const cut = chars.slice(0, maxLen).join('')
     // 在限长内找**最后一个**句末标点收尾（取第一个会把长回复砍得过短）

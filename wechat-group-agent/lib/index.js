@@ -95,7 +95,7 @@ const DEFAULT_CONFIG = {
   provider: '',
   model: '',
   temperature: 0.95,
-  maxReplyChars: 60,
+  maxReplyChars: 0,
   // 输出上限：必须留够空间给"思考"。有些模型（如 deepseek-v4.1-flash）默认会先推理，
   // 上限太小会出现"只有推理、没有正文"的 max-tokens 空回复（实测踩过）。
   maxTokens: 800,
@@ -149,6 +149,8 @@ const DEFAULT_CONFIG = {
   genStickerChance: 0.25,        // 需要表情包时，"现场生成"（而非用现成图）的概率
   splitChance: 0.3,              // 拆两条发的概率（真人常分两三条发）
   maxLines: 3,                   // 一条回复最多拆成几条消息
+  partTargetLen: 60,            // 长文本分段：每段目标字数（段数按长度自动算）
+  maxPartsLimit: 15,            // 一条回复最多拆成多少条（防失控安全上限）
   patChance: 0.03,               // 被@时"拍一拍"对方的概率
   // ── 主动找话题 ──────────────────────────────────────────────
   // 群里安静一段时间后，主动冒个泡（真人也会这样，不然就是个"只应答的客服"）
@@ -792,9 +794,9 @@ let res = await callLlm(route, sys, usr, undefined)
       '  · 拿不准的时候：如果是冲着你来的、或者你接一句会让气氛更好，就回；纯路人闲聊就别硬插。',
       '',
       '怎么说话（违反就露馅）：',
-      `1. 短。绝大多数回复 2~12 个字，最多 ${config.maxReplyChars} 字。中文短句，少量语气词。`,
+      `1. 短。绝大多数回复 2~12 个字。中文短句，少量语气词。内容多的时候可以写长，我会自动拆成多条依次发，不怕字数。`,
       `   有时候你会**分两三条**说（像真人打字那样，比如"哈哈哈哈"换行"笑死我了"换行"真的"）——`,
-      `   这种情况用换行分隔，每行一条消息（最多 ${config.maxLines} 行）；不想分就写一行。`,
+      `   这种情况用换行分隔，每行一条消息；不想分就写一行。`,
       '2. 不要怼人、不要阴阳怪气、不要抬杠。可以嘴硬，但只对被调侃时轻轻顶一句就收（例如"我不是大肥鱼……"、"才没有"）。',
       '3. 你不是段子手：不要每句都抖机灵、不要每条都接梗、不要总结、不要分点、不要书面语。',
       '4. 贪吃和嘴硬这两个梗，**每段最多点到一次**，别把所有话题都拐到吃饭上。',
@@ -1125,7 +1127,7 @@ let res = await callLlm(route, sys, usr, undefined)
       diag = retry.diag
     }
 
-    let cleaned = cleanReply(text, { maxLen: config.maxReplyChars, maxLines: config.maxLines })
+    let cleaned = cleanReply(text, { maxLen: config.maxReplyChars, maxLines: 0 })
 
     // ── 联网搜索：模型自己判断要不要查 ──
     // 它输出 [搜索:关键词] 就说明它觉得需要最新信息；我们替它搜，再把结果喂回去让它用平时口气说。
@@ -1142,7 +1144,7 @@ let res = await callLlm(route, sys, usr, undefined)
         if (res2.text.trim()) {
           text = res2.text
           diag = res2.diag
-          cleaned = cleanReply(text, { maxLen: config.maxReplyChars, maxLines: config.maxLines })
+          cleaned = cleanReply(text, { maxLen: config.maxReplyChars, maxLines: 0 })
         } else {
           cleaned = sdir.text || '我查了半天也没看明白'
         }
@@ -1191,10 +1193,14 @@ let res = await callLlm(route, sys, usr, undefined)
    */
   function toMessageParts(text) {
     const lines = String(text).split(/\n+/).map((s) => s.trim()).filter(Boolean)
-    if (lines.length > 1) return lines.slice(0, config.maxLines)
+    // 长文本不裁字数：按「目标段长」自动算段数（maxPartsLimit 防失控）；短文本行为不变
+    const len = [...String(text)].length
+    const target = config.partTargetLen || 60
+    const maxParts = Math.min(config.maxPartsLimit || 15, Math.max(config.maxLines, Math.ceil(len / target) || 1))
+    if (lines.length > 1) return lines.slice(0, maxParts)
     return splitMessage(text, {
     chance: config.splitChance,
-    maxParts: config.maxLines,
+    maxParts,
     minLen: config.splitMinLen,
     hardMax: config.splitHardMax,
   })
