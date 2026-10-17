@@ -28,8 +28,9 @@ import {
 
 // 模块级探针：宿主是否真的求值了本模块（排查"改了代码不生效"用；正常无副作用）
 try {
-  appendFileSync(join(homedir(), '.dsh', 'data', 'super-injector', 'dsh-wechat-bot.log'),
-    `[${new Date().toISOString()}] [module] 模块求值开始\n`)
+  const pf = join(homedir(), '.dsh', 'data', 'super-injector', 'dsh-wechat-bot.log')
+  mkdirSync(dirname(pf), { recursive: true })
+  appendFileSync(pf, `[${new Date().toISOString()}] [module] 模块求值开始\n`)
 } catch { /* ignore */ }
 
 export const name = '@dsh-external/dsh-wechat-bot'// Cordis 4.0.4 的 inject 只认**数组**或"服务名→配置"映射；
@@ -328,24 +329,24 @@ const namesFile = join(dirname(memoryDir), 'members.json')
       case 'logout':
         log('微信已登出，等待重新注入')
         break
-      case 'wake': {
-        // 桥说数据库打不开了 → 自己发一句话，让微信写库、打开 message_0.db，轮询随即恢复。
-        // 这样**不用重启客户端**（重启可能要手机确认登录，用户明确说不想手动点）。
-        void (async () => {
-          try {
-            if (isQuiet(quietWindows)) { log('wake：安静时段，不冒泡（等白天）'); return }
-            const rooms = [...rooms.values()].filter((r) => r && r.roomId && r.roomId.endsWith('@chatroom'))
-            if (!rooms.length) { log('wake：还没有已知的群，跳过'); return }
-            const room = rooms[rooms.length - 1]
-            const text = pickProactive() || '我回来啦'
-            log(`wake：往「${room.roomName || room.roomId}」发一句唤醒数据库 → ${text}`)
-            await client.call('sendText', { roomId: room.roomId, text }, 30_000)
-          } catch (e) {
-            log('wake 失败：' + String(e?.message || e))
-          }
-        })()
-        break
-      }
+      case 'wake': {
+        // 桥说数据库打不开了 → 自己发一句话，让微信写库、打开 message_0.db，轮询随即恢复。
+        // 这样**不用重启客户端**（重启可能要手机确认登录，用户明确说不想手动点）。
+        void (async () => {
+          try {
+            if (isQuiet(quietWindows)) { log('wake：安静时段，不冒泡（等白天）'); return }
+            const rooms = [...rooms.values()].filter((r) => r && r.roomId && r.roomId.endsWith('@chatroom'))
+            if (!rooms.length) { log('wake：还没有已知的群，跳过'); return }
+            const room = rooms[rooms.length - 1]
+            const text = pickProactive() || '我回来啦'
+            log(`wake：往「${room.roomName || room.roomId}」发一句唤醒数据库 → ${text}`)
+            await client.call('sendText', { roomId: room.roomId, text }, 30_000)
+          } catch (e) {
+            log('wake 失败：' + String(e?.message || e))
+          }
+        })()
+        break
+      }
       case 'error':
         log('bridge 错误：' + evt.message)
         break
@@ -814,7 +815,7 @@ let res = await callLlm(route, sys, usr, undefined)
       '    我查到结果后会再让你说一遍。**日常闲聊、吐槽、玩笑绝对不要搜** —— 那会很出戏。',
       '9d. 有时我会给你一段【群里以前说过的】—— 那是从群聊记录里翻出来的真事。',
       '    **能接上旧梗旧事就一定要接**（「上次不是说要…」「你又来了」）—— 接上旧事是最像活人的证据。',
-      '    用的时候像自己想起来的一样；别照抄原文、别提「记录/档案/数据库」这类词。'
+      '    用的时候像自己想起来的一样；别照抄原文、别提「记录/档案/数据库」这类词。',
       '9c. **别揪着一件事反复问**：问过一次就够了；对方答了（或群里有人接话）就别再问同一件事。',
       '    有值得长期记住的事（谁是谁、谁喜欢什么、约定、重要事件）时，在回复最后加一行 [记住:内容]。',
       '10. 想发表情包时：库里挑一张就输出 [表情]；想**按当前情境现画一张**（以你的形象为主体），',
