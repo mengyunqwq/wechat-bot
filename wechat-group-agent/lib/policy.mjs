@@ -444,3 +444,22 @@ function cleanOneLine(raw, maxLen) {
   }
   return t
 }
+
+/**
+ * 解析 [稍后:N] —— 模型说「等下我再想想」时，要求 N 分钟后真的回来补一条。
+ * 与 [表情:] 同风格：单独占一行，从正文里抠掉，不发给群。
+ * @returns {{minutes: number, text: string}}
+ */
+export function parseLaterDirective(raw) {
+  let t = String(raw ?? '')
+  let minutes = 0
+  const m = t.match(/\[\s*稍后\s*[:：]?\s*(\d{1,3})\s*(?:分钟|min)?\s*\]/)
+  if (m) {
+    minutes = Math.max(1, Math.min(30, Number(m[1]) || 0))
+    t = t.replace(m[0], '')
+  } else if (/\[\s*稍后\s*\]/.test(t)) {
+    minutes = 3
+    t = t.replace(/\[\s*稍后\s*\]/, '')
+  }
+  return { minutes, text: t.replace(/\n{3,}/g, '\n\n').trim() }
+}

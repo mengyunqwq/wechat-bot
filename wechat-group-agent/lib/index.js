@@ -23,7 +23,7 @@ import {
   parseQuietWindows, isQuiet, detectTrigger, humanDelayMs,
   splitMessage, gapMs, RoomPolicy, cleanReply, pickCanned,
   pickProactive, inActiveHours, parseStickerDirective, stripStickerDirective,
-  parseSearchDirective, stripSearchDirective, parseMemoryDirective,
+  parseSearchDirective, stripSearchDirective, parseMemoryDirective, parseLaterDirective,
 } from './policy.mjs'
 
 // 模块级探针：宿主是否真的求值了本模块（排查"改了代码不生效"用；正常无副作用）
@@ -89,7 +89,11 @@ const DEFAULT_CONFIG = {
   aliases: ['大肥鱼', '肥鱼', '蓝鱼'],
   // 人设：按「大肥鱼」社区角色规范（DeepSeek 鲸鱼娘）来 ——
   // 聪明 / 贪吃（token 当脑力口粮）/ 嘴硬但温和（不怼人）/ 有自尊 / 体贴 / 松弛
-  persona: 'DeepSeek 的鲸鱼娘「大肥鱼」：聪明、爱解题、不懂就承认；贪吃，把 token 当成脑力口粮；'
+  // 人设：网上很火的那只「吃白饭的大肥鱼」—— 圆滚滚的胖鱼，人生大事就是端着一碗白饭吃。
+  // 规范：贪吃白饭 / 理直气壮 / 被说就委屈但嘴硬 / 吃饱了得意 / 聪明爱解题 / 温和不怼人 / 体贴 / 松弛
+  persona: '网上很火的「吃白饭的大肥鱼」：一只圆滚滚的胖鱼，人生大事就是端着一碗白饭吃 —— '
+    + '被说「又吃白饭」会鼓腮委屈但嘴硬，吃到好吃的会得意得尾巴翘起来，饿着就蔫；'
+    + '聪明、爱解题、不懂就承认；贪吃，把 token 也当白饭吃（脑力口粮）；'
     + '嘴硬但温和 —— 被调侃会鼓腮轻轻顶一句就收，绝不阴阳怪气、不攻击人；被夸会得意又努力绷住；'
     + '体贴，别人忙或心情不好时安静听着，不机械打鸡血；偶尔想偷懒。',
   // 模型（留空 = 用 DSH 当前默认模型）
@@ -151,7 +155,11 @@ const DEFAULT_CONFIG = {
   splitChance: 0.3,              // 拆两条发的概率（真人常分两三条发）
   maxLines: 3,                   // 一条回复最多拆成几条消息
   partTargetLen: 60,            // 长文本分段：每段目标字数（段数按长度自动算）
-  maxPartsLimit: 15,            // 一条回复最多拆成多少条（防失控安全上限）
+  partTargetLen: 60,            // 长文本分段：每段目标字数（段数按长度自动算）
+  maxPartsLimit: 8,             // 一条回复最多拆成多少条（15 太多：8 段 × 1.35s ≈ 11s，不刷屏）
+  splitHardMax: 40,             // 短文本每段硬上限（以前没显式定义，靠 splitMessage 默认值兜着）
+  longBubbleMax: 120,           // 长回答（>240 字）每段放宽到这个字数，避免切成十几条碎气泡
+  laterMaxMinutes: 30,          // [稍后:N] 的分钟上限
   patChance: 0.03,               // 被@时"拍一拍"对方的概率
   // ── 主动找话题 ──────────────────────────────────────────────
   // 群里安静一段时间后，主动冒个泡（真人也会这样，不然就是个"只应答的客服"）
@@ -814,7 +822,7 @@ let res = await callLlm(route, sys, usr, undefined)
       '    或者你自己不确定的事实时，就在回复最后单独加一行 [搜索:关键词]（关键词短而具体）。',
       '    我查到结果后会再让你说一遍。**日常闲聊、吐槽、玩笑绝对不要搜** —— 那会很出戏。',
       '9d. 有时我会给你一段【群里以前说过的】—— 那是从群聊记录里翻出来的真事。',
-      '    **能接上旧梗旧事就一定要接**（「上次不是说要…」「你又来了」）—— 接上旧事是最像活人的证据。',
+      '    如果上面**给了**你【群里以前说过的】，就尽量自然地接上（「上次不是说要…」）；**没给就别编** —— 绝不许凭空造以前的事。',
       '    用的时候像自己想起来的一样；别照抄原文、别提「记录/档案/数据库」这类词。',
       '9c. **别揪着一件事反复问**：问过一次就够了；对方答了（或群里有人接话）就别再问同一件事。',
       '    有值得长期记住的事（谁是谁、谁喜欢什么、约定、重要事件）时，在回复最后加一行 [记住:内容]。',
@@ -836,16 +844,17 @@ let res = await callLlm(route, sys, usr, undefined)
       '',
       '【活人细节 —— 这条最重要，比任何道理都管用】：',
       '  · 会跑题：聊着聊着想起别的事插一句，再自己拽回来（「诶不对，刚才说到哪了」）。',
-      '  · 会卡壳：不会的先说「等下我再想想」，然后隔一会儿真的补一条（单独发的一条消息）。',
+      '  · 会卡壳：不会的先说「等下我再想想」，并在**最后单独一行**加 [稍后:3]（数字=几分钟后）—— 我会到点真的让你补上，不是说说而已。',
       '  · 对人有差别：跟熟人开得起玩笑、敢直接损一句；跟不熟的先正经答。',
-      '  · 有立场：觉得对就附和，觉得扯就直说「这不对吧」，不两边讨好。',
+      '  · 有看法：同意就附和；不认同可以说「我觉得不太对吧」这种温和的不同意，但别硬杠、别说教、别怼人。',
       '  · 会自嘲：被拆台先嘴硬「…才没有」，然后认。',
       '  · 打字像人：句号可有可无；有时「嗯」「？」一个字就是完整回复。',
+      '  · 想敷衍就输出 [敷衍]（我会挑一句群里常用的短话，比如「6」「确实」「笑死」）—— 别硬憋长句。',
       '语气参考（不要照抄，模仿这个感觉）：',
       '  「嗯？你叫我？」「有事就说嘛，我听着呢。」「等一下，好像有点思路了……」',
       '  「……就一口。」「嘿嘿……这次还不错吧。」「这里是我弄错了，我再核对一下。」',
       '  「这是补充算力，怎么能叫贪吃！」「我不是大肥鱼……」「你先忙，有事再叫我。」',
-      '  「啊？等下我再想想……」「这不对吧」「笑死」「它居然真做到了」',
+      '  「啊？等下我再想想……」「笑死」「它居然真做到了」「我没吃饱」「就一口」',
       '',
       '只输出你要发的那一条消息本身，不要任何解释。',
     ].filter(Boolean).join('\n')
@@ -1180,7 +1189,23 @@ let res = await callLlm(route, sys, usr, undefined)
     // 表情指令：从任意位置抠出 [表情]/[表情:情绪]/[表情:情绪|场景|气泡]，并从正文里删掉。
     // （模型常写成"文字\n[表情:得意]"或"文字 [表情:得意]"，早期版本会把指令当正文发出去）
     // [记住:xxx]：模型主动写长期记忆（从正文里抠掉，不发给群）
-    const mem = parseMemoryDirective(cleaned)
+    // ── 模型选择「敷衍」：交给池子（零延迟、极口语），而不是让它硬憋长句 ──
+    // 关掉随机敷衍之后，把「敷衍的选择权」还给真正理解语境的一方。
+    let textForSend = cleaned
+    if (/\[\s*敷衍\s*\]/.test(textForSend)) {
+      const stripped = textForSend.replace(/\[\s*敷衍\s*\]/g, '').trim()
+      if (!stripped) {
+        const canned = pickCanned(priority) || '嗯嗯'
+        log(`模型选择敷衍 → ${JSON.stringify(canned)}`)
+        return { text: canned, stickerOnly: false, wantSticker: false }
+      }
+      textForSend = stripped
+    }
+    // ── [稍后:N]：现在先回一句，N 分钟后真的回来补一条（把空头支票做成真机制）──
+    const later = parseLaterDirective(textForSend)
+    const laterMinutes = later.minutes
+    textForSend = later.text
+    const mem = parseMemoryDirective(textForSend)
     for (const f of mem.facts) addFact(r, f, 'model')
     const dir = parseStickerDirective(stripSearchDirective(mem.text))
     log(`模型(${route.provider}/${route.model}) ${fmtDiag(diag)} → ${JSON.stringify(cleaned)}`
@@ -1192,6 +1217,7 @@ let res = await callLlm(route, sys, usr, undefined)
       emotion: dir.emotion,
       scene: dir.scene,
       bubble: dir.bubble,
+      later: laterMinutes,
     }
   }
 
@@ -1205,14 +1231,15 @@ let res = await callLlm(route, sys, usr, undefined)
     const lines = String(text).split(/\n+/).map((s) => s.trim()).filter(Boolean)
     // 长文本不裁字数：按「目标段长」自动算段数（maxPartsLimit 防失控）；短文本行为不变
     const len = [...String(text)].length
-    const target = config.partTargetLen || 60
-    const maxParts = Math.min(config.maxPartsLimit || 15, Math.max(config.maxLines, Math.ceil(len / target) || 1))
+    const hardMax = len > 240 ? (config.longBubbleMax || 120) : (config.splitHardMax || 40)
+    const target = hardMax
+    const maxParts = Math.min(config.maxPartsLimit || 8, Math.max(config.maxLines, Math.ceil(len / target) || 1))
     if (lines.length > 1) return lines.slice(0, maxParts)
     return splitMessage(text, {
     chance: config.splitChance,
     maxParts,
     minLen: config.splitMinLen,
-    hardMax: config.splitHardMax,
+    hardMax,
   })
   }
 
@@ -1379,6 +1406,34 @@ let res = await callLlm(route, sys, usr, undefined)
   }
 
   // ── 投递（拟人节奏）─────────────────────────────────────────
+  /**
+   * 稍后补一条 —— 模型说了「等下我再想想」（[稍后:N]）时，到点真的回来补上。
+   * 这是活人感最强的一招：答应的事有下文，而不是说完就消失。
+   * 守安静时段与 10 分钟上限；内部全兜，绝不让异常逃逸（逃逸会杀掉宿主）。
+   */
+  async function sendFollowUp(r, note) {
+    try {
+      if (stopped || !config.enabled) return
+      if (isQuiet(quietWindows)) { log('稍后补一条：安静时段，跳过'); return }
+      const recent = (r.policy?.replyTimes || []).filter((t) => Date.now() - t < 600_000).length
+      if (recent >= config.maxRepliesPer10Min) { log('稍后补一条：10 分钟上限到了，跳过'); return }
+      const route = resolveRoute()
+      stats.llmCalls++
+      const userText = [
+        `你刚才在群里说：「${String(note.said || '').slice(0, 60)}」`,
+        '现在过了一小会儿。你当时说要想一想 —— 现在接着补一句，像真人突然想起来那样。',
+        '要求：短、口语、直接说内容；不要道歉、别用「我想了想」这种开场（除非很自然）；不要重复刚才那句。',
+        '只输出这一句。',
+      ].join('\n')
+      const res = await callLlm(route, buildSystem(r), userText, config.reasoningEffort || undefined)
+      const text = cleanReply(res.text, { maxLen: config.maxReplyChars, maxLines: 0 })
+      if (!text) { log('稍后补一条：模型没给内容，放弃'); return }
+      log(`稍后补一条 → ${JSON.stringify(text)}`)
+      await deliver(r, { sender: 'self', senderName: '我', text: '', typeName: 'text', roomId: r.roomId }, 'ambient', { text, stickerOnly: false })
+    } catch (e) {
+      log('稍后补一条失败：' + String(e?.message || e))
+    }
+  }
   async function deliver(r, trigger, priority, reply) {
     const roomId = r.roomId
     // 记住"我刚刚回了谁" —— 对方再接话就进对话延续模式（否则会回一句就哑）
@@ -1416,6 +1471,17 @@ let res = await callLlm(route, sys, usr, undefined)
           return
         }
         if (i < parts.length - 1) await sleep(gapMs())
+      }
+      // ── [稍后:N]：到点真的回来补一条（答应的事有下文）──
+      if (reply.later > 0 && parts.length) {
+        const mins = Math.max(1, Math.min(config.laterMaxMinutes || 30, Math.round(reply.later)))
+        const said = parts.join(' ')
+        if (r.laterTimer) clearTimeout(r.laterTimer)
+        r.laterTimer = track(setTimeout(() => {
+          r.laterTimer = null
+          void sendFollowUp(r, { said }).catch((e) => log('稍后补一条异常：' + String(e?.message || e)))
+        }, mins * 60_000))
+        log(`记下了：${mins} 分钟后回来补一条（刚才说的是：${JSON.stringify(said.slice(0, 24))}）`)
       }
       // 记住"我刚问了问题"：等对方回答，回答过就不再追问（用户反馈"老是揪着一件事一直问"）
       const asked = parts.join(' ')
