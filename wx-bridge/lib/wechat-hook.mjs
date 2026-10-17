@@ -143,7 +143,50 @@ export class WeChatHookBridge {
     this._srv.listen(this.cbPort, '127.0.0.1', () => this.log(`回调服务监听 127.0.0.1:${this.cbPort}`))
   }
 
+  /**
+   * 处理 hook 在 SQLite 层抓到的"消息写入"（我们的推送通道）。
+   *
+   * 为什么复用 poller.toEvent：这样推送出来的事件与轮询**逐字段一致**，
+   * 插件一行都不用改，也便于"影子模式"逐条对比两边是否一致。
+   *
+   * 影子模式（默认）：只记日志、不发事件 → 零功能风险。
+   * 接管模式：环境变量 WECHAT_PUSH=1 启动 bridge 才真正发事件。
+   */
+  onPush(ev) {
+    const p = this.poller
+    if (!p || typeof p.toEvent !== 'function') { this.log('推送：轮询器未就绪，丢弃一条'); return }
+    const table = String(ev.table || '')
+    const cols = ev.cols || {}
+    const info = p.tables.get(table) || { roomId: '' }
+    // hook 推来的 cols 就是数据库列（hex 原样），toEvent 内部用 decodeContent 解 hex+zstd
+    const row = {
+      local_type: cols.local_type,
+      message_content: cols.message_content,
+      source: cols.source,
+      real_sender_id: cols.real_sender_id,
+      create_time: cols.create_time,
+      server_id: cols.server_id,
+      local_id: cols.local_id,
+    }
+    this.stats.pushed = (this.stats.pushed || 0) + 1
+    const m = p.toEvent(table, info, row)
+    if (!m) { this.log(`推送：内容为空，丢弃（table=${table}）`); return }
+    const brief = `${m.roomName || m.roomId}｜${m.senderName || m.sender}｜${String(m.text).slice(0, 40)}`
+    if (process.env.WECHAT_PUSH === '1') {
+      this.log(`推送→发事件：${brief}`)
+      this.emit('msg', m)
+    } else if (this.stats.pushed <= 20) {
+      this.log(`推送（影子，只记不发）：${brief}`)   // 前 20 条足够对比，避免刷屏
+    }
+  }
+
   onCallback(ev) {
+    // ── 我们的推送通道：{t:'msg', db, table, cols}（与上面的 hook 回调格式不同）──
+    // 必须最先处理，免得落进下面的"按 type 数字分发"逻辑
+    if (ev && ev.t === 'msg') {
+      try { this.onPush(ev) } catch (e) { this.log('推送处理失败：' + String(e?.message || e)) }
+      return
+    }
     this._cbCount++
     const type = Number(ev.type ?? 0)
     const recvWxid = String(ev.wxid ?? '')
