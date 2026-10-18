@@ -20,7 +20,7 @@ import { fileURLToPath } from 'node:url'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const BRIDGE_DIR = join(HERE, '..')
-const PY = process.env.PYTHON_EXE || 'python'
+const PY = process.env.PYTHON_EXE || 'D:\\Python311\\python.exe'
 const SCRIPT = join(BRIDGE_DIR, 'decode-wechat-image.py')
 const KEY_CACHE = join(BRIDGE_DIR, '..', 'data', 'wechat-image-key.json')
 const TMP_DIR = join(BRIDGE_DIR, '..', 'data', 'wechat-image-tmp')
@@ -54,20 +54,27 @@ export function findLatestDat(root, roomId, { maxAgeMs = 10 * 60_000, nearTs = 0
   const chatHash = md5(roomId)
   const base = join(root, 'msg', 'attach', chatHash)
   if (!existsSync(base)) return null
-  const out = []
+  // 一张图在磁盘上有三个变体：原图（无后缀）/ _h（高清预览）/ _t（缩略图，通常只有 8KB）。
+  // 以前这里只按 mtime 挑 → 经常挑中 _t 缩略图 → 视觉模型"看不清"（用户实测反馈）。
+  // 现在按 md5 基名分组，每组优先取清晰度高的：原图 > _h > _t；再在组间按时间挑。
+  const rank = (n) => (n.endsWith('_t.dat') ? 0 : (n.endsWith('_h.dat') ? 1 : 2))
+  const groups = new Map()
   for (const month of readdirSync(base)) {
     const imgDir = join(base, month, 'Img')
     if (!existsSync(imgDir)) continue
     for (const f of readdirSync(imgDir)) {
       if (!f.endsWith('.dat')) continue
       const p = join(imgDir, f)
-      try {
-        const st = statSync(p)
-        if (st.size < minBytes) continue
-        out.push({ path: p, mtime: st.mtimeMs, size: st.size, name: f })
-      } catch { /* ignore */ }
+      let st
+      try { st = statSync(p) } catch { continue }
+      if (st.size < minBytes) continue
+      const key = f.replace(/_[th]\.dat$/, '.dat')       // 同一张图的三个变体归到一组
+      const cand = { path: p, mtime: st.mtimeMs, size: st.size, name: f, rank: rank(f) }
+      const cur = groups.get(key)
+      if (!cur || cand.rank > cur.rank || (cand.rank === cur.rank && cand.size > cur.size)) groups.set(key, cand)
     }
   }
+  const out = [...groups.values()]
   if (!out.length) return null
   // 1) 有消息时间戳 -> 挑 mtime 最接近的（图片落盘时间 ~ 收到时间）
   if (nearTs) {
