@@ -11,6 +11,8 @@
  */
 import { createHash } from 'node:crypto'
 import { decompress as zstdDecompress } from 'fzstd'
+import { resolveDataRoot } from './wechat-image.mjs'
+import { voiceEnabled, findVoiceFile, decodeVoice, decodeVoiceBytes, xmlVoiceMeta } from './wechat-voice.mjs'
 
 const ZSTD_MAGIC = Buffer.from([0x28, 0xb5, 0x2f, 0xfd])
 const TYPE_NAMES = {
@@ -116,12 +118,12 @@ export class DbPoller {
     }
     if (typeof this.onReady === 'function') { try { this.onReady(this.selfWxid) } catch { /* ignore */ } }
     this.log(`数据库轮询就绪：${this.tables.size} 个会话（${unknown} 个未匹配到 wxid）｜发送者映射 ${this.senderMap.size} 条`)
-    // 关键：0 个会话**不算成功** —— 微信会把闲置的数据库关掉，这时列表就是空的。
-    // 以前把它当成功返回，轮询器便空转、永不重试 → 永久失聪（实测就是"不理我"）。
-    // 抛错让它走重试；重试到第 4 次会触发 onNeedWake（机器人自己发一句把库唤醒）。
-    if (this.tables.size === 0) {
-      throw new Error('没找到任何会话表（数据库可能还没打开，等唤醒后重试）')
-    }
+    // 关键：0 个会话**不算成功** —— 微信会把闲置的数据库关掉，这时列表就是空的。
+    // 以前把它当成功返回，轮询器便空转、永不重试 → 永久失聪（实测就是"不理我"）。
+    // 抛错让它走重试；重试到第 4 次会触发 onNeedWake（机器人自己发一句把库唤醒）。
+    if (this.tables.size === 0) {
+      throw new Error('没找到任何会话表（数据库可能还没打开，等唤醒后重试）')
+    }
     return this.tables.size
   }
 
@@ -223,7 +225,11 @@ export class DbPoller {
         for (const row of rows) {
           info.lastId = Math.max(info.lastId, Number(row.local_id || 0))
           const m = this.toEvent(table, info, row)
-          if (m) { this.emit(m); got++; this.stats.msgs++ }
+          if (m) {
+            // 语音（34）：音频是磁盘文件，先旁路定位+解码成 16k WAV（失败只记日志）
+            await this.enrichVoice(m)
+            this.emit(m); got++; this.stats.msgs++
+          }
         }
       } catch (e) {
         this.stats.errors++
@@ -253,6 +259,7 @@ export class DbPoller {
     return {
       seq: ++this.seq,
       id: String(row.server_id || row.local_id || ''),
+      localId: Number(row.local_id) || 0,   // 语音要拿它去 media_0.db 的 VoiceInfo 取音频（同一个值）
       type,
       typeName: TYPE_NAMES[type] || String(type),
       ts,
@@ -267,8 +274,100 @@ export class DbPoller {
       isAtMe: /@(蓝色大肥鱼|大肥鱼|肥鱼|蓝鱼)/.test(content),
       atAll: content.includes('@所有人'),
       xml: MEDIA_TYPES.includes(type) ? (content || xml) : '',
+      // 语音（34）：音频**不在数据库里**（DB 里只有 368B 的 XML 元数据），是磁盘文件。
+      // 由 enrichVoice() 在发事件前异步定位+解码，成功后填这里；拿不到就保持空串
+      // → 插件侧照旧走 [语音] 降级（语音处理是纯旁路，绝不阻塞消息）。
+      voiceWav: '',
       _fromDb: true,
     }
+  }
+
+  /**
+   * 语音（type 34）旁路：拿到音频 → 解码成 ASR 硬要求格式（16k/单声道/PCM16 WAV）
+   * → 挂到事件的 voiceWav 上。
+   *
+   * **主路是查库**（2026-10-18 真机确认）：音频不在文件系统里，在 `media_0.db` 的
+   * `VoiceInfo.voice_data`（BLOB，hook 返回 hex）。磁盘那条路留作兜底（老逻辑不动）。
+   *
+   * 为什么不写在 toEvent 里：查库/解码都是异步的（还要起 Python 子进程），而 toEvent 是同步的，
+   * 且被 hook 的推送通道复用。放这里，事件结构与原字段一个不动，只是多一个 voiceWav。
+   *
+   * **所有失败都只记日志**：库里没有、解码失败、V2 密钥失效 → 事件照旧发，text 仍是 [语音]。
+   * 开关：WECHAT_VOICE=0 关闭。
+   */
+  async enrichVoice(m) {
+    if (!m || Number(m.type) !== 34) return m
+    if (!voiceEnabled()) return m
+    const tag = `voice-${m.id || 'noid'}-${m.ts || 0}`
+    try {
+      // ── ① 主路：media_0.db / VoiceInfo.voice_data（用 local_id 关联消息）──
+      let blob = null
+      try {
+        blob = await this.fetchVoiceBlob(m.localId, m.roomId)
+      } catch (e) {
+        this.log('语音：查 VoiceInfo 失败（继续走磁盘兜底）：' + String(e?.message || e).slice(0, 160))
+      }
+      if (blob && blob.length) {
+        // XML 的 length 属性 = voice_data 总字节数（含 1 字节前缀）→ 顺手校验，不符只记日志
+        const meta = xmlVoiceMeta(m.xml)
+        this.log(`语音：VoiceInfo 命中 ${blob.length} 字节（local_id=${m.localId}）`
+          + (meta.length ? `｜XML length=${meta.length}${meta.length === blob.length ? ' ✓一致' : ' ✗不一致'}`
+            : '')
+          + (meta.voicelength ? `｜时长约 ${(meta.voicelength / 1000).toFixed(1)}s` : ''))
+        const r = decodeVoiceBytes(blob, { tag, log: (s) => this.log(s) })
+        if (r?.wav) { m.voiceWav = r.wav; return m }
+        this.log('语音：库里的 blob 没解出 WAV（继续走磁盘兜底）')
+      } else {
+        this.log(`语音：VoiceInfo 里没有 local_id=${m.localId} 的音频（可能没同步/已被清理）`)
+      }
+
+      // ── ② 兜底：磁盘（老逻辑：按群 hash+月份 / mtime ±30 分钟找）──
+      if (!this._voiceRoot) this._voiceRoot = await resolveDataRoot(this.api.bind(this))
+      const root = this._voiceRoot
+      if (!root) {
+        this.log('语音：拿不到微信数据根（PRAGMA database_list 无返回），跳过磁盘兜底')
+        return m
+      }
+      const f = findVoiceFile(root, m.roomId, { nearTs: Number(m.ts) || 0, log: (s) => this.log(s) })
+      if (!f) return m
+      const r = decodeVoice(f.path, { tag, log: (s) => this.log(s) })
+      if (r?.wav) m.voiceWav = r.wav
+    } catch (e) {
+      this.log('语音处理异常（不影响消息，照旧按 [语音] 走）：' + String(e?.message || e).slice(0, 200))
+    }
+    return m
+  }
+
+  /**
+   * 从 `media_0.db` 的 `VoiceInfo` 取一条语音的音频字节。
+   *
+   * 实测结构：`VoiceInfo(chat_name_id, create_time, local_id, svr_id, voice_data, data_index)`
+   *   - `local_id` 与消息表 `Msg_<hash>.local_id` **同一个值**（这就是关联键）
+   *   - `chat_name_id` = media_0.db **自己的** `Name2Id.rowid`，其 `user_name` 就是会话 id
+   *     （每个会话表的 local_id 是独立自增的，所以必须带上 chat_name_id 才不会串群）
+   *   - `voice_data` 是 BLOB，hook 把它返回成 **hex 字符串** → 还原成字节
+   *
+   * @returns {Buffer|null} 取不到返回 null（调用方降级）
+   */
+  async fetchVoiceBlob(localId, roomId) {
+    const lid = Number(localId) || 0
+    if (!lid) return null
+    let chatId = 0
+    if (roomId) {
+      const esc = String(roomId).replace(/'/g, "''")
+      const r = await this.q('media_0.db', `SELECT rowid AS rid FROM Name2Id WHERE user_name = '${esc}' LIMIT 1`, 20000)
+      chatId = Number(r?.[0]?.rid || 0)
+    }
+    const where = chatId ? `chat_name_id = ${chatId} AND local_id = ${lid}` : `local_id = ${lid}`
+    const rows = await this.q('media_0.db',
+      `SELECT voice_data FROM VoiceInfo WHERE ${where} ORDER BY create_time DESC LIMIT 1`, 30000)
+    const v = rows?.[0]?.voice_data
+    if (v == null) return null
+    const s = String(v)
+    if (!s) return null
+    // hook 把 blob 转成 hex；万一某版本直接给原始二进制串，就按 latin1 还原
+    const isHex = s.length % 2 === 0 && /^[0-9a-fA-F]+$/.test(s)
+    return isHex ? Buffer.from(s, 'hex') : Buffer.from(s, 'latin1')
   }
 
   start() {

@@ -55,11 +55,21 @@ export class BridgeClient {
         if (msg.t === 'hello') this._status.hello = msg
         this.onEvent(msg)
       })
-      ws.addEventListener('close', () => {
+      ws.addEventListener('close', (ev) => {
         this.connected = false
         this._status.connected = false
         this._failWaiters('bridge 连接已断开')
         if (this.closed) return
+        // 被桥判定为"旧实例已被新实例接管"（close code 4000）→ 绝不重连。
+        // 否则两个【同版本】实例会互相踢 → 无限 ping-pong → 每条消息被处理两遍
+        // → 群里出现重复回答（实测踩过：同一对消息差 1 秒发了两次）。
+        if (ev && ev.code === 4000) {
+          this.closed = true
+          this._status.lastError = '已被新实例接管，停止重连'
+          this.log('已被新实例接管（close 4000）→ 本实例停止重连并退出')
+          this.onEvent({ t: 'ws-close', replaced: true })
+          return
+        }
         this._status.reconnects += 1
         this.log(`bridge 断开，${Math.round(this._retry / 1000)}s 后重连`)
         this.onEvent({ t: 'ws-close' })

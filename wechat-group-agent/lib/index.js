@@ -56,7 +56,7 @@ function normText(s) {
 
 /**
  * 为什么自己造消息对象而**不** import @deepseek-ai/dsh-llm：
- * 插件装在 DSH profile 的 node_modules 下，
+ * 插件装在 profile 的 node_modules 下（`<profile>/node_modules/@dsh-external/...`），
  * 它的祖先链里没有 @deepseek-ai/*（那些在 npx-cache 里），模块级裸 import 会直接抛
  * ERR_MODULE_NOT_FOUND，插件根本加载不起来（表现为 loader 里的 [no-fiber]）。
  * 已注入的 dsh-video-gen 也是同样的"零外部依赖"写法。
@@ -120,6 +120,18 @@ const DEFAULT_CONFIG = {
   visionProvider: 'opencodego-extra',
   visionModel: 'deepseek-v4-flash-vision-exp',
   imageReplyProbability: 0.5,    // 看到（识别出的）图片时回话的概率
+
+  // ── 语音识别（群里发语音 → 转成文字 → 当普通消息处理）────────────
+  // 音频由桥侧定位并解码成 16k/单声道/PCM16 WAV（wx-bridge/lib/wechat-voice.mjs），
+  // 事件里带 voiceWav 绝对路径；这里调 DSH 的 speechToText 服务转写（本地 SenseVoice，
+  // **不需要任何 API key**）。服务不可用/模型没下/转写失败 → 保持 [语音] 原样，不阻塞回复。
+  voiceOnVoice: true,             // 收到语音时尝试转写（false = 完全按老行为，只显示 [语音]）
+  voiceProvider: 'sensevoice-local',   // speechToText 的 provider id（DSH「语音输入」bundle 自带）
+  voiceLanguage: 'zh',            // 语言提示，可选 auto/zh/en/yue/ja/ko
+  voiceMaxSeconds: 120,           // 超过这么长的语音不转写（服务侧上限 4MB≈131s）
+  voiceCacheMax: 500,             // 转写缓存条数（同一条消息只转写一次）
+  voiceAutoPrepare: true,         // 服务未就绪时自动触发模型准备（首次要下载约 239MB）
+  voicePrepareWaitMs: 180_000,    // 等模型准备就绪的上限（超时就跳过本次，保留 [语音]）
 
   // 群里谁是谁：hook 拿不到联系人库（QueryDB 坏了），所以靠"引用消息里的 displayname 自动学习"
   // + 手动设置。键是 wxid，值是昵称。持久化在 data/wechat-bot/members.json
@@ -205,7 +217,7 @@ export function apply(ctx, rawConfig) {
 function applyInner(ctx, rawConfig) {
   const config = { ...DEFAULT_CONFIG, ...(rawConfig ?? {}) }
   const SHORT = 'dsh-wechat-bot'
-const BUILD_VER = '2026-10-16.3'   // 带版本号的实例才允许接管（旧代码没这个字段）
+const BUILD_VER = '2026-10-16.3'   // 抬版本：让新实例压过热重载残留的旧实例   // 带版本号的实例才允许踢掉旧连接（旧代码没这个字段）
   const dshHome = process.env.DSH_HOME || join(homedir(), '.dsh')
   const logFile = config.logFile || join(dshHome, 'super-injector', SHORT + '.log')
   const memoryDir = config.memoryDir || join(dshHome, 'wechat-bot', 'memory')
@@ -284,7 +296,7 @@ const namesFile = join(dirname(memoryDir), 'members.json')
     })()
     loadMemory(r)
     loadFacts(r)      // 载入长期记忆（本地文件，重启不丢）
-    void syncMembers(r)   // 拉群成员昵称（内部有 10 分钟节流；别 force，否则每次建房都拉一次会拖垮桥）
+    void syncMembers(r)   // 拉群成员昵称（内部有 10 分钟节流，别 force，否则每次建房都拉一次会拖垮桥）
     return r
   }
 
@@ -324,6 +336,21 @@ const namesFile = join(dirname(memoryDir), 'members.json')
       try { onBridgeEvent(evt) } catch (e) { log('事件处理异常 ' + String(e?.message || e)) }
     },
   })
+
+  // ── 同进程单例：根治"热重载残留旧实例 → 群里重复回答" ────────────────
+  // 实测症状：同一对回复差 1 秒发了两遍（两个实例都在处理同一条消息）。
+  // 桥侧的"踢旧连接"对【同版本】实例无效 —— 两边会互相踢成无限 ping-pong，
+  // 谁被踢谁就重连，于是两个实例轮流活着。所以在源头根治：
+  // 新实例启动时主动关掉旧实例的桥连接（close() 会把旧实例的重连循环停下，
+  // 即使旧实例跑的是旧代码也一样有效）。
+  try {
+    const prev = globalThis.__WECHAT_BOT_CLIENT__
+    if (prev && prev !== client && typeof prev.close === 'function') {
+      log('检测到同进程旧实例 → 关闭它的桥连接（防重复回答）')
+      prev.close()
+    }
+    globalThis.__WECHAT_BOT_CLIENT__ = client
+  } catch { /* ignore */ }
 
   function onBridgeEvent(evt) {
     switch (evt.t) {
@@ -446,6 +473,37 @@ const namesFile = join(dirname(memoryDir), 'members.json')
         }
       } catch (e) {
         log('识图失败：' + String(e?.message || e))
+      }
+    }
+
+    // 语音（type 34）：桥侧已把音频解码成 16k/单声道/PCM16 WAV（事件字段 voiceWav），
+    // 这里转写成文字，**当成普通文本消息**继续走（记忆/历史/@ 识别/回复都用转写文字）。
+    // 任何失败都保持 [语音] 原样 —— 语音处理是纯旁路，绝不阻塞、绝不抛错。
+    if (m.typeName === 'voice' && config.voiceOnVoice) {
+      if (m.voiceWav) {
+        const t = await transcribeVoice(m.voiceWav, m.id)
+        if (t) {
+          m.voiceText = t              // 转写文字（展示/调试用）
+          m.voiceRawText = m.text      // 原占位符（[语音]）留档
+          m.text = t                   // 文本替换 → 后面全部按文本处理
+          m.typeName = 'text'          // evaluate 的 okType 门槛、记忆、历史都按文本走
+          // @ 识别必须对**转写文字**生效（否则"@机器人 然后发语音"不会被当成 @）
+          const names = [...new Set([config.botName, ...(config.aliases || []), ...(r.selfNames || [])].filter(Boolean))]
+          if (names.some((n) => t.includes('@' + n))) m.isAtMe = true
+          if (t.includes('@所有人')) m.atAll = true
+          // 语音里的 @ 也可能只存在于 XML 的 atuserlist（转写文字里没有 @ 符号）→ 顺带看一眼
+          if (!m.isAtMe && bridgeSelf && String(m.xml || '').includes(bridgeSelf)) {
+            m.isAtMe = true
+            log('语音：XML 的 @ 列表里有我 → 判定被 @')
+          }
+          log(`语音转写文字已当文本处理：${t.slice(0, 60)}`)
+          // 转写成功就删掉临时 WAV（本项目规矩：临时文件不留）
+          try { unlinkSync(m.voiceWav); log('已删除语音临时 WAV') } catch { /* ignore */ }
+        } else {
+          log('语音转写没结果 → 保留 WAV 供排查（桥侧 1 小时后自动清理）：' + m.voiceWav)
+        }
+      } else {
+        log(`语音没有音频文件（voiceWav 为空）→ 保持 [语音]｜${m.roomName || m.roomId}`)
       }
     }
 
@@ -925,6 +983,8 @@ let res = await callLlm(route, sys, usr, undefined)
   function buildUser(r, batch, trigger, priority) {
     const showText = (m) => {
       if (m.imageDesc) return `[图片：${m.imageDesc}]`
+      if (m.voiceText) return m.voiceText            // 语音转写后的文字（当普通文本用）
+      if (m.typeName === 'voice') return '[语音]'    // 转写失败/服务不可用 → 照旧降级
       if (m.typeName === 'emoticon') return '[表情包]'
       if (m.typeName === 'image') return '[图片]'
       if (m.typeName === 'video') return '[视频]'
@@ -972,10 +1032,6 @@ let res = await callLlm(route, sys, usr, undefined)
       + (d.err ? '｜err=' + d.err : '')
   }
 
-  /**
-   * 用视觉模型描述一张图 —— "群里发图能识别并回复"的核心。
-   * 走 ctx.attachments 把图片入库成引用，再以 { type:'image', attachment } 送进视觉模型。
-   */
   // ── 识图结果缓存：同一张图/表情包只识别一次 ──────────────────────
   // 之前每次收到图片或表情包都会调一次视觉模型 —— 同一个表情包发 10 次就识别 10 次：
   // 浪费、慢，而且每次描述可能略有不同，导致机器人对同一张图反应不一致。
@@ -1024,6 +1080,10 @@ let res = await callLlm(route, sys, usr, undefined)
     return desc
   }
 
+  /**
+   * 用视觉模型描述一张图 —— "群里发图能识别并回复"的核心。
+   * 走 ctx.attachments 把图片入库成引用，再以 { type:'image', attachment } 送进视觉模型。
+   */
   async function describeImage(file) {
     if (!config.visionModel) return ''
     let buf
@@ -1065,6 +1125,149 @@ let res = await callLlm(route, sys, usr, undefined)
       untrack(killer)
     }
     return String(text).trim().slice(0, 200)
+  }
+
+  // ── 语音转写：DSH 的 speechToText 服务（本地 SenseVoice，无需 API key）────────
+  // 桥侧已经把语音解码成 16k/单声道/PCM16 WAV（事件字段 voiceWav）。
+  //
+  // 真实签名（读 @deepseek-ai/dsh-experimental-speech-to-text/lib/types/index.d.ts 与
+  // types.d.ts 确认，别凭猜改）：
+  //   resolve(request: { audio: Uint8Array; providerId?: SpeechProviderId; language?: string }): SpeechSpec
+  //   transcribe(spec: SpeechSpec, signal: AbortSignal): Promise<{ text; audioSeconds; inferenceSeconds }>
+  //   snapshot(): { providers: {id, name, preparation: {phase}}[]; selection }
+  //   prepare(id: SpeechProviderId, options?): void        listProviders(): SpeechProviderInfo[]
+  // 服务**惰性获取**（与 attachments/web 同理）：bundle 没启用时拿到 null，
+  // 绝不能让插件卡在 pending（这个坑踩过：inject 里加服务名会让整个插件不加载）。
+  const voiceCacheFile = () =>
+    join(dirname(config.memoryDir || join(homedir(), '.dsh', 'data', 'wechat-bot', 'memory')), 'voice-cache.json')
+  let voiceCache = null
+  let voiceMissingLogged = 0
+  let voicePrepareAt = 0
+
+  function loadVoiceCache() {
+    if (voiceCache) return voiceCache
+    try { voiceCache = JSON.parse(readFileSync(voiceCacheFile(), 'utf8')) || {} } catch { voiceCache = {} }
+    return voiceCache
+  }
+
+  function saveVoiceCache() {
+    try {
+      const f = voiceCacheFile()
+      mkdirSync(dirname(f), { recursive: true })
+      const keys = Object.keys(voiceCache)
+      const max = Number(config.voiceCacheMax) || 500
+      if (keys.length > max) {   // 超上限：丢掉最早的
+        keys.sort((a, b) => (voiceCache[a]?.at || 0) - (voiceCache[b]?.at || 0))
+        for (const k of keys.slice(0, keys.length - max)) delete voiceCache[k]
+      }
+      writeFileSync(f, JSON.stringify(voiceCache))
+    } catch { /* 缓存写失败不影响主流程 */ }
+  }
+
+  /**
+   * 惰性拿 speechToText 服务；不可用返回 null（不抛错、不阻塞）。
+   *
+   * **必须走 ctx.get('speechToText')**：真实 cordis 里直接读 `ctx.speechToText` 会抛
+   * "cannot get property \"speechToText\" without inject"（实测踩到）。
+   * 而给本插件加 `inject: ['speechToText']` 是错的 —— 服务缺失时整个插件会卡在 pending
+   * （见文件顶部 36-40 行的注释：这个坑踩过一次，机器人会整体不加载）。
+   * 属性访问只留给"非 cordis 自测桩"用，并且单独 try 住，免得把异常路径当正常路径。
+   */
+  function speechService() {
+    const usable = (s) => (s && typeof s.transcribe === 'function' && typeof s.resolve === 'function' ? s : null)
+    try {
+      if (typeof ctx.get === 'function') return usable(ctx.get('speechToText'))
+    } catch { /* ignore */ }
+    try { return usable(ctx.speechToText) } catch { return null }
+  }
+
+  /** 服务未就绪（模型没准备）时触发一次 prepare，并等它就绪（首次约 239MB 下载） */
+  async function ensureVoiceReady(stt) {
+    if (!config.voiceAutoPrepare) return
+    const id = String(config.voiceProvider || 'sensevoice-local')
+    if (!id || typeof stt.snapshot !== 'function') return
+    try {
+      const view = () => {
+        const s = stt.snapshot()
+        return (s?.providers || []).find((x) => String(x.id) === id) || null
+      }
+      const first = view()
+      if (!first) { log(`语音服务里没有 provider「${id}」（服务没启用或 id 不对）→ 保持 [语音]`); return }
+      const phase = first.preparation?.phase
+      if (phase === 'ready' || phase === 'standby') return
+      if (Date.now() - voicePrepareAt < 300_000) return      // 5 分钟内不重复触发
+      voicePrepareAt = Date.now()
+      log(`语音模型未就绪（phase=${phase || '?'}）→ 触发准备（首次要下载约 239MB，请耐心等）`)
+      if (typeof stt.prepare === 'function') stt.prepare(id)
+      const deadline = Date.now() + (Number(config.voicePrepareWaitMs) || 180_000)
+      while (Date.now() < deadline) {
+        await sleep(3000)
+        const cur = view()
+        const ph = cur?.preparation?.phase
+        if (ph === 'ready' || ph === 'standby') { log('语音模型已就绪'); return }
+        if (ph === 'failed') {
+          log('语音模型准备失败：' + String(cur?.preparation?.message || '').slice(0, 200))
+          return
+        }
+      }
+      log('等语音模型准备就绪超时 → 本次跳过转写（保留 [语音]）')
+    } catch (e) {
+      log('语音准备流程异常（忽略，继续尝试转写）：' + String(e?.message || e).slice(0, 160))
+    }
+  }
+
+  /**
+   * 转写一个 16k WAV。成功返回文字，失败返回 ''（调用方保持 [语音]）。
+   * msgId 有值时会缓存（同一条消息只转写一次）。
+   */
+  async function transcribeVoice(file, msgId) {
+    const stt = speechService()
+    if (!stt) {
+      if (voiceMissingLogged < 3) {
+        voiceMissingLogged++
+        log('没有 speechToText 服务（DSH 的「语音输入」bundle 没启用？）→ 语音保持 [语音] 原样')
+      }
+      return ''
+    }
+    if (msgId) {
+      const hit = loadVoiceCache()[msgId]
+      if (hit?.text) { log('语音转写命中缓存：' + hit.text); return hit.text }
+    }
+    let buf
+    try { buf = readFileSync(file) } catch (e) { log('语音 WAV 读不到：' + String(e?.message || e)); return '' }
+    if (buf.length < 46) { log('语音 WAV 太小（' + buf.length + 'B），跳过转写'); return '' }
+    const seconds = (buf.length - 44) / 32000
+    if (config.voiceMaxSeconds && seconds > Number(config.voiceMaxSeconds)) {
+      log(`语音 ${seconds.toFixed(1)}s 超过上限 ${config.voiceMaxSeconds}s，跳过转写`)
+      return ''
+    }
+    await ensureVoiceReady(stt)
+    const ac = new AbortController()
+    const killer = track(setTimeout(() => ac.abort(new Error('语音转写超时')), 150_000))
+    try {
+      // providerId 与 language **必须每次显式传**：宿主里 speechToText 的 config.defaultProvider
+      // 与 config.language 都是空的，而且 settings 插件是 disabled → configure() 存不进去。
+      // 所以这里不留空、不做条件展开（留空会让 resolve 抛"provider/language 不支持"）。
+      const spec = stt.resolve({
+        audio: new Uint8Array(buf),
+        providerId: config.voiceProvider || 'sensevoice-local',
+        language: config.voiceLanguage || 'zh',
+      })
+      const t = await stt.transcribe(spec, ac.signal)
+      const text = String(t?.text || '').trim()
+      if (!text) {
+        log(`语音转写结果为空（音频 ${Number(t?.audioSeconds || seconds).toFixed(1)}s，可能没人说话）→ 保持 [语音]`)
+        return ''
+      }
+      log(`语音转写成功（音频 ${Number(t?.audioSeconds || seconds).toFixed(1)}s / 推理 ${Number(t?.inferenceSeconds || 0).toFixed(1)}s）：${text}`)
+      if (msgId) { const c = loadVoiceCache(); c[msgId] = { text, at: Date.now() }; saveVoiceCache() }
+      return text
+    } catch (e) {
+      log('语音转写失败（保持 [语音]）：' + String(e?.message || e).slice(0, 200))
+      return ''
+    } finally {
+      untrack(killer)
+    }
   }
 
   /**
@@ -1639,7 +1842,11 @@ let res = await callLlm(route, sys, usr, undefined)
   // ── 生命周期 ────────────────────────────────────────────────
   ctx.effect(() => {
     client.connect()
-    return () => { client.close() }
+    return () => {
+      // 卸载时清掉全局登记（否则下次热重载会去 close 一个已经没用的对象）
+      try { if (globalThis.__WECHAT_BOT_CLIENT__ === client) delete globalThis.__WECHAT_BOT_CLIENT__ } catch { /* ignore */ }
+      client.close()
+    }
   }, SHORT + ': bridge ws')
 
   ctx.effect(() => () => {

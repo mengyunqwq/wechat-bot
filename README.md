@@ -131,13 +131,49 @@ config.example.json         配置模板
 
 （补丁里已改成 `127.0.0.1`；若你用的是官方预编译版，请自行确认监听地址。）
 
+## 🔊 语音识别（群里发语音 → 转成文字 → 当普通消息回复）
+
+微信语音（`local_type=34`）是 **SILK v3** 编码，音频**不在文件系统里**，而在
+`media_0.db` 的 **`VoiceInfo.voice_data`（BLOB，明文 SILK，不需要 AES 解密）**，
+用 `local_id` 与消息表 `Msg_<hash>` 关联（两边是同一个值）。链路：
+
+```
+微信语音消息（local_type=34，XML 里只有元数据）
+  → wx-bridge 查 media_0.db / VoiceInfo.voice_data（local_id 关联；磁盘目录只作兜底）
+  → 剥掉容器前缀（1 字节 0x02，从 #!SILK_V3 处开始取）
+  → decode-wechat-voice.py（pilk 解 SILK + 纯 Python 重采样）
+  → 16kHz / 单声道 / PCM16 WAV（DSH 语音服务的硬要求）
+  → 事件字段 voiceWav → 插件调 ctx.speechToText 转写
+  → 转写文字当普通消息文本（记忆 / @ 识别 / 回复都按文本走）→ 删临时 WAV
+```
+
+实测样例（一条 1.4 秒语音）：`voice_data` 2488 字节 → 剥前缀后 2487 字节 SILK →
+WAV 1.42s / 45484 字节 → 转写结果「干什么干什么？」（CPU 推理 0.08s）。
+
+### 需要什么（**不需要任何额外 API key**）
+
+| 依赖 | 说明 | 不装会怎样 |
+|---|---|---|
+| DSH 的**「语音输入」bundle** | 提供 `ctx.speechToText` 服务，provider id = `sensevoice-local` | 插件日志打印"没有 speechToText 服务" → 语音保持 `[语音]` |
+| **本地 SenseVoice 模型（约 239MB）** | 首次自动下载到 `<DSH_HOME>/speech-to-text/sensevoice/models/`；也可在 DSH 设置里手动"准备" | 转写报错 → 保持 `[语音]`（下载会继续，下一条语音即可用） |
+| `pip install pilk` | 纯 Python SILK 解码（**不依赖 ffmpeg**） | 解码失败只记日志 → 保持 `[语音]` |
+
+- 服务侧只接受 **canonical 16kHz / mono / PCM16 WAV**（逐字段校验头部），
+  本仓库的 `decode-wechat-voice.py` 就是按这个契约产出的（`--selftest` 会逐项校验头部）。
+- 语音处理是**纯旁路**：定位不到音频、解码失败、模型没准备、转写报错 —— 全都只记日志，
+  消息照旧按 `[语音]` 走，**不会阻塞回复、不会抛错**。
+- 关掉语音识别：环境变量 `WECHAT_VOICE=0`（桥侧），或插件配置 `voiceOnVoice: false`。
+
+---
+
 ## 已知限制（诚实说明）
 
 | 限制 | 原因 |
 |---|---|
 | **发不出真正的 @ 提醒**（只是文本"@名字"） | Hook 的 `BuildTextMessage` 不写 `atlist` 字段 |
 | **群图片依赖本地缓存** | 微信未下载原图时只能拿到缩略图；解密密钥在微信进程内存里，客户端重启后偶发失效（桥已内置自愈：连续探测失败自动重启客户端） |
-| **不支持视频/语音识别** | 未实现 |
+| **视频消息不识别** | 未实现（**语音已支持**，见下节） |
+| **语音识别依赖 DSH 语音服务 + 约 239MB 本地模型** | 用 DSH 自带的本地 SenseVoice（`ctx.speechToText`）；没装/没准备模型时优雅降级成 `[语音]`，不影响其它功能 |
 | **依赖第三方 Hook** | 微信升级后偏移可能失效，需要自行适配（见 `docs/`） |
 
 ---

@@ -172,11 +172,20 @@ export class WeChatHookBridge {
     const m = p.toEvent(table, info, row)
     if (!m) { this.log(`推送：内容为空，丢弃（table=${table}）`); return }
     const brief = `${m.roomName || m.roomId}｜${m.senderName || m.sender}｜${String(m.text).slice(0, 40)}`
-    if (process.env.WECHAT_PUSH === '1') {
-      this.log(`推送→发事件：${brief}`)
-      this.emit('msg', m)
-    } else if (this.stats.pushed <= 20) {
-      this.log(`推送（影子，只记不发）：${brief}`)   // 前 20 条足够对比，避免刷屏
+    const publish = () => {
+      if (process.env.WECHAT_PUSH === '1') {
+        this.log(`推送→发事件：${brief}`)
+        this.emit('msg', m)
+      } else if (this.stats.pushed <= 20) {
+        this.log(`推送（影子，只记不发）：${brief}`)   // 前 20 条足够对比，避免刷屏
+      }
+    }
+    // 语音（34）：音频是磁盘文件，要先定位+解码成 16k WAV（enrichVoice 内部失败只记日志，
+    // 绝不抛错、绝不阻塞）。非语音保持原来的同步顺序 —— 推送通道的行为一个字节都不变。
+    if (Number(m.type) === 34 && typeof p.enrichVoice === 'function') {
+      void p.enrichVoice(m).catch(() => {}).then(publish)
+    } else {
+      publish()
     }
   }
 
