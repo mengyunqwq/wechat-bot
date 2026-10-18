@@ -36,8 +36,9 @@
 | **长期记忆** | 本地 JSON 保存；自动提炼"谁是谁、谁喜欢什么、约定、事件"；**每个群记忆独立** |
 | **认识群里的人** | 从微信数据库读**真实昵称**（备注优先），会 @ 对人；也能自动认出"哪个是自己" |
 | **表情包** | 图库挑选 + 用 Agnes 图生图**现场生成**（角色固定、场景自由、**文字气泡本地绘制**保证字清楚）；**回复不等图**，生成好了再补发 |
-| **识图** | 群里发的图片**自动解密**（微信本地是加密存储的）→ 视觉模型识别 → 参与聊天；识别完**删除临时文件** |
+| **识图** | 群里发的图片**自动解密**（微信本地是加密存储的）→ **优先取原图**（不再拿 8KB 缩略图去识别）→ 视觉模型识别 → 参与聊天；识别完**删除临时文件** |
 | **视频识别** | 群里发的视频：**抽 N 帧拼成一张联系表**（一次视觉调用，省钱）+ **抽音轨走本地语音识别**（视频里说的话也能拿到）→ 参与聊天；**读完删除视频原文件**（省磁盘）；视频没下载时退化为**明文封面**，再不行就 `[视频]` |
+| **一键自检 / 失联监控** | `wechat_bot_selfcheck` 工具：桥连接/微信登录/hook 存活/数据库可读/消息轮询/自己是谁/群昵称一致性/语音识别/识图/表情包库/记忆/LLM 路由 **12 项只读体检**，逐项 ✅❌⚠️ 并给修复建议；另有**心跳监控**，失联时通过文件传输助手告警（静默期 30 分钟，避免刷屏） |
 | **联网搜索** | 模型自己判断什么时候该查（新闻/天气/事实核实），日常闲聊不搜 |
 | **防重复** | 同一句话不重复回、同一问题不追问、回复内容不重发 |
 | **多 agent 接入** | **MCP Server**（Claude Desktop / Cursor / Cline 等直接挂）、**REST API**、**WebSocket**、**托管模式**（桥替 agent 管节流，agent 只管"说什么"） |
@@ -52,7 +53,9 @@
         ▼
    wx-bridge（独立 Node 服务）
         ├── 数据库轮询收消息（不依赖回调，还能拿到真实昵称）
-        ├── 图片解密（内存取密钥 + V2 解密）
+        ├── 图片解密（内存取密钥 + V2 解密，**优先取原图**而不是缩略图）
+        ├── 语音解码（media_0.db 取明文 SILK → 16kHz WAV，交给大脑转写）
+        ├── 视频处理（抽帧拼联系表 + 抽音轨；ffmpeg 走 imageio-ffmpeg，不依赖系统 ffmpeg）
         ├── 表情包库 / Agnes 生图 / 气泡绘制
         ├── REST API  ← 控制面板 / 脚本 / 任意 agent
         ├── MCP Server ← Claude Desktop / Cursor / Cline …
@@ -60,7 +63,7 @@
         │  WebSocket
         ▼
    大脑（二选一）
-        ├── DSH 插件 wechat-group-agent（人设 + LLM + 记忆）
+        ├── DSH 插件 wechat-group-agent（人设 + LLM + 记忆 + 语音/视频识别 + 一键自检与失联监控）
         └── 外部 agent（经托管模式）
 ```
 
@@ -101,22 +104,35 @@ wx-bridge/                  接入层（独立 Node 服务）
   mcp-server.mjs            MCP Server（stdio JSON-RPC）
   PROTOCOL.md               接口协议（MCP / WS / HTTP / 托管 / 策略服务）
   decode-wechat-image.py    微信加密图片解密（V2）
+  decode-wechat-voice.py    微信语音解码（SILK → 16kHz/mono/PCM16 WAV，纯 Python）
+  video-probe.py            视频抽帧 + 拼联系表 + 抽音轨（自带 --selftest）
   add-bubble.py             给表情包画文字气泡
   lib/
     wechat-hook.mjs         hook 传输（发消息、取媒体、防更新守卫、看门狗）
     db-poller.mjs           数据库轮询收消息（替代缺失的回调推送）
-    wechat-image.mjs        定位/解密聊天图片
+    wechat-image.mjs        定位/解密聊天图片（优先原图）
+    wechat-voice.mjs        语音元数据解析 + SILK 解码调度
+    wechat-video.mjs        视频文件/封面定位 + 抽帧抽音轨调度
     policy.mjs              拟人策略（延迟/拆分/作息/节流）—— 零依赖
     hosted.mjs              托管模式（webhook 调外部 agent）
     api-http.mjs            REST API
     stickers.mjs            表情包库
     genimage.mjs            Agnes 图生图
+    mock.mjs                假数据源（本地调试用，不连微信）
 
 wechat-group-agent/         DSH 插件（人设大脑，可选）
+  lib/
+    index.js                插件主逻辑（人设/记忆/语音/视频/自检/心跳）
+    policy.mjs              回复决策策略
+    bridge-client.mjs       与 wx-bridge 的 WebSocket 客户端
 patches/                    对第三方微信 Hook 的补丁
-docs/                       补充文档
+docs/                       补充文档（含 hook-patch-notes.md、media-download-re.md）
+DEPLOY.md                   部署文档（含"接入你自己的图片生成 key"）
+NOTICE.md                   第三方声明与许可说明
 install.ps1                 一键安装
 scripts/build-hook.ps1      自动构建我们改造过的 Hook（上游无 LICENSE，故不发二进制）
+scripts/gen-offset-patterns.py  从微信版本生成偏移特征（Hook 适配用）
+scripts/start-bot.ps1       一键启动（.cmd 为快捷方式）
 config.example.json         配置模板
 ```
 
