@@ -15,6 +15,8 @@ param(
   [string]$TargetDir = "D:\wxhook\wx4110",      # 机器人专用微信目录（version.dll 要放这里）
   [string]$WorkDir   = "E:\wxhook-src",          # 源码工作目录
   [string]$Repo      = "https://github.com/aixed/WeChat-Hook.git",
+  # ⚠️ 必须锁定提交：补丁是针对下面这个提交生成的；上游一更新，git apply 就会失败（实测过）
+  [string]$Commit    = "5c92aab",                 # 补丁的基准提交（aixed/WeChat-Hook）
   [switch]$SkipInstall                            # 已装 VS Build Tools 时跳过安装检查
 )
 
@@ -65,14 +67,26 @@ if ($msbuild) {
 Say "`n[2/5] 获取上游源码"
 $src = Join-Path $WorkDir 'WeChat-Hook'
 if (Test-Path (Join-Path $src '.git')) {
-  Ok "已存在：$src（跳过克隆）"
+  Ok "已存在：$src（跳过克隆，只取提交）"
+  Push-Location $src
+  git fetch --quiet origin 2>$null
+  Pop-Location
 } else {
   New-Item -ItemType Directory -Path $WorkDir -Force | Out-Null
-  Say "  git clone $Repo → $src"
-  git clone --depth 1 $Repo $src
+  Say "  git clone $Repo → $src（完整克隆，便于切到指定提交）"
+  git clone --quiet $Repo $src
   if ($LASTEXITCODE -ne 0) { Bad "克隆失败"; exit 1 }
   Ok "克隆完成"
 }
+# 锁定到补丁的基准提交 —— 不锁的话上游一更新，git apply 必失败（已实测）
+Push-Location $src
+git checkout --quiet $Commit 2>$null
+if ($LASTEXITCODE -ne 0) {
+  Bad "找不到提交 $Commit —— 上游可能改了历史；请用 -Commit <sha> 指定补丁对应的提交"
+  Pop-Location; exit 1
+}
+Ok "已锁定上游提交：$Commit（$(git log -1 --format=%s)）"
+Pop-Location
 
 # ── 3. 应用补丁 ──────────────────────────────────────────────
 Say "`n[3/5] 应用我们的补丁"
