@@ -167,6 +167,7 @@ const DEFAULT_CONFIG = {
   proactiveQuietMs: 1_500_000,   // 群安静超过 25 分钟才考虑主动说话
   proactiveMinGapMs: 3_600_000,  // 同一个群最多每小时主动一次
   proactiveChance: 0.55,         // 每次检查时的触发概率（避免一安静就必说）
+  proactiveMaxStreak: 2,         // 连续主动 N 次都没人理就不再主动（有人说话才清零）
   proactiveCheckMs: 300_000,     // 检查间隔 5 分钟
   proactiveHours: '08:00-23:00', // 只在这个时间段主动（配合作息：醒了才冒泡，睡了就安静）
   // 记忆与日志
@@ -303,6 +304,8 @@ const namesFile = join(dirname(memoryDir), 'members.json')
   }
 
   function push(r, m) {
+    // 有人说话 → 清零"主动没人理"的计数（用户要求：没人回就别继续主动说）
+    if (!m.isSelf) r.proactiveStreak = 0
     r.msgs.push({ ts: m.ts || Date.now(), isSelf: !!m.isSelf, sender: m.sender, senderName: m.senderName, text: m.text })
     if (r.msgs.length > 300) r.msgs = r.msgs.slice(-300)
     if (++r.dirty >= 20) saveMemory(r)
@@ -1305,6 +1308,8 @@ let res = await callLlm(route, sys, usr, undefined)
         log(`「${r.roomName}」上次的问题还没人接（${Math.round((now - r.pendingQuestion.at) / 60000)} 分钟前），这次不主动`)
         continue
       }
+      // 连续主动 N 次都没人理 → 不再主动（有人说话会清零）—— 别自言自语
+      if ((r.proactiveStreak || 0) >= (config.proactiveMaxStreak ?? 2)) continue
       if (now - (r.lastActivityAt || 0) < config.proactiveQuietMs) continue
       if (now - (r.lastProactiveAt || 0) < config.proactiveMinGapMs) continue
       const recentReplies = r.policy.replyTimes.filter((t) => now - t < 600_000).length
@@ -1312,6 +1317,11 @@ let res = await callLlm(route, sys, usr, undefined)
       if (Math.random() > config.proactiveChance) continue           // 没中就下次再掷
       log(`群「${r.roomName}」安静 ${Math.round((now - (r.lastActivityAt || 0)) / 60000)} 分钟 → 主动找话题`)
       try { await proactiveSay(r) } catch (e) { log('主动发言异常：' + String(e?.message || e)) }
+      // 主动发出去就 +1（没人接会一直累加；有人说话会在 push() 里清零）
+      r.proactiveStreak = (r.proactiveStreak || 0) + 1
+      if (r.proactiveStreak === (config.proactiveMaxStreak ?? 2)) {
+        log(`「${r.roomName}」连续 ${r.proactiveStreak} 次主动都没人接 → 先不主动了（等有人说话再恢复）`)
+      }
     }
     // 顺带定期提炼长期记忆（每群独立、攒够新消息才提炼；本地保存，每次对话都带上）
     for (const r of rooms.values()) { try { await extractFacts(r) } catch { /* ignore */ } }
