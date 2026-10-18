@@ -218,19 +218,7 @@ export class DbPoller {
     let got = 0
     for (const [table, info] of this.tables) {
       try {
-        const rows = await this.q('message_0.db',
-          `SELECT local_id, local_type, create_time, real_sender_id, server_id, message_content, source`
-          + ` FROM ${table} WHERE local_id > ${info.lastId} ORDER BY local_id ASC LIMIT 30`, 15000)
-        if (!rows.length) continue
-        for (const row of rows) {
-          info.lastId = Math.max(info.lastId, Number(row.local_id || 0))
-          const m = this.toEvent(table, info, row)
-          if (m) {
-            // 语音（34）：音频是磁盘文件，先旁路定位+解码成 16k WAV（失败只记日志）
-            await this.enrichVoice(m)
-            this.emit(m); got++; this.stats.msgs++
-          }
-        }
+        got += await this.pollTableOnce(table, info)
       } catch (e) {
         this.stats.errors++
         if (this.stats.errors % 10 === 1) this.log(`轮询失败（${table}）：${String(e?.message || e).slice(0, 120)}`)
@@ -243,6 +231,65 @@ export class DbPoller {
     }
     this.stats.polls++
     return got
+  }
+
+  /**
+   * 读**一张表**的新消息并发事件（tick 与 pollRoom 共用同一套游标与读法）。
+   *
+   * 同表串行：tick（每 2.5s）与"推送通知触发的 pollRoom"可能同时进来，
+   * 两边都读 `local_id > lastId` 会把同一段消息发两遍（插件虽按 msgid 去重，但重复事件没意义）
+   * → 用 in-flight 标记让后到的那次直接返回 0，由先到的那次负责。
+   *
+   * @returns {Promise<number>} 本次取到几条
+   */
+  async pollTableOnce(table, info) {
+    if (!this._inflight) this._inflight = new Map()
+    if (this._inflight.has(table)) return 0          // 该表已有一次读取在跑 → 让那一次负责
+    this._inflight.set(table, true)
+    try {
+      const rows = await this.q('message_0.db',
+        `SELECT local_id, local_type, create_time, real_sender_id, server_id, message_content, source`
+        + ` FROM ${table} WHERE local_id > ${info.lastId} ORDER BY local_id ASC LIMIT 30`, 15000)
+      if (!rows.length) return 0
+      let got = 0
+      for (const row of rows) {
+        info.lastId = Math.max(info.lastId, Number(row.local_id || 0))
+        const m = this.toEvent(table, info, row)
+        if (m) {
+          // 语音（34）：音频是磁盘文件，先旁路定位+解码成 16k WAV（失败只记日志）
+          await this.enrichVoice(m)
+          this.emit(m); got++; this.stats.msgs++
+        }
+      }
+      return got
+    } finally {
+      this._inflight.delete(table)
+    }
+  }
+
+  /**
+   * **立刻**轮询单个会话 —— 给 hook 的"写库通知"用（推送通道）。
+   *
+   * 为什么这才是"根治聋窗"的点：通知来自 hook 的 step 探针，触发那一刻微信刚写完库、
+   * **库必然是开着的** —— 不用等下一个 2.5s tick，也不会撞上"库没打开"的空窗。
+   * 与 tick 共用同一套游标（info.lastId）+ 同表串行锁 → 不会重复发消息、不会漏。
+   *
+   * @param {string} roomId
+   * @returns {Promise<number>} 取到几条（0 = 没有新消息 / 表还没登记）
+   */
+  async pollRoom(roomId) {
+    if (!roomId) return 0
+    let hit = null
+    for (const [t, info] of this.tables) {
+      if (info.roomId === roomId) { hit = [t, info]; break }
+    }
+    if (!hit) {
+      // 兜底：直接用 md5(roomId) 拼表名（hash→roomId 映射可能因版本差异对不上）
+      const guess = `Msg_${md5(roomId)}`
+      if (this.tables.has(guess)) hit = [guess, this.tables.get(guess)]
+    }
+    if (!hit) return 0
+    return this.pollTableOnce(hit[0], hit[1])
   }
 
   /** 数据库行 → 与 hook 回调一致的消息事件 */

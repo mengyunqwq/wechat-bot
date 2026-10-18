@@ -353,7 +353,7 @@ export class RoomPolicy {
       if (rand > p) return { reply: false, reason: `对话延续未命中（p=${p}）`, priority }
       const gap = now - this.lastReplyAt
       if (gap < 2000) return { reply: false, reason: `接话太快（${Math.round(gap)}ms<2000ms）`, priority }
-      return { reply: true, reason: `对话延续（第 ${this.turnStreak + 1} 轮）`, priority }
+      return { reply: true, reason: `对话延续（第 ${(this.turnStreak ?? 0) + 1} 轮）`, priority }
     }
 
     const gap = now - this.lastReplyAt

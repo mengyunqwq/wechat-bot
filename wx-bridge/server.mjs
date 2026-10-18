@@ -353,6 +353,7 @@ async function handle(op, a = {}) {
         } catch { /* 解析失败就退化为纯文本 @ */ }
       }
       // split: true → 长文本自动拆成多条发（每条之间用拟人间隔）
+      // chance: 0 表示短文本不拆，长文本靠长度规则必定拆
       const parts = a.split
         ? splitMessage(a.text, { maxParts: a.maxLines || 3, chance: 0 })
         : [a.text]
@@ -407,6 +408,14 @@ async function handle(op, a = {}) {
     }
     case 'genEmotions':
       return listEmotions()
+    case 'fetchVideo': {
+      // 视频（type 43）：主路是"抽帧拼联系表 + 抽音轨 WAV"（本地 ffmpeg，见 lib/wechat-video.mjs），
+      // 拿不到视频文件就退回明文封面。**音轨转写由插件侧做**（DSH 的 speechToText，桥没有 ASR 服务）。
+      if (typeof bridge.fetchVideo !== 'function') return { file: null, error: '该接入层不支持 fetchVideo' }
+      const v = await bridge.fetchVideo(
+        String(a.xml || ''), String(a.roomId || ''), Number(a.ts || 0), Number(a.frames || 6))
+      return v ? { ...v } : { file: null }
+    }
     case 'fetchMedia': {
       // 尽力取到消息里的媒体图（表情包能取到，图片 type=3 通常取不到）
       const file = await bridge.fetchMedia(String(a.xml || ''), Number(a.type || 0), String(a.roomId || ''), Number(a.ts || 0))
@@ -477,22 +486,22 @@ async function handle(op, a = {}) {
         source: 'gen',
         senderName: 'AI 生成',
       })
-      counters.stickersCaptured++
-      // ── 入库后删掉中间文件（用户要求：入库后不留原图）──
-      // stickers.add 已经把图**复制**进 files/ 了，所以删源文件不会影响库。
-      // 实测不删的话，每生成一张就多堆一个 1MB+ 的中间文件（攒了 31 个 / 23.8MB）。
-      // 用动态 import 取 fs，避免动文件顶部的导入行。
-      try {
-        const fsm = await import('node:fs')
-        for (const p of [file, r.raw]) {
-          const s = String(p || '')
-          if (s && fsm.existsSync(s)
-              && !s.includes('stickers\\files') && !s.includes('stickers/files')) {
-            fsm.unlinkSync(s)
-            log('入库后删除中间文件：' + s)
-          }
-        }
-      } catch (e) { log('删中间文件失败（不影响使用）：' + String(e?.message || e)) }
+      counters.stickersCaptured++
+      // ── 入库后删掉中间文件（用户要求：入库后不留原图）──
+      // stickers.add 已经把图**复制**进 files/ 了，所以删源文件不会影响库。
+      // 实测不删的话，每生成一张就多堆一个 1MB+ 的中间文件（攒了 31 个 / 23.8MB）。
+      // 用动态 import 取 fs，避免动文件顶部的导入行。
+      try {
+        const fsm = await import('node:fs')
+        for (const p of [file, r.raw]) {
+          const s = String(p || '')
+          if (s && fsm.existsSync(s)
+              && !s.includes('stickers\\files') && !s.includes('stickers/files')) {
+            fsm.unlinkSync(s)
+            log('入库后删除中间文件：' + s)
+          }
+        }
+      } catch (e) { log('删中间文件失败（不影响使用）：' + String(e?.message || e)) }
       return { cached: false, emotion, extra, bubble, stickerId: item?.id, file, remoteUrl: r.url }
     }
     case 'pruneStickers':

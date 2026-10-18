@@ -21,6 +21,7 @@ import { existsSync, mkdirSync, writeFileSync, readFileSync, readdirSync, rename
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { resolveDataRoot, findLatestDat, decryptDat } from './wechat-image.mjs'
+import { xmlVideoMeta, findVideoCover, findVideoFile, probeVideo } from './wechat-video.mjs'
 import { DbPoller } from './db-poller.mjs'
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
@@ -57,6 +58,10 @@ export class WeChatHookBridge {
     this._seen = new Set()
     this._cbCount = 0
     this._msgCount = 0
+    // 推送通道计数（onPush 里用）。**必须在这里初始化**：onPush 第一行就读 this.stats.pushed，
+    // 而它被 onCallback 的 try/catch 包着 → 少了这行会变成"每条推送都抛错、被静默吞掉"
+    // （表现为推送通道永远没日志，极难排查 —— 实测踩到过）。
+    this.stats = { pushed: 0 }
     // 群列表：该 hook 构建读不到，只能靠"见过的群"持久化下来
     this._roomsFile = join(this.dataDir, 'rooms.json')
     try {
@@ -156,7 +161,35 @@ export class WeChatHookBridge {
     const p = this.poller
     if (!p || typeof p.toEvent !== 'function') { this.log('推送：轮询器未就绪，丢弃一条'); return }
     const table = String(ev.table || '')
-    const cols = ev.cols || {}
+    const cols = ev.cols || null
+    this.stats.pushed = (this.stats.pushed || 0) + 1
+
+    // ── ① 通知式（第三轮改造的主路）：载荷只有 db/table/ts，**没有 cols/值** ──
+    //    为什么：hook 侧"标记 + bind 抓值"走不通（缓存语句标记保持不住 → 值永远抓不到）。
+    //    通知式不传值：按表找到会话 → **立刻**针对该群轮询一次即可 —— 那正是轮询做的事，
+    //    只是被即时触发（而且通知那一刻库必然是开着的）。
+    if (!cols || !Object.keys(cols).length) {
+      const info = p.tables.get(table)
+      const roomId = info?.roomId || ''
+      if (!roomId) {
+        this.log(`推送（通知）：表 ${table} 还没映射到会话（会话表可能刚重建/未登记）→ 跳过`)
+        return
+      }
+      if (process.env.WECHAT_PUSH !== '1') {
+        // 影子模式：只记日志，**不真轮询**（保持"零功能风险"；常规轮询照旧由 tick 跑）
+        if (this.stats.pushed <= 20) {
+          this.log(`推送（影子）：收到 Msg_ 写入通知 → 触发单群轮询（${roomId}）`)
+        }
+        return
+      }
+      if (typeof p.pollRoom !== 'function') { this.log('推送（通知）：轮询器没有 pollRoom → 跳过'); return }
+      void p.pollRoom(roomId)
+        .then((n) => this.log(`推送→单群轮询 ${roomId}：取到 ${n} 条`))
+        .catch((e) => this.log('推送→单群轮询失败：' + String(e?.message || e).slice(0, 120)))
+      return
+    }
+
+    // ── ② 旧的值抓取路径（保留兼容：万一将来 hook 真带上 cols，仍按原样走 toEvent）──
     const info = p.tables.get(table) || { roomId: '' }
     // hook 推来的 cols 就是数据库列（hex 原样），toEvent 内部用 decodeContent 解 hex+zstd
     const row = {
@@ -168,7 +201,6 @@ export class WeChatHookBridge {
       server_id: cols.server_id,
       local_id: cols.local_id,
     }
-    this.stats.pushed = (this.stats.pushed || 0) + 1
     const m = p.toEvent(table, info, row)
     if (!m) { this.log(`推送：内容为空，丢弃（table=${table}）`); return }
     const brief = `${m.roomName || m.roomId}｜${m.senderName || m.sender}｜${String(m.text).slice(0, 40)}`
@@ -684,6 +716,64 @@ export class WeChatHookBridge {
    *  - 该便携客户端不把图片落盘、屏幕截图又是空白（硬件加速）✗
    * 所以这里尽力而为：有 http(s) URL 就下，没有就返回 null。
    */
+  /**
+   * 视频消息（type 43）：**主路**是拿视频文件本身（抽帧拼联系表 + 抽音轨成 16k WAV），
+   * 拿不到视频文件就退回那张**明文封面**（封面兜底路径保留）。
+   *
+   * 分工：抽帧/拼表/抽音轨在桥侧（本地 ffmpeg，见 video-probe.py）；
+   * **音轨转写**在插件侧（DSH 的 speechToText）——桥没有 ASR 服务，所以只把 WAV 路径交给插件。
+   *
+   * @returns {{file:string, kind:'video'|'cover', wav:string, durationSec:number, frames:number, note:string, srcVideo?:string}|null}
+   */
+  async fetchVideo(xml, roomId = '', nearTs = 0, frames = 6) {
+    const log = (s) => this.log(s)
+    let root = ''
+    try { root = await resolveDataRoot(this.api.bind(this)) } catch { /* ignore */ }
+    const meta = xmlVideoMeta(xml)
+    const tag = `video-${Number(nearTs) || Date.now()}-${Math.random().toString(36).slice(2, 6)}`
+
+    // ── ① 主路：视频文件 → 抽帧拼联系表 + 抽音轨 ──
+    try {
+      const f = findVideoFile(root, roomId, {
+        nearTs: Number(nearTs) || 0, declaredBytes: meta.length, log,
+      })
+      if (f) {
+        const r = probeVideo(f.path, { frames: Number(frames) || 6, tag, log })
+        if (r?.sheet) {
+          this.log(`视频内容已抽取：${r.frames} 帧拼成联系表（${Math.round(r.sheetBytes / 1024)}KB）`
+            + `｜时长 ${r.durationSec}s${r.wav ? `｜音轨 ${r.wavSeconds}s → ${r.wav}` : '｜无音轨'}`)
+          return {
+            file: r.sheet, kind: 'video', wav: r.wav || '',
+            durationSec: r.durationSec || 0, frames: r.frames || 0,
+            note: r.wav ? '抽帧+音轨' : '只有画面（无音轨）',
+            // 把"命中的那个视频原文件"一并交给插件：它按 videoDeleteAfterRead 决定读完是否删掉。
+            // 只交出 findVideoFile() 已按 mtime±30min + 大小±10% 校验过的那个，绝不猜。
+            srcVideo: f.path, declaredBytes: meta.length,
+          }
+        }
+        this.log('抽帧/拼表失败 → 退回封面兜底')
+      }
+    } catch (e) {
+      this.log('视频文件处理异常（退回封面兜底）：' + String(e?.message || e))
+    }
+
+    // ── ② 兜底：明文封面（微信给每条视频都落一张，不需要下载）──
+    try {
+      const cover = findVideoCover(root, {
+        nearTs: Number(nearTs) || 0, declaredBytes: meta.cdnthumblength, log,
+      })
+      if (cover) {
+        this.log(`视频封面已取到（${meta.cdnthumbwidth || '?'}x${meta.cdnthumbheight || '?'}`
+          + `，时长 ${meta.playlength || '?'}s）→ ${cover}`)
+        return { file: cover, kind: 'cover', wav: '', durationSec: meta.playlength || 0, frames: 0, note: '只有封面' }
+      }
+      this.log('视频封面也没找到 → 降级成 [视频]')
+    } catch (e) {
+      this.log('取视频封面异常（降级成 [视频]）：' + String(e?.message || e))
+    }
+    return null
+  }
+
   async fetchMedia(xml, type, roomId = '', nearTs = 0) {
     // ── 普通图片（type 3）：回调里没有下载地址，走"本地 .dat 解密"这条路 ──
     // 微信把收到的图片以 V2 加密存在

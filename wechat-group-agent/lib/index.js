@@ -14,7 +14,7 @@
  *
  * 纯 ESM，无编译步骤（本环境没有可用的 tsc），改完 dev_reload_package 即生效。
  */
-import { appendFileSync, mkdirSync, readFileSync, readdirSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
+import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { homedir } from 'node:os'
 import { createHash, randomUUID } from 'node:crypto'
@@ -116,6 +116,19 @@ const DEFAULT_CONFIG = {
   // ── 图像识别（群里发图 → 看懂 → 回一句）──────────────────
   visionOnImage: true,           // 收到图片/表情包时尝试取图并识别
   visionOnEmoticon: true,        // 表情包也识别（想省调用可设 false：表情包含义通常固定）
+  // 视频（type 43）：**主路**是从视频文件里均匀抽 N 帧拼成一张联系表给视觉模型（一次调用 ✓ 省钱），
+  // 并抽音轨转成文字（走 speechToText）；拿不到视频文件才退回那张明文封面（只是封面帧）。
+  // 微信视频**按需下载**：没落盘就自动降级 → 封面 → `[视频]`，绝不阻塞。
+  visionOnVideo: true,
+  videoFrames: 6,                // 抽几帧拼联系表（1~12；短视频会自动少抽）
+  // 视频内容识别完就删掉**微信落盘的那个视频原文件**（用户要求：省磁盘；下次点开微信会重新下载）。
+  // 只删 findVideoFile() 已按"mtime±30分钟 + 大小±10%"匹配过的那一个；**封面不删**（小、且是兜底）。
+  videoDeleteAfterRead: true,
+  // 只拿到封面时"延迟复查"：群里有人点开视频 → 微信才落盘 → 复查到就升级成"全部内容"。
+  // 排期：+videoUpgradeDelayMs，再 +2×delay（默认 60s → 180s），最多 videoUpgradeMaxTries 次。
+  videoUpgradeDelayMs: 60_000,
+  videoUpgradeMaxTries: 2,
+  videoUpgradeFollowUp: true,    // 升级后让它像真人那样补一句（走既有 evaluate/节流，不绕过任何限流）
   visionCacheMax: 500,           // 识图结果缓存条数（同一张图只识别一次；超出丢最早的）
   visionProvider: 'opencodego-extra',
   visionModel: 'deepseek-v4-flash-vision-exp',
@@ -331,7 +344,8 @@ const namesFile = join(dirname(memoryDir), 'members.json')
   function push(r, m) {
     // 有人说话 → 清零"主动没人理"的计数（用户要求：没人回就别继续主动说）
     if (!m.isSelf) r.proactiveStreak = 0
-    r.msgs.push({ ts: m.ts || Date.now(), isSelf: !!m.isSelf, sender: m.sender, senderName: m.senderName, text: m.text })
+    // 带上 msgid：视频"延迟复查"升级内容时要能找回**这一条**的上下文副本（r.msgs 里是拷贝）
+    r.msgs.push({ id: m.id || '', ts: m.ts || Date.now(), isSelf: !!m.isSelf, sender: m.sender, senderName: m.senderName, text: m.text })
     if (r.msgs.length > 300) r.msgs = r.msgs.slice(-300)
     if (++r.dirty >= 20) saveMemory(r)
   }
@@ -463,26 +477,61 @@ const namesFile = join(dirname(memoryDir), 'members.json')
     learnNames(m.text)
     if (m.sender) m.senderName = nameOf(m.sender, m.senderName)
 
-    // 图片/表情包：取图并识别内容
+    // 图片/表情包/视频：取内容并识别
     //   表情包（type 47）：XML 里有 cdnurl，直接下载
     //   普通图片（type 3）：走本地 .dat 解密（我们自己实现，见 wx-bridge/lib/wechat-image.mjs）
-    if (['image', 'emoticon'].includes(m.typeName) && config.visionOnImage
-          && (m.typeName !== 'emoticon' || config.visionOnEmoticon)) {
+    //   视频（type 43）：**主路**抽 N 帧拼联系表 + 抽音轨转写（wx-bridge/lib/wechat-video.mjs）；
+    //                    视频没落盘就退回明文封面（那时只有封面帧）。降级链：视频内容 → 封面 → [视频]
+    if (['image', 'emoticon', 'video'].includes(m.typeName) && config.visionOnImage
+          && (m.typeName !== 'emoticon' || config.visionOnEmoticon)
+          && (m.typeName !== 'video' || config.visionOnVideo)) {
+      const isVideo = m.typeName === 'video'
       try {
-        const media = await client.call('fetchMedia', { xml: m.xml || '', type: m.type, roomId: m.roomId || '', ts: m.ts || 0 }, 90_000)
+        const media = isVideo
+          ? await client.call('fetchVideo', {
+            xml: m.xml || '', roomId: m.roomId || '', ts: m.ts || 0,
+            frames: Number(config.videoFrames) || 6,
+          }, 300_000)
+          : await client.call('fetchMedia', { xml: m.xml || '', type: m.type, roomId: m.roomId || '', ts: m.ts || 0 }, 90_000)
         if (media?.file) {
-          const desc = await describeImageCached(media.file)   // 带缓存：同一张只识别一次
-          if (desc) {
-            m.imageDesc = desc
-            log(`识图成功：${desc}`)
+          const kind = !isVideo ? 'image' : (media.kind === 'video' ? 'videoSheet' : 'videoCover')
+          // 带缓存：同一张（联系表/封面/图片）只识别一次
+          const desc = await describeImageCached(media.file, kind)
+          // 视频音轨：交给 DSH 的 speechToText 转写（复用语音那条链路，自带缓存与降级）
+          let audioText = ''
+          if (isVideo && media.wav) audioText = await transcribeVoice(media.wav, String(m.id || '') + ':va')
+          if (desc || audioText) {
+            m.imageDesc = desc || ''
+            m.videoCover = isVideo && media.kind === 'cover'
+            m.videoAudio = audioText
+            m.videoSeconds = Number(media.durationSec) || 0
+            m.videoFrames = Number(media.frames) || 0
+            if (isVideo && media.kind === 'video') m.videoFull = true   // 拿到视频文件 = 全部内容（不再复查）
+            log(`${isVideo ? (m.videoCover ? '视频封面识别' : '视频内容识别') : '识图'}成功：`
+              + (desc || '（画面没描述出来）') + (audioText ? `｜音轨转写：${audioText}` : ''))
           }
-          // 识别完就删掉我们解密出来的临时图（微信自己的原文件不动，不占额外空间）
-          try { unlinkSync(media.file); log('已删除解密临时图') } catch { /* ignore */ }
+          // 识别完就删临时文件（都是副本，微信自己的原文件/封面不动）
+          try {
+            unlinkSync(media.file)
+            log(isVideo ? (media.kind === 'video' ? '已删除临时联系表' : '已删除临时封面副本') : '已删除解密临时图')
+          } catch { /* ignore */ }
+          if (isVideo && media.wav) { try { unlinkSync(media.wav); log('已删除临时音轨 WAV') } catch { /* ignore */ } }
+          if (isVideo) {
+            if (media.kind === 'video') {
+              // 功能①：读完删掉微信落盘的那个视频原文件（省磁盘；下次点开微信会重新下载）
+              if (config.videoDeleteAfterRead) deleteVideoSource(media.srcVideo, Number(media.declaredBytes) || 0)
+            } else {
+              // 功能②：这次只有封面（视频还没落盘）→ 后台复查，等群里有人点开后升级成"全部内容"
+              scheduleVideoRecheck(r, m)
+            }
+          }
         } else {
-          log('取不到这张图（未下载或密钥失效）')
+          log(isVideo ? '取不到视频内容（视频没落盘、也没有封面）' : '取不到这张图（未下载或密钥失效）')
+          // 连封面都没有也值得复查一次：群里有人点开后视频会落盘
+          if (isVideo) scheduleVideoRecheck(r, m)
         }
       } catch (e) {
-        log('识图失败：' + String(e?.message || e))
+        log((isVideo ? '视频内容识别失败：' : '识图失败：') + String(e?.message || e))
       }
     }
 
@@ -773,7 +822,7 @@ let res = await callLlm(route, sys, usr, undefined)
     const trigger = batch[batch.length - 1]
     // 能回的类型：文本 / 应用卡片 / 已识别出内容的图片与表情包
     const okType = ['text', 'app'].includes(trigger.typeName)
-      || (['image', 'emoticon'].includes(trigger.typeName) && trigger.imageDesc)
+      || (['image', 'emoticon', 'video'].includes(trigger.typeName) && (trigger.imageDesc || trigger.videoAudio))
     if (!okType) {
       stats.skipped++
       return
@@ -1000,6 +1049,14 @@ let res = await callLlm(route, sys, usr, undefined)
 
   function buildUser(r, batch, trigger, priority) {
     const showText = (m) => {
+      // 视频：把"抽的几帧画面 + 音轨转写"如实拼出来（只有封面时也说明白）
+      if (m.videoCover || m.videoSeconds || m.videoAudio || (m.typeName === 'video' && m.imageDesc)) {
+        if (m.videoCover) return `[视频封面：${m.imageDesc || '（没描述出来）'}]`
+        const parts = []
+        if (m.imageDesc) parts.push(`画面（抽了 ${m.videoFrames || '?'} 帧）：${m.imageDesc}`)
+        if (m.videoAudio) parts.push(`音频转写：${m.videoAudio}`)
+        return `[视频${m.videoSeconds ? ' ' + m.videoSeconds + 's' : ''}${parts.length ? '：' + parts.join('；') : '（没拿到内容）'}]`
+      }
       if (m.imageDesc) return `[图片：${m.imageDesc}]`
       if (m.voiceText) return m.voiceText            // 语音转写后的文字（当普通文本用）
       if (m.typeName === 'voice') return '[语音]'    // 转写失败/服务不可用 → 照旧降级
@@ -1019,7 +1076,9 @@ let res = await callLlm(route, sys, usr, undefined)
         : priority === 'continuation'
           ? `${trigger.senderName} 在接着跟你聊（你刚回过他）：${showText(trigger)}`
           : priority === 'image'
-            ? `${trigger.senderName} 在群里发了张图，内容：${trigger.imageDesc}`
+            ? ((trigger.videoCover || trigger.videoSeconds || trigger.videoAudio)
+              ? `${trigger.senderName} 在群里发了一段视频，你掌握的信息：${showText(trigger)}`
+              : `${trigger.senderName} 在群里发了张图，内容：${trigger.imageDesc}`)
             : priority === 'question'
               ? `${trigger.senderName} 在群里问：${showText(trigger)}`
               : `${trigger.senderName} 刚说：${showText(trigger)}`
@@ -1036,7 +1095,9 @@ let res = await callLlm(route, sys, usr, undefined)
       priority === 'continuation'
         ? '接着他的话回一句（像聊天一样自然接住，别重复你刚说过的）：'
         : priority === 'image'
-          ? '就这张图接一句（可以吐槽、可以问一句、可以夸，别像在写图片说明）：'
+          ? ((trigger.videoCover || trigger.videoSeconds || trigger.videoAudio)
+            ? `就这条视频接一句（可以吐槽、可以问一句、可以夸；你看到的是从视频里抽的几帧画面${trigger.videoAudio ? '和音轨转写' : ''}${trigger.videoCover ? '（只有封面帧）' : ''}，**别声称你看完了整段视频**）：`
+            : '就这张图接一句（可以吐槽、可以问一句、可以夸，别像在写图片说明）：')
           : '写你要发的那一条消息（只输出这句话）：',
     ].join('\n')
   }
@@ -1082,17 +1143,19 @@ let res = await callLlm(route, sys, usr, undefined)
     try { return createHash('sha1').update(readFileSync(file)).digest('hex').slice(0, 20) } catch { return '' }
   }
 
-  /** 带缓存的识图：命中缓存就不调视觉模型（同一张图只识别一次） */
-  async function describeImageCached(file) {
+  /** 带缓存的识图：命中缓存就不调视觉模型（同一张图只识别一次）。
+   *  kind='videoCover' 时用"视频封面"的提示词，并单独一个缓存命名空间（同一张图当图片/当封面时描述不串）。 */
+  async function describeImageCached(file, kind = 'image') {
     const h = hashFile(file)
-    if (h) {
+    const key = (h && kind !== 'image') ? kind + ':' + h : h     // 兼容旧缓存（图片仍用纯 hash 键）
+    if (key) {
       const c = loadVisionCache()
-      if (c[h]?.desc) { log('识图命中缓存（跳过模型调用）'); return c[h].desc }
+      if (c[key]?.desc) { log('识图命中缓存（跳过模型调用）'); return c[key].desc }
     }
-    const desc = await describeImage(file)
-    if (h && desc) {
+    const desc = await describeImage(file, kind)
+    if (key && desc) {
       const c = loadVisionCache()
-      c[h] = { desc, at: Date.now() }
+      c[key] = { desc, at: Date.now() }
       saveVisionCache()
     }
     return desc
@@ -1101,8 +1164,9 @@ let res = await callLlm(route, sys, usr, undefined)
   /**
    * 用视觉模型描述一张图 —— "群里发图能识别并回复"的核心。
    * 走 ctx.attachments 把图片入库成引用，再以 { type:'image', attachment } 送进视觉模型。
+   * @param {string} [kind] 'image'（默认）或 'videoCover'（视频封面帧：提示词必须如实说明只有封面）
    */
-  async function describeImage(file) {
+  async function describeImage(file, kind = 'image') {
     if (!config.visionModel) return ''
     let buf
     try { buf = readFileSync(file) } catch { return '' }
@@ -1114,8 +1178,18 @@ let res = await callLlm(route, sys, usr, undefined)
     let content
     try {
       const refs = await att.saveImages([{ data: buf, mediaType }])
+      // 视频必须**如实**告诉模型拿到了什么：抽的几帧画面 + 音轨转写（或只有封面帧）
+      const prompt = kind === 'videoCover'
+        ? '这是别人在微信群里发的一条视频的**封面画面**（只有封面这一帧，不是视频的全部内容，你也看不到声音和过程）。'
+          + '用一到两句话描述这个画面：主体是什么、在做什么、什么场景、氛围如何。中文，直接描述，不要客套话，'
+          + '不要说你看了整个视频。'
+        : kind === 'videoSheet'
+          ? '这是一条微信视频里**均匀抽取的几帧**拼成的联系表（每格下方是时间点）。你看到的是画面，没有声音，也不是完整视频。'
+            + '用两三句话说明：画面里有什么、谁在做什么、有没有变化或场景切换。中文，直接描述，不要客套话，'
+            + '不要声称你看了整个视频。'
+          : '用一到两句话描述这张图：主体是什么、在做什么、什么表情、画面氛围。中文，直接描述，不要客套话。'
       content = [
-        { type: 'text', text: '用一到两句话描述这张图：主体是什么、在做什么、什么表情、画面氛围。中文，直接描述，不要客套话。' },
+        { type: 'text', text: prompt },
         { type: 'image', attachment: refs[0] },
       ]
     } catch (e) {
@@ -1161,6 +1235,124 @@ let res = await callLlm(route, sys, usr, undefined)
   let voiceCache = null
   let voiceMissingLogged = 0
   let voicePrepareAt = 0
+
+  // ── 视频收尾两件事：读完删原文件 / 延迟复查升级 ────────────────────
+  // 背景：微信视频**按需下载**（"自动下载"这条路已确认不可行，见 docs/media-download-re.md），
+  // 只能等群里有人点开、微信自己落盘。所以：
+  //   ① 既然这次点开的收益只有一次 → 用完就把原文件删掉（省磁盘；下次点开微信会重新下载）
+  //   ② 只拿到封面时排两次复查（+60s / +180s）→ 视频一落盘就升级成"全部内容"
+  const videoRechecks = new Map()     // msgid → { tries, max, roomId, m, timer }
+
+  /**
+   * 删掉**微信落盘的那个视频原文件**（不是我们的临时产物）。
+   * 只删 fetchVideo() 交回来的 `srcVideo`（它已按 mtime±30分钟 + 大小±10% 匹配过），
+   * 并在删之前**再核一次大小** —— 万一文件被换过/还在写，就不删（宁可不省磁盘，也不删错别人的文件）。
+   */
+  function deleteVideoSource(path, declaredBytes = 0) {
+    try {
+      const p = String(path || '')
+      if (!p) { log('删除视频原文件跳过：没有拿到源文件路径'); return false }
+      if (!existsSync(p)) { log('删除视频原文件跳过：文件已不在（' + p + '）'); return false }
+      if (declaredBytes > 0) {
+        const size = statSync(p).size
+        const ratio = Math.abs(size - declaredBytes) / declaredBytes
+        if (ratio > 0.10) {
+          log(`删除视频原文件跳过（大小已不符：实际 ${size} vs 声明 ${declaredBytes}，差 ${(ratio * 100).toFixed(1)}%）`)
+          return false
+        }
+      }
+      unlinkSync(p)
+      log(`已删除视频原文件（videoDeleteAfterRead）：${p}`)
+      return true
+    } catch (e) {
+      log('删除视频原文件失败：' + String(e?.message || e))
+      return false
+    }
+  }
+
+  /** 把升级后的内容写回**上下文里的那条副本**（r.msgs 存的是拷贝，光改 m 不够） */
+  function applyVideoUpgrade(r, m, patch) {
+    Object.assign(m, patch)
+    try {
+      const stored = (r.msgs || []).find((x) => (m.id && x.id === m.id)
+        || (!x.id && x.ts === m.ts && x.sender === m.sender))
+      if (stored) Object.assign(stored, patch)
+      else log('视频升级：没在上下文里找到这条消息（只更新了当前事件）')
+    } catch { /* ignore */ }
+  }
+
+  /**
+   * 视频"延迟复查"：只拿到封面（或啥都没拿到）时排期再看一眼，视频落盘了就升级成全部内容。
+   * 排期：+delay，再 +2×delay（默认 60s → 180s），最多 videoUpgradeMaxTries 次，**不无限重试**。
+   * 全程不阻塞消息处理；失败只记日志；同一条只排一次；已完整识别过的直接跳过。
+   */
+  function scheduleVideoRecheck(r, m) {
+    if (!config.visionOnVideo) return
+    if (m.videoFull) return                                   // 已经拿到全部内容 → 不复查
+    const key = String(m.id || '')
+    if (!key) return
+    if (videoRechecks.has(key)) return                        // 同一条只排一次
+    const max = Math.max(1, Math.min(5, Number(config.videoUpgradeMaxTries) || 2))
+    const delay = Math.max(5_000, Number(config.videoUpgradeDelayMs) || 60_000)
+    const entry = { tries: 0, max, roomId: r.roomId, m }
+    videoRechecks.set(key, entry)
+    log(`视频复查已排期：${Math.round(delay / 1000)}s 后再看一次（最多 ${max} 次）｜${r.roomName || r.roomId}`)
+
+    const step = () => {
+      entry.timer = null
+      void (async () => {
+        try {
+          if (stopped || !videoRechecks.has(key)) return
+          entry.tries++
+          const res = await client.call('fetchVideo', {
+            xml: m.xml || '', roomId: m.roomId || '', ts: m.ts || 0,
+            frames: Number(config.videoFrames) || 6,
+          }, 300_000)
+          if (res?.file && res.kind === 'video') {
+            log(`视频复查（第 ${entry.tries} 次）：视频已落盘 → 升级为全部内容`)
+            const desc = await describeImageCached(res.file, 'videoSheet')
+            let audioText = ''
+            if (res.wav) audioText = await transcribeVoice(res.wav, String(m.id || '') + ':va2')
+            applyVideoUpgrade(r, m, {
+              imageDesc: desc || m.imageDesc || '',
+              videoAudio: audioText || m.videoAudio || '',
+              videoCover: false,
+              videoFull: true,
+              videoSeconds: Number(res.durationSec) || m.videoSeconds || 0,
+              videoFrames: Number(res.frames) || 0,
+            })
+            try { unlinkSync(res.file); log('已删除临时联系表') } catch { /* ignore */ }
+            if (res.wav) { try { unlinkSync(res.wav); log('已删除临时音轨 WAV') } catch { /* ignore */ } }
+            if (config.videoDeleteAfterRead) deleteVideoSource(res.srcVideo, Number(res.declaredBytes) || 0)
+            videoRechecks.delete(key)
+            // 像真人那样补一句：**走既有 evaluate**（所有节流/概率/安静时段/上限都生效，不绕过任何限流）
+            if (config.videoUpgradeFollowUp !== false && !config.dryRun) {
+              try { void evaluate(r, [m]).catch((e) => log('视频补话异常：' + String(e?.message || e))) } catch (e) {
+                log('视频补话异常：' + String(e?.message || e))
+              }
+            }
+            return
+          }
+          log(`视频复查（第 ${entry.tries} 次）：仍未落盘`)
+          // ⚠️ 复查只拿到封面时，桥同样会复制一份封面到临时目录 —— 那是**临时文件**，用完即删
+          // （漏了这句会每条复查留一张封面副本，实测踩到过）
+          if (res?.file) { try { unlinkSync(res.file) } catch { /* ignore */ } }
+          if (res?.wav) { try { unlinkSync(res.wav) } catch { /* ignore */ } }
+          if (entry.tries >= entry.max) {
+            log('视频复查结束：仍未落盘')
+            videoRechecks.delete(key)
+            return
+          }
+          entry.timer = track(setTimeout(step, delay * (entry.tries + 1)))   // 60s → 再 120s（共 180s）
+        } catch (e) {
+          log(`视频复查（第 ${entry.tries} 次）异常（忽略）：` + String(e?.message || e).slice(0, 120))
+          if (entry.tries >= entry.max) { videoRechecks.delete(key); return }
+          entry.timer = track(setTimeout(step, delay))
+        }
+      })()
+    }
+    entry.timer = track(setTimeout(step, delay))
+  }
 
   function loadVoiceCache() {
     if (voiceCache) return voiceCache
@@ -1871,6 +2063,7 @@ let res = await callLlm(route, sys, usr, undefined)
     stopped = true
     for (const t of timers) clearTimeout(t)
     timers.clear()
+    videoRechecks.clear()          // 视频延迟复查的计划也一并清掉（卸载后不再触发）
     for (const r of rooms.values()) saveMemory(r)
   }, SHORT + ': timers & memory')
 
