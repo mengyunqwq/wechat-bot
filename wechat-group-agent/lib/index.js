@@ -14,7 +14,7 @@
  *
  * 纯 ESM，无编译步骤（本环境没有可用的 tsc），改完 dev_reload_package 即生效。
  */
-import { appendFileSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs'
+import { appendFileSync, mkdirSync, readFileSync, readdirSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { homedir } from 'node:os'
 import { createHash, randomUUID } from 'node:crypto'
@@ -132,6 +132,14 @@ const DEFAULT_CONFIG = {
   voiceCacheMax: 500,             // 转写缓存条数（同一条消息只转写一次）
   voiceAutoPrepare: true,         // 服务未就绪时自动触发模型准备（首次要下载约 239MB）
   voicePrepareWaitMs: 180_000,    // 等模型准备就绪的上限（超时就跳过本次，保留 [语音]）
+
+  // ── 健康自检 / 失联监控（静默失联是这台机器最大的运维痛点）──────
+  // 心跳每 healthCheckMs 只查最关键的几项（桥连接/登录/hook/轮询），避免频繁打 hook；
+  // 连续 2 次异常（≈10 分钟）才告警；告警除写日志外，还会往 filehelper 发一句人话
+  // （机器人自己微信里能直接看到；filehelper 不会触发它自己的回复逻辑）。
+  healthAlert: true,              // 失联时往 filehelper 发告警（false = 只写日志）
+  healthAlertQuietMs: 1_800_000,  // 同一类告警最多 30 分钟一次（防刷屏）
+  healthCheckMs: 300_000,         // 心跳间隔（5 分钟）
 
   // 群里谁是谁：hook 拿不到联系人库（QueryDB 坏了），所以靠"引用消息里的 displayname 自动学习"
   // + 手动设置。键是 wxid，值是昵称。持久化在 data/wechat-bot/members.json
@@ -379,6 +387,7 @@ const namesFile = join(dirname(memoryDir), 'members.json')
       case 'wake': {
         // 桥说数据库打不开了 → 自己发一句话，让微信写库、打开 message_0.db，轮询随即恢复。
         // 这样**不用重启客户端**（重启可能要手机确认登录，用户明确说不想手动点）。
+        lastWakeAt = Date.now()      // 记下来：健康自检把它当"轮询有问题"的强证据
         void (async () => {
           try {
             // 唤醒是【技术动作】（让微信写库、打开 message_0.db），不是社交发言：
@@ -414,6 +423,7 @@ const namesFile = join(dirname(memoryDir), 'members.json')
   async function handleMsg(m) {
     if (!m || !m.roomId) return
     stats.msgIn++
+    lastMsgAt = Date.now()      // 健康自检用它判断"轮询还在不在工作"（收到消息 = 轮询活着）
     const r = roomState(m.roomId, m.roomName)
     r.lastActivityAt = Date.now()      // 主动找话题要判断"群里多久没动静了"
 
@@ -612,6 +622,14 @@ let res = await callLlm(route, sys, usr, undefined)
   let bridgeSelf = ''
   const selfWxid = () => bridgeSelf || ''
   let atNames = []             // 群里出现过的名字（从 @ 提及里学；@ 用名字就够，不需要 wxid）
+
+  // ── 健康自检 / 失联监控的状态（只读检查，除告警外不发消息）────
+  let lastMsgAt = 0            // 最近一次成功收到消息（判断"轮询还在不在工作"）
+  let lastWakeAt = 0           // 桥最近一次喊"数据库打不开"（强负面信号）
+  let healthStreak = 0         // 连续异常次数（2 次 = 10 分钟 → 告警）
+  let healthAlerted = false    // 是否已经发过"失联"告警（用于恢复时配对告警）
+  let healthLast = null        // 最近一次自检结果（{ at, items, bad }，status 摘要复用）
+  const healthAlertAt = new Map()   // 告警类别 → 最近发送时间（限流：同一类 30 分钟一次）
 
   // hook 拿不到联系人库（QueryDB 坏了）、回调里也没有昵称字段，
   // 所以只能：① 从 @ 提及学"群里有哪些名字" ② 从引用消息学 wxid↔昵称 ③ 手动设置 ④ 持久化
@@ -1899,6 +1917,275 @@ let res = await callLlm(route, sys, usr, undefined)
     return () => clearInterval(iv)
   }, SHORT + ': memory extract')
 
+  // 失联监控：每 5 分钟只查关键项（桥连接/登录/hook/数据库/轮询）——**不全量自检**，
+  // 避免频繁打 hook；连续 2 次异常（≈10 分钟）才告警，恢复也告警。
+  ctx.effect(() => {
+    const iv = setInterval(() => { void healthTick() }, Number(config.healthCheckMs) || 300_000)
+    return () => clearInterval(iv)
+  }, SHORT + ': health heartbeat')
+
+  // ── 健康自检与失联监控 ───────────────────────────────────────
+  // 为什么要有：这台机器人经常"静默失联"（桥掉线 / hook 卡死 / 数据库轮询失败 /
+  // 被 @ 识别因群昵称对不上而失效），但没有任何人知道 —— 全靠人翻日志。
+  //   ① wechat_bot_selfcheck：一条命令把全链路健康度打出来
+  //   ② 心跳：每 5 分钟只查关键项，连续 2 次异常 → 日志 + filehelper 告警；恢复也告警
+  // 红线：**只读**（除告警外不发任何消息）、不改配置、**不重启任何东西**。
+
+  /** 记忆目录概况（文件数 + 最后写入时间） */
+  function memorySummary() {
+    try {
+      const files = readdirSync(memoryDir).filter((f) => f.endsWith('.json'))
+      let newest = 0
+      for (const f of files) {
+        try { newest = Math.max(newest, statSync(join(memoryDir, f)).mtimeMs) } catch { /* ignore */ }
+      }
+      return { files: files.length, newest }
+    } catch { return { files: 0, newest: 0 } }
+  }
+
+  /** 视觉缓存条数（识图链路在不在用的旁证） */
+  function visionCacheCount() {
+    try { return Object.keys(loadVisionCache()).length } catch { return 0 }
+  }
+
+  /** 把异常项翻译成一句人话（告警文案用） */
+  function humanReason(items) {
+    const has = (n) => items.some((i) => i.name === n)
+    if (has('桥连接')) return '桥没连上'
+    if (has('微信登录')) return '微信没登录'
+    if (has('hook 存活')) return 'hook 没响应（读不到微信数据库）'
+    if (has('数据库可读')) return '读不到微信数据库'
+    if (has('消息轮询')) return '收不到群消息了'
+    return items.map((i) => i.name).join('/') + ' 异常'
+  }
+
+  /**
+   * 全链路健康检查（只读）。
+   * @param {object} o
+   * @param {boolean} [o.deep] true = 全量（自检工具用：含群昵称一致性/语音/识图/记忆/路由）；
+   *                           false = 只查失联关键项（心跳用，最多打一次 hook）
+   * @returns {Promise<{at:number, items:Array<{name:string,level:string,text:string,advice:string}>, bad:string[], warn:string[]}>}
+   */
+  async function healthCheck({ deep = true } = {}) {
+    const items = []
+    const add = (name, level, text, advice = '') => { items.push({ name, level, text, advice }) }
+    const cs = client.status
+
+    // ① 桥连接（最关键：桥死了后面全都没意义）
+    add('桥连接', cs.connected ? 'ok' : 'bad',
+      cs.connected ? `已连接（累计重连 ${cs.reconnects} 次）`
+        : `未连接（累计重连 ${cs.reconnects} 次${cs.lastError ? '｜' + cs.lastError : ''}）`,
+      cs.connected ? '' : '桥进程可能挂了：看 wx-bridge（状态检查.cmd / data\\logs\\bridge-*.log），必要时重启桥')
+
+    // ② 微信登录 + 桥侧状态
+    let br = null
+    let brErr = cs.connected ? '' : '桥未连接'
+    if (cs.connected) {
+      try { br = await client.call('status', {}, 8000) } catch (e) { brErr = String(e?.message || e) }
+    }
+    add('微信登录', br?.loggedIn ? 'ok' : 'bad',
+      br ? (br.loggedIn ? `已登录 ${br.self || '(self 待定)'}` : '未登录') : `取不到（${String(brErr).slice(0, 80)}）`,
+      br?.loggedIn ? '' : '客户端掉线/未登录：需要人工扫码或重启客户端（本插件**不会**自动重启）')
+
+    // ③④ hook 存活 + 数据库可读：**一次轻查询**同时证明两件事
+    //    （searchMessages 会真读 message_0.db，是"hook 还活着吗"最直接的证据）
+    const probeRoom = (config.rooms && config.rooms[0]) || [...rooms.keys()][0] || ''
+    let dbOk = false
+    let dbText = ''
+    let dbAdvice = ''
+    if (!cs.connected) {
+      dbText = '未检查（桥未连接）'
+      dbAdvice = '桥恢复后自动可查'
+    } else if (!probeRoom) {
+      dbText = '未检查（还没有已知会话，无法探测）'
+      dbAdvice = '等群里来一条消息后重试'
+    } else {
+      try {
+        const res = await client.call('searchMessages', { roomId: probeRoom, query: '', limit: 1, scan: 50 }, 15000)
+        // 注意：桥的这个 op **不抛错**，失败时返回 { items: [], error: '…' }（server.mjs:329/336）
+        // —— 只看 items 是数组会把它误判成"可读"，必须同时看 error 字段。
+        dbOk = Array.isArray(res?.items) && !res?.error
+        dbText = dbOk ? `message_0.db 可读（探针会话取到 ${res.items.length} 条）`
+          : (res?.error ? '查询失败：' + String(res.error).slice(0, 80) : '查询返回结构异常')
+        dbAdvice = dbOk ? '' : 'hook 的 QueryDB 或轮询器异常：看 bridge 日志里的 SQL 失败行'
+      } catch (e) {
+        dbText = '读不到：' + String(e?.message || e).slice(0, 90)
+        dbAdvice = 'hook 卡死或数据库没打开：桥会自己重试；持续失败看 bridge 日志（可能要唤醒/重启客户端）'
+      }
+    }
+    const dbLevel = dbOk ? 'ok' : (cs.connected && probeRoom ? 'bad' : 'warn')
+    add('hook 存活', dbOk ? 'ok' : dbLevel, dbOk ? 'QueryDB 有响应（hook 正常）' : dbText, dbAdvice)
+    add('数据库可读', dbLevel, dbText, dbAdvice)
+
+    // ⑤ 消息轮询：只认"有证据的失败"，避免"群里没人说话"被误报成失联
+    const idleMin = lastMsgAt ? Math.round((Date.now() - lastMsgAt) / 60000) : null
+    const wakeMin = lastWakeAt ? Math.round((Date.now() - lastWakeAt) / 60000) : null
+    let pollLevel = 'ok'
+    let pollText = idleMin == null ? '还没收到过消息（可能群里一直没人说话）' : `最近一条消息 ${idleMin} 分钟前`
+    let pollAdvice = ''
+    if (!dbOk && cs.connected && probeRoom) {
+      pollLevel = 'bad'; pollText += '｜数据库读不到，轮询必然停了'; pollAdvice = '先修 hook/数据库（见上）'
+    } else if (wakeMin != null && wakeMin <= 15) {
+      pollLevel = 'bad'; pollText += `｜${wakeMin} 分钟前桥喊过"数据库打不开"`; pollAdvice = '桥会自己重试；持续出现说明 message_0.db 打不开'
+    } else if (idleMin != null && idleMin > 180) {
+      pollLevel = 'warn'; pollText += '（超过 3 小时没消息）'; pollAdvice = '如果群里明明有人在说话，说明轮询断了'
+    }
+    add('消息轮询', pollLevel, pollText, pollAdvice)
+
+    if (!deep) {
+      const bad0 = items.filter((i) => i.level === 'bad').map((i) => i.name)
+      const warn0 = items.filter((i) => i.level === 'warn').map((i) => i.name)
+      return { at: Date.now(), items, bad: bad0, warn: warn0 }
+    }
+
+    // ⑥ 自己是谁
+    const me = selfWxid()
+    add('自己是谁', me ? 'ok' : 'warn',
+      me ? `${me}｜群里的名字：${config.botName || '(未设 botName)'}` : '还不知道自己的 wxid',
+      me ? '' : '等一条群消息或配 WECHAT_SELF_WXID（self 未知时"被@必回"判定可能不准）')
+
+    // ⑦ 群昵称一致性（重点：昵称对不上 = @ 识别静默失效）
+    if (!cs.connected) {
+      add('群昵称一致性', 'warn', '未检查（桥未连接）', '桥恢复后重试')
+    } else if (!rooms.size) {
+      add('群昵称一致性', 'warn', '还没有已知群，无法核对', '等群里来一条消息后重试')
+    } else {
+      for (const r of [...rooms.values()].slice(0, 5)) {
+        try {
+          const info = await client.call('members', { roomId: r.roomId }, 20000)
+          const list = info?.members || []
+          if (!list.length) {
+            // 桥的 members 在 hook/数据库没响应时会**回退成空列表**（不抛错）→ 不能当成"昵称不对"
+            add(`群昵称一致性（${r.roomName}）`, 'warn', '取不到群成员（0 名，hook/数据库可能没响应）', '先看上面的 hook 存活/数据库可读两项')
+            continue
+          }
+          const names = list.flatMap((x) => [x.name, x.nick, x.remark, x.alias, x.displayName, x.nickName]
+            .filter(Boolean).map((s) => String(s).trim()))
+          const mine = list.find((x) => x.wxid && x.wxid === (info.selfWxid || me))
+          const myName = mine ? String(mine.name || mine.nick || '').trim() : ''
+          const want = String(config.botName || '').trim()
+          const hit = !!want && names.includes(want)
+          add(`群昵称一致性（${r.roomName}）`, hit ? 'ok' : 'bad',
+            hit ? `「${want}」在群里（${list.length} 名成员）${myName ? '｜我的群昵称：' + myName : ''}`
+              : `群里找不到「${want}」（${list.length} 名成员）${myName ? '｜我的群昵称实际是：' + myName : ''}`,
+            hit ? '' : `在群里改了昵称 → "@我必回"会失效：把 botName 改成实际群昵称${myName ? `（${myName}）` : ''}，或把群昵称改回来`)
+        } catch (e) {
+          add(`群昵称一致性（${r.roomName}）`, 'warn', '取群成员失败：' + String(e?.message || e).slice(0, 70), '桥/hook 恢复后重试')
+        }
+      }
+    }
+
+    // ⑧ 语音识别（服务惰性获取，拿不到就是降级，不是故障）
+    const stt = speechService()
+    if (!stt) {
+      add('语音识别', 'warn', '没有 speechToText 服务（DSH「语音输入」bundle 未启用？）',
+        '语音会保持 [语音] 降级；启用 bundle 即恢复')
+    } else {
+      try {
+        const want = String(config.voiceProvider || 'sensevoice-local')
+        const view = (stt.snapshot?.()?.providers || []).find((x) => String(x.id) === want)
+        const phase = view?.preparation?.phase || '?'
+        const okPhase = phase === 'ready' || phase === 'standby'
+        add('语音识别', okPhase ? 'ok' : 'warn', `${want}｜phase=${phase}`,
+          okPhase ? '' : '模型没准备好 → 语音降级为 [语音]（首次要下载约 239MB）')
+      } catch (e) { add('语音识别', 'warn', 'snapshot 失败：' + String(e?.message || e).slice(0, 70), '') }
+    }
+
+    // ⑨ 识图
+    const visionOn = !!config.visionOnImage && !!config.visionModel
+    add('识图', visionOn ? 'ok' : 'warn',
+      config.visionOnImage
+        ? `${config.visionProvider || '(默认)'} / ${config.visionModel || '(未配模型)'}｜缓存 ${visionCacheCount()} 条`
+        : '已关闭（visionOnImage=false）',
+      visionOn ? '' : '想让它看懂群里的图：设 visionOnImage=true 并配 visionModel')
+
+    // ⑩ 表情包库
+    add('表情包库', br ? 'ok' : 'warn', br ? `${br.stickers?.count ?? 0} 张（${br.stickers?.mb ?? 0}MB）` : '取不到（桥未连接）', '')
+
+    // ⑪ 记忆
+    const mem = memorySummary()
+    const memAgeMin = mem.newest ? Math.round((Date.now() - mem.newest) / 60000) : null
+    add('记忆', mem.files ? 'ok' : 'warn',
+      `${mem.files} 个群的记忆文件｜最后写入 ${memAgeMin == null ? '从未' : memAgeMin + ' 分钟前'}`,
+      mem.files ? '' : '还没有记忆文件（收到消息后会自动建）')
+
+    // ⑫ LLM 路由（**只报告，不真调模型** —— 省钱）
+    try {
+      const route = resolveRoute()
+      add('LLM 路由', route?.provider && route?.model ? 'ok' : 'warn', `${route?.provider} / ${route?.model}（只报告，未调用）`, '')
+    } catch (e) {
+      add('LLM 路由', 'warn', '未确定：' + String(e?.message || e).slice(0, 70), '在插件配置里显式指定 provider/model')
+    }
+
+    const bad = items.filter((i) => i.level === 'bad').map((i) => i.name)
+    const warn = items.filter((i) => i.level === 'warn').map((i) => i.name)
+    return { at: Date.now(), items, bad, warn }
+  }
+
+  /**
+   * 失联告警：写日志 +（可选）往 filehelper 发一句人话。
+   * filehelper 是"自己微信里能直接看到"的通道，且机器人给它发消息**不会**触发自己的回复逻辑。
+   * 限流：同一类最多 config.healthAlertQuietMs（默认 30 分钟）一次，防刷屏。
+   */
+  async function alertHealth(badItems, { recovered = false, mins = 0 } = {}) {
+    const names = badItems.map((i) => i.name)
+    const detail = badItems.map((i) => `${i.name}：${i.text}`).join('；')
+    if (recovered) {
+      log('✅ 已恢复：关键项都正常了（失联期间累计告警过一次）')
+    } else {
+      log(`⚠️ 失联告警：${names.join('/')} 异常｜${detail}`)
+    }
+    const now = Date.now()
+    const quiet = Number(config.healthAlertQuietMs) || 1_800_000
+    const last = healthAlertAt.get('offline') || 0
+    if (!recovered && now - last < quiet) {
+      log(`（告警限流：同一类 ${Math.round(quiet / 60000)} 分钟内不重复发，还剩 ${Math.round((quiet - (now - last)) / 60000)} 分钟）`)
+      return false
+    }
+    if (!config.healthAlert) { log('（healthAlert=false：只写日志，不发 filehelper）'); return false }
+    healthAlertAt.set('offline', now)
+    const text = recovered
+      ? '✅ 我恢复了：现在能正常收群消息了'
+      : `⚠️ 我好像断线了：${humanReason(badItems)}（已 ${mins || 10} 分钟）`
+    try {
+      await client.call('sendText', { roomId: 'filehelper', text }, 15000)
+      log('失联告警已发到 filehelper：' + text)
+      return true
+    } catch (e) {
+      log('失联告警发送失败（不影响别的流程）：' + String(e?.message || e).slice(0, 120))
+      return false
+    }
+  }
+
+  /** 心跳：只查关键项；连续 2 次异常才告警；恢复时配对告警 */
+  async function healthTick() {
+    if (stopped) return
+    try {
+      const h = await healthCheck({ deep: false })
+      healthLast = h
+      if (h.bad.length) {
+        healthStreak++
+        const badItems = h.items.filter((i) => i.level === 'bad')
+        log(`健康检查：${h.bad.length} 项异常（连续第 ${healthStreak} 次）｜`
+          + badItems.map((i) => `${i.name}=${i.text}`).join('；'))
+        if (healthStreak >= 2) {
+          const mins = Math.round((healthStreak * (Number(config.healthCheckMs) || 300_000)) / 60000)
+          await alertHealth(badItems, { mins })
+          healthAlerted = true
+        }
+      } else {
+        if (healthAlerted) {
+          await alertHealth([], { recovered: true })
+          healthAlerted = false
+          healthAlertAt.delete('offline')   // 恢复后清零：下次真挂了立刻告警，不干等 30 分钟
+        }
+        healthStreak = 0
+      }
+    } catch (e) {
+      log('健康检查异常（不影响主流程）：' + String(e?.message || e).slice(0, 160))
+    }
+  }
+
   // ── 控制工具（给我自己和用户在 GUI 里用）────────────────────
   const textOut = {
     schema: { type: 'string' },
@@ -1937,6 +2224,13 @@ let res = await callLlm(route, sys, usr, undefined)
         lines.push(`微信：${bridge.loggedIn ? '已登录 ' + bridge.self : '未登录'}｜模式：${bridge.mock ? 'mock' : '真实'}｜表情包库：${bridge.stickers?.count ?? 0} 张（${bridge.stickers?.mb ?? 0}MB）`)
         lines.push(`计数：收到 ${bridge.counters?.msgsIn ?? 0}｜发出 ${bridge.counters?.msgsOut ?? 0}｜收藏表情 ${bridge.counters?.stickersCaptured ?? 0}｜错误 ${bridge.counters?.errors ?? 0}`)
       }
+      // 健康摘要：复用 6 分钟内的心跳结果（不重复打 hook），过期就现查一次轻量检查
+      try {
+        const h = (healthLast && Date.now() - healthLast.at < 6 * 60_000) ? healthLast : await healthCheck({ deep: false })
+        const ageMin = Math.round((Date.now() - h.at) / 60000)
+        lines.push(`健康：${h.bad.length ? '❌ ' + h.bad.join(' / ') : (h.warn.length ? '⚠️ ' + h.warn.join(' / ') : '✅ 正常')}`
+          + `（${ageMin === 0 ? '刚刚' : ageMin + ' 分钟前'}检查${h.bad.length ? '，详情用 wechat_bot_selfcheck' : ''}）`)
+      } catch (e) { lines.push('健康：取不到（' + String(e?.message || e).slice(0, 60) + '）') }
       lines.push(`本插件计数：收到 ${stats.msgIn}｜回复 ${stats.replied}｜跳过 ${stats.skipped}｜LLM ${stats.llmCalls}（失败 ${stats.llmErrors}）｜发文字 ${stats.sentText}｜发表情 ${stats.sentSticker}｜拍一拍 ${stats.sentPat}`)
       lines.push(`拟人参数：闲聊概率 ${config.replyProbability}｜冷却 ${config.minReplyGapMs / 1000}s｜10分钟上限 ${config.maxRepliesPer10Min}｜安静时段 ${config.quietHours || 'off'}｜补图概率 ${config.stickerChance}`)
       try {
@@ -1955,6 +2249,36 @@ let res = await callLlm(route, sys, usr, undefined)
       return lines.join('\n')
     },
   }), SHORT + ': wechat_bot_status')
+
+  ctx.effect(() => ctx.tools.register({
+    name: 'wechat_bot_selfcheck',
+    description: '微信群聊机器人一键自检：桥连接/微信登录/hook 存活/数据库可读/消息轮询/自己是谁/群昵称一致性/语音识别/识图/表情包库/记忆/LLM 路由，'
+      + '逐项 ✅❌⚠️ 打出来并给修复建议（纯只读：不发消息、不改配置、不重启任何东西）。'
+      + '机器人"静默失联"或"被@不回复"时先跑这个。',
+    parameters: { type: 'object', properties: {} },
+    output: textOut,
+    async execute() {
+      const h = await healthCheck({ deep: true })
+      healthLast = h
+      const icon = (lv) => (lv === 'ok' ? '✅' : lv === 'warn' ? '⚠️' : '❌')
+      const lines = ['== 微信机器人自检 ==']
+      lines.push(`时间：${new Date(h.at).toLocaleString()}｜接入：${config.bridgeUrl}｜插件：${config.enabled ? '启用' : '停用'}`)
+      for (const it of h.items) {
+        lines.push(`${icon(it.level)} ${it.name}：${it.text}`)
+        if (it.advice) lines.push(`      建议：${it.advice}`)
+      }
+      lines.push('')
+      if (h.bad.length) {
+        lines.push(`总结：有 ${h.bad.length} 项异常：${h.bad.join('、')}`
+          + (h.warn.length ? `｜另有 ${h.warn.length} 项提醒：${h.warn.join('、')}` : ''))
+      } else if (h.warn.length) {
+        lines.push(`总结：关键项全部正常（另有 ${h.warn.length} 项提醒：${h.warn.join('、')}）`)
+      } else {
+        lines.push('总结：全链路正常 ✅')
+      }
+      return lines.join('\n')
+    },
+  }), SHORT + ': wechat_bot_selfcheck')
 
   ctx.effect(() => ctx.tools.register({
     name: 'wechat_bot_say',
@@ -1993,7 +2317,7 @@ let res = await callLlm(route, sys, usr, undefined)
 
   ctx.effect(() => ctx.tools.register({
     name: 'wechat_bot_config',
-    description: '读取或实时修改微信机器人的拟人参数（无需重启）。key 留空 = 查看全部；给了 value = 修改。可改：enabled/dryRun/persona/replyProbability/minReplyGapMs/maxRepliesPer10Min/quietHours/stickerChance/splitChance/patChance/botName/rooms/temperature/botName。',
+    description: '读取或实时修改微信机器人的拟人参数（无需重启）。key 留空 = 查看全部；给了 value = 修改。可改：enabled/dryRun/persona/replyProbability/minReplyGapMs/maxRepliesPer10Min/quietHours/stickerChance/splitChance/patChance/botName/rooms/temperature/voiceOnVoice/healthAlert/healthAlertQuietMs/healthCheckMs。',
     parameters: {
       type: 'object',
       properties: {
