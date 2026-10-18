@@ -71,6 +71,35 @@ export function xmlVideoMeta(xml) {
  * @param {(s:string)=>void} [o.log]
  * @returns {string|null} 临时副本的绝对路径
  */
+/**
+ * **硬校验**：XML 声明了字节数时，把大小不符（>±10%）的候选**直接丢掉**。
+ *
+ * 为什么必须硬（线上真 bug，2026-10-18 实测）：
+ *   群里两条视频挨着，第二条还没落盘，但"按 mtime 最接近"会匹配到**第一条的文件**；
+ *   旧逻辑只记一句"可能选错了文件，仍按找到的返回" → 结果把**另一个视频的内容**当成这条描述了 ✗
+ *   （有人问"这个视频说了什么"，答的是前一条 meme）。
+ *   描述一个错的视频，比只用封面更糟 —— 封面至少确定是这条视频的封面。
+ * @returns {Array|null} 过滤后的候选；声明大小对不上任何一个时返回 null（调用方应放弃主路 → 退回封面）
+ */
+function sizeFiltered(cands, declaredBytes, tag, log) {
+  if (!declaredBytes || declaredBytes <= 0) {
+    log(`${tag}：XML 没给字节数，只能按时间匹配（有选错的风险）`)
+    return cands
+  }
+  const ok = cands.filter((c) => Math.abs(c.size - declaredBytes) / declaredBytes <= 0.10)
+  if (!ok.length) {
+    const near = cands.reduce((a, b) => (Math.abs(b.size - declaredBytes) < Math.abs(a.size - declaredBytes) ? b : a))
+    const ratio = Math.abs(near.size - declaredBytes) / declaredBytes
+    log(`${tag}：${cands.length} 个候选都与声明大小不符（最接近的 ${near.name} 差 ${(ratio * 100).toFixed(1)}%），`
+      + '已全部丢弃 → 放弃主路')
+    return null
+  }
+  if (ok.length < cands.length) {
+    log(`${tag}：按声明大小筛掉 ${cands.length - ok.length} 个候选（保留 ${ok.length} 个）`)
+  }
+  return ok
+}
+
 export function findVideoCover(root, { nearTs = 0, toleranceMs = 30 * 60_000, declaredBytes = 0, log = () => {} } = {}) {
   if (!root || !existsSync(root)) { log(`视频封面定位：数据根不存在（${root || '空'}）`); return null }
   const base = join(root, 'msg', 'video')
@@ -97,9 +126,14 @@ export function findVideoCover(root, { nearTs = 0, toleranceMs = 30 * 60_000, de
     return null
   }
 
+  // ── 用 XML 的 cdnthumblength 做**硬校验**：不符的候选直接丢 ──
+  // 为什么要硬：宁可退回 [视频]，也不要拿**别人视频的封面**去描述（制造错误信息比降级更糟）。
+  const pool = sizeFiltered(cands, declaredBytes, '视频封面定位', log)
+  if (!pool) return null
+
   let best
   if (nearTs) {
-    best = cands.reduce((a, b) => (Math.abs(b.mtime - nearTs) < Math.abs(a.mtime - nearTs) ? b : a))
+    best = pool.reduce((a, b) => (Math.abs(b.mtime - nearTs) < Math.abs(a.mtime - nearTs) ? b : a))
     const diff = Math.abs(best.mtime - nearTs)
     if (diff > toleranceMs) {
       log(`视频封面定位：最近的候选偏离消息时间 ${Math.round(diff / 60000)} 分钟（>${Math.round(toleranceMs / 60000)} 分钟容差），放弃：${best.name}`)
@@ -107,21 +141,11 @@ export function findVideoCover(root, { nearTs = 0, toleranceMs = 30 * 60_000, de
     }
     log(`视频封面定位：按时间命中 ${best.name}（偏离 ${Math.round(diff / 1000)}s）`)
   } else {
-    cands.sort((a, b) => b.mtime - a.mtime)
-    best = cands[0]
+    pool.sort((a, b) => b.mtime - a.mtime)
+    best = pool[0]
     log(`视频封面定位：无消息时间戳，取最新的 ${best.name}`)
   }
-
-  // 用 XML 的 cdnthumblength 校验（±10%）：不符只记日志，**仍然返回**（别因为校验把能用的丢掉）
-  if (declaredBytes > 0) {
-    const ratio = Math.abs(best.size - declaredBytes) / declaredBytes
-    if (ratio > 0.10) {
-      log(`视频封面定位：大小与 XML 声明不符（实际 ${best.size} vs 声明 ${declaredBytes}，差 ${(ratio * 100).toFixed(1)}%）`
-        + ' —— 可能选错了封面，仍按找到的返回')
-    } else {
-      log(`视频封面定位：大小与声明吻合（${best.size} ≈ ${declaredBytes}）`)
-    }
-  }
+  if (declaredBytes > 0) log(`视频封面定位：大小与声明吻合（${best.size} ≈ ${declaredBytes}）`)
 
   // ⚠️ 复制到临时目录：插件会删掉返回的文件，绝不能把微信自己的封面路径交出去
   let dst
@@ -214,10 +238,19 @@ export function findVideoFile(root, roomId, { nearTs = 0, toleranceMs = 30 * 60_
     return null
   }
 
+  // ── 先用 XML 的 length（视频本体字节数）**硬筛**，再按时间挑 ──
+  // 顺序很关键：旧逻辑"先按时间挑、再事后校验、不符也返回"正是线上答错视频的根因 ✗
+  // （两条视频挨着时，mtime 最接近的往往是**邻居的文件**）。
+  const pool = sizeFiltered(cands, declaredBytes, '视频文件定位', log)
+  if (!pool) {
+    log('视频文件定位：放弃主路 → 退回封面')
+    return null
+  }
+
   // 有消息时间戳 → mtime 最接近的（同分时优先"扩展名像视频"的）
   let best
   if (nearTs) {
-    best = cands.reduce((a, b) => {
+    best = pool.reduce((a, b) => {
       const da = Math.abs(a.mtime - nearTs), db = Math.abs(b.mtime - nearTs)
       if (db !== da) return db < da ? b : a
       return b.score > a.score ? b : a
@@ -229,21 +262,11 @@ export function findVideoFile(root, roomId, { nearTs = 0, toleranceMs = 30 * 60_
     }
     log(`视频文件定位：按时间命中 ${best.name}（${Math.round(best.size / 1024)}KB，偏离 ${Math.round(diff / 1000)}s，来源：${best.why}）`)
   } else {
-    cands.sort((a, b) => b.mtime - a.mtime)
-    best = cands[0]
+    pool.sort((a, b) => b.mtime - a.mtime)
+    best = pool[0]
     log(`视频文件定位：无消息时间戳，取最新的 ${best.name}（${Math.round(best.size / 1024)}KB，来源：${best.why}）`)
   }
-
-  // 用 XML 的 length（视频本体字节数）校验（±10%）：不符只记日志，仍然返回
-  if (declaredBytes > 0) {
-    const ratio = Math.abs(best.size - declaredBytes) / declaredBytes
-    if (ratio > 0.10) {
-      log(`视频文件定位：大小与 XML 声明不符（实际 ${best.size} vs 声明 ${declaredBytes}，差 ${(ratio * 100).toFixed(1)}%）`
-        + ' —— 可能选错了文件，仍按找到的返回')
-    } else {
-      log(`视频文件定位：大小与声明吻合（${best.size} ≈ ${declaredBytes}）`)
-    }
-  }
+  if (declaredBytes > 0) log(`视频文件定位：大小与声明吻合（${best.size} ≈ ${declaredBytes}）`)
   return best
 }
 
