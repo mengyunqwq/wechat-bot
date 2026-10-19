@@ -42,6 +42,13 @@ export const inject = ['tools', 'llm']
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 
 /**
+ * "群里明确要求发语音"的识别（用于 must-send-voice 那条路径）。
+ * 有意收得比较紧：只认"发/来/录/整…语音""用语音说""说句话""出个声"这类**直接要求**，
+ * 免得聊到"语音识别/语音包"这种话题时被误判成"要我发语音"。
+ */
+const VOICE_REQUEST_RE = /(发|来|录|整|说)(一?[个条段句])?语音|用语音(说|讲|回|来)|语音(说|讲|回)(一|句)|说句话|讲句话|说一句(话)?|出个声|开个口|吭一声/
+
+/**
  * 归一化文本：判断"这句话是不是已经回过"（去标点/空白/@提及/占位符，统一小写）。
  * 群里经常有人把同一句话重复发，或者同一个问题隔几分钟又问一次 —— 都不该重复答。
  */
@@ -129,6 +136,16 @@ const DEFAULT_CONFIG = {
   videoUpgradeDelayMs: 60_000,
   videoUpgradeMaxTries: 2,
   videoUpgradeFollowUp: true,    // 升级后让它像真人那样补一句（走既有 evaluate/节流，不绕过任何限流）
+
+  // ── 语音气泡（发真·微信语音 type 34，不是"音频文件"）────────────────
+  // 走 hook 的 /SendVoiceMsg（SILK 由 tts.mjs 合成；hook 的 str0Mode 必须 'bytes'）。
+  // hook 侧还有独立开关（<客户端目录>\hook-voice-send.on 或 POST /Debug/VoiceSend {"on":true}）——
+  // 开关没开时 hook 返回 -1001，日志会打清楚原因（不会静默失败）。
+  voiceSay: false,                 // 总开关（默认**关**：先自测通过再开）
+  voiceSayProbability: 0.2,        // 普通回复改成语音的概率
+  voiceSayOnVoiceProbability: 0.5, // 收到**语音**消息时用语音回的概率（对称，最像真人）
+  voiceSayMaxChars: 60,            // 超过这么多字就发文字（语音太长很怪）
+  voiceSayEmotion: 'main',         // 音色预设：main/sweet/angry/serious
   visionCacheMax: 500,           // 识图结果缓存条数（同一张图只识别一次；超出丢最早的）
   visionProvider: 'opencodego-extra',
   visionModel: 'deepseek-v4-flash-vision-exp',
@@ -781,31 +798,7 @@ let res = await callLlm(route, sys, usr, undefined)
       }
 
       // ── 真 @ 的索引（每个群各自一份）────────────────────────────
-      // 微信真 @ 的两个要求：① 正文里写 "@显示名" ② atlist 里给 wxid。
-      // 而**显示名必须是群昵称**：用备注名去 @ 有可能显示不对/不提醒（实测踩过）。
-      // 所以这里把成员的每种"叫法"（群昵称 nick / 备注 remark / 微信号 alias）都映射到 wxid，
-      // 并把显示名统一成 nick —— 模型不管写的是昵称还是备注，都能解析出同一个人。
-      const atBy = {}
-      const atNick = {}
-      for (const m of list) {
-        const wxid = String(m.wxid || '')
-        if (!wxid || wxid === selfWxid()) continue
-        const nick = String(m.nick || m.name || '').trim()
-        const remark = String(m.remark || '').trim()
-        const alias = String(m.alias || '').trim()
-        if (nick) atNick[wxid] = nick
-        // 顺序即优先级：群昵称优先，其次备注、微信号、最后是 bridge 给的 name
-        for (const n of [nick, remark, alias, String(m.name || '').trim()]) {
-          if (n && !atBy[n]) atBy[n] = wxid
-        }
-      }
-      // 兜底：把历史学到的 wxid→名字 并进来（老数据可能只有备注名）
-      for (const [wxid, nm] of Object.entries(config.memberNames || {})) {
-        const n = String(nm || '').trim()
-        if (n && wxid !== selfWxid() && !atBy[n]) atBy[n] = wxid
-      }
-      r.atBy = atBy
-      r.atNick = atNick
+      buildAtIndex(r, list)
       if (atNames.length > 60) atNames = atNames.slice(-60)
       if (added) {
         saveNames()
@@ -1929,6 +1922,66 @@ let res = await callLlm(route, sys, usr, undefined)
     }
   }
   /**
+   * 建这个群的"真 @"索引（每个群各自一份）。
+   *
+   * 微信真 @ 的两个要求：① 正文里写 "@显示名" ② atlist 里给 wxid。
+   * 而**显示名必须是群昵称**：用备注名去 @ 有可能显示不对/不提醒（实测踩过）。
+   * 所以把成员的每种"叫法"（群昵称 nick / 备注 remark / 微信号 alias）都映射到 wxid，
+   * 并把显示名统一成 nick —— 模型不管写的是昵称还是备注，都能解析出同一个人。
+   */
+  function buildAtIndex(r, list) {
+    const atBy = {}
+    const atNick = {}
+    for (const m of (list || [])) {
+      const wxid = String(m.wxid || '')
+      if (!wxid || wxid === selfWxid()) continue
+      const nick = String(m.nick || m.name || '').trim()
+      const remark = String(m.remark || '').trim()
+      const alias = String(m.alias || '').trim()
+      if (nick) atNick[wxid] = nick
+      // 顺序即优先级：群昵称优先，其次备注、微信号、最后是 bridge 给的 name
+      for (const n of [nick, remark, alias, String(m.name || '').trim()]) {
+        if (n && !atBy[n]) atBy[n] = wxid
+      }
+    }
+    // 兜底：把历史学到的 wxid→名字 并进来（老数据可能只有备注名）
+    for (const [wxid, nm] of Object.entries(config.memberNames || {})) {
+      const n = String(nm || '').trim()
+      if (n && wxid !== selfWxid() && !atBy[n]) atBy[n] = wxid
+    }
+    r.atBy = atBy
+    r.atNick = atNick
+    return Object.keys(atBy).length
+  }
+
+  /**
+   * 确保这个群的 @ 索引可用 —— **缺了就现拉一次成员**（异步，带节流）。
+   *
+   * 为什么必须有它（线上真 bug）：`syncMembers()` 是**异步**的（roomState 里 `void syncMembers(r)`），
+   * 而 `wechat_bot_say` 这类**同步入口**拿到 r 就立刻解析 @ → 那一刻 `r.atBy` 还是空的 ✗
+   * → 手动发送永远 @ 不出去（实测：local_id=1949 那条没有 atuserlist）。
+   * 另外 syncMembers 失败时会先打上 10 分钟节流戳，导致它 10 分钟内不再重试 ✗ —— 这里用独立的短节流兜住。
+   *
+   * @returns {Promise<boolean>} true = 索引可用
+   */
+  async function ensureAtIndex(r) {
+    if (r.atBy && Object.keys(r.atBy).length) return true
+    if (Date.now() - (r.atIndexAt || 0) < 60_000) return false     // 60s 内刚试过（失败）就不再打桥
+    r.atIndexAt = Date.now()
+    try {
+      const res = await client.call('members', { roomId: r.roomId }, 20_000)
+      const list = res?.members || []
+      if (!list.length) { log('真 @：取不到群成员（这次退化为纯文本 @）'); return false }
+      const n = buildAtIndex(r, list)
+      log(`真 @：现拉群成员 ${list.length} 人 → 建立 @ 索引 ${n} 条`)
+      return n > 0
+    } catch (e) {
+      log('真 @：拉群成员失败（这次退化为纯文本 @）：' + String(e?.message || e).slice(0, 120))
+      return false
+    }
+  }
+
+  /**
    * 把回复文本里的 "@名字" 变成**真 @**（微信里会红点提醒，不是纯文本）。
    *
    * 微信的两个要求：① 正文里要有 "@显示名" ② atlist 里要给 wxid。
@@ -1955,6 +2008,36 @@ let res = await callLlm(route, sys, usr, undefined)
     return { text: out, mentions }
   }
 
+  /**
+   * 该不该把这条回复改成**语音气泡**？
+   *
+   * 顺序（有意为之）：
+   *   ① 总开关 voiceSay=false → 永远发文字（默认关，先自测通了再开）
+   *   ② 空文本 / 超长（voiceSayMaxChars）→ 发文字（语音太长很怪）
+   *   ③ **安静时段**（复用既有作息判断）→ 发文字（深夜不发语音 ✓ 明确要求也不破例）
+   *   ④ ★ 群里**明确要求**"发个语音/说句话" → **必须发**（用户直接提的要求）
+   *   ⑤ 收到**语音**消息 → 用语音回（概率 voiceSayOnVoiceProbability，默认 0.5）
+   *   ⑥ 其它 → 概率 voiceSayProbability（默认 0.2）
+   * 限流不在这里管：它被 deliver 调用，而节流/上限/概率在 policy.decide 已经生效 ✓
+   */
+  function shouldSendVoice(r, trigger, text) {
+    if (!config.voiceSay) return { yes: false, why: 'voiceSay=false（总开关关着）' }
+    const t = String(text || '').trim()
+    if (!t) return { yes: false, why: '空文本' }
+    const chars = [...t].length
+    const max = Number(config.voiceSayMaxChars) || 60
+    if (chars > max) return { yes: false, why: `太长（${chars} 字 > ${max} 字）` }
+    if (isQuiet(quietWindows)) return { yes: false, why: '安静时段（深夜不发语音）' }
+    // ★ 明确要求：用户说"发个语音/说句话"这类 → 必须发（不掷概率）
+    const asked = String(trigger?.text || '')
+    if (VOICE_REQUEST_RE.test(asked)) return { yes: true, why: '群里明确要求发语音' }
+    const wasVoice = trigger?.typeName === 'voice' || !!trigger?.voiceText
+    const p = Number(wasVoice ? config.voiceSayOnVoiceProbability : config.voiceSayProbability)
+    if (!(p > 0)) return { yes: false, why: `概率为 0（p=${p}）` }
+    if (Math.random() < p) return { yes: true, why: wasVoice ? `收到语音→语音回（p=${p}）` : `普通回复改语音（p=${p}）` }
+    return { yes: false, why: `概率未命中（p=${p}）` }
+  }
+
   async function deliver(r, trigger, priority, reply) {
     const roomId = r.roomId
     // 记住"我刚刚回了谁" —— 对方再接话就进对话延续模式（否则会回一句就哑）
@@ -1972,6 +2055,38 @@ let res = await callLlm(route, sys, usr, undefined)
       }
       const parts = toMessageParts(reply.text).map(stripStickerDirective).filter(Boolean)  // 兜底：正文里绝不留指令
       if (!parts.length && !reply.wantSticker && !reply.stickerOnly) return
+
+      // ── ★ 语音气泡：把这条回复改成**真·微信语音**（type 34）────────────────
+      // 判定走 shouldSendVoice（含"群里明确要求发语音"→必须发；深夜不发；概率可配）。
+      // 合成/发送失败一律**降级发文字** ✓ 绝不阻塞；限流不绕过（它在 deliver 里，节流早已生效）。
+      if (parts.length) {
+        const voiceText = parts.join('')          // 语音不分段：用整段（太长会被 shouldSendVoice 挡掉）
+        const vd = shouldSendVoice(r, trigger, voiceText)
+        if (vd.yes) {
+          const delay0 = humanDelayMs(voiceText, priority)
+          log(`准备发语音气泡（${vd.why}）｜${Math.round(delay0 / 1000)}s 后发`)
+          await sleep(delay0)
+          let vs = null
+          try {
+            vs = await client.call('sayVoice', {
+              roomId, text: voiceText, emotion: config.voiceSayEmotion || 'main',
+            }, 150_000)
+          } catch (e) { vs = { ok: false, error: String(e?.message || e) } }
+          if (vs?.ok) {
+            log(`发语音气泡成功：${vs.bytes} 字节 / ${vs.durationMs}ms（${config.voiceSayEmotion || 'main'}）`)
+            stats.sentVoice = (stats.sentVoice || 0) + 1
+            ;(r.sentTexts ||= []).push({ text: voiceText, at: Date.now() })
+            if (r.sentTexts.length > 40) r.sentTexts = r.sentTexts.slice(-40)
+            push(r, { ts: Date.now(), isSelf: true, sender: 'self', senderName: '我', text: `[语音] ${voiceText}` })
+            parts.length = 0                      // 语音已发 → 跳过文字（表情包逻辑照旧继续）
+          } else {
+            log(`语音气泡失败 → 降级发文字：${vs?.error || '未知原因'}`)
+          }
+        } else if (config.voiceSay) {
+          log(`不发语音（${vd.why}）→ 发文字`)      // 只在总开关开着时打，免得刷屏
+        }
+      }
+
       if (parts.length) {
         const delay = humanDelayMs(parts[0], priority)
         // 延迟实测：从"开始评估这条消息"到"真正发出"（含防抖 + LLM + 打字延迟），
@@ -1984,6 +2099,8 @@ let res = await callLlm(route, sys, usr, undefined)
         try {
           // 真 @：正文里有 "@某人" 就解析成 wxid 一起发（桥会填进 hook 的 atlist → 对方收到红点提醒）。
           // 解析不到就只发文本（老行为）；显示名统一成群昵称，避免 @ 错人/不提醒。
+          // ⚠️ 索引可能还没建好（成员同步是异步的）→ 这里**先确保一次**（带节流，不会每次都打桥）
+          if (config.allowAt && parts[i].includes('@')) await ensureAtIndex(r)
           const mm = resolveMentions(r, parts[i])
           await client.call('sendText', {
             roomId, text: mm.text,
@@ -2487,7 +2604,7 @@ let res = await callLlm(route, sys, usr, undefined)
         lines.push(`健康：${h.bad.length ? '❌ ' + h.bad.join(' / ') : (h.warn.length ? '⚠️ ' + h.warn.join(' / ') : '✅ 正常')}`
           + `（${ageMin === 0 ? '刚刚' : ageMin + ' 分钟前'}检查${h.bad.length ? '，详情用 wechat_bot_selfcheck' : ''}）`)
       } catch (e) { lines.push('健康：取不到（' + String(e?.message || e).slice(0, 60) + '）') }
-      lines.push(`本插件计数：收到 ${stats.msgIn}｜回复 ${stats.replied}｜跳过 ${stats.skipped}｜LLM ${stats.llmCalls}（失败 ${stats.llmErrors}）｜发文字 ${stats.sentText}｜发表情 ${stats.sentSticker}｜拍一拍 ${stats.sentPat}`)
+      lines.push(`本插件计数：收到 ${stats.msgIn}｜回复 ${stats.replied}｜跳过 ${stats.skipped}｜LLM ${stats.llmCalls}（失败 ${stats.llmErrors}）｜发文字 ${stats.sentText}｜发语音 ${stats.sentVoice || 0}｜发表情 ${stats.sentSticker}｜拍一拍 ${stats.sentPat}`)
       lines.push(`拟人参数：闲聊概率 ${config.replyProbability}｜冷却 ${config.minReplyGapMs / 1000}s｜10分钟上限 ${config.maxRepliesPer10Min}｜安静时段 ${config.quietHours || 'off'}｜补图概率 ${config.stickerChance}`)
       try {
         const route = resolveRoute()
@@ -2555,6 +2672,9 @@ let res = await callLlm(route, sys, usr, undefined)
       const room = await resolveRoom(args?.room)
       // 手动发送同样支持真 @：正文里写 "@某人" 就会解析成 wxid（解析不到只发文本）
       const r0 = roomState(room.roomId, room.name)
+      // ⚠️ 根因修复：成员索引是**异步**建的，而工具入口是同步的 → 这里先确保一次，
+      // 否则手动发送永远 @ 不出去（实测 local_id=1949 没有 atuserlist 就是这个原因）。
+      if (config.allowAt && text.includes('@')) await ensureAtIndex(r0)
       const mm = resolveMentions(r0, text)
       const sent = await client.call('sendText', {
         roomId: room.roomId, text: mm.text,
@@ -2579,7 +2699,7 @@ let res = await callLlm(route, sys, usr, undefined)
 
   ctx.effect(() => ctx.tools.register({
     name: 'wechat_bot_config',
-    description: '读取或实时修改微信机器人的拟人参数（无需重启）。key 留空 = 查看全部；给了 value = 修改。可改：enabled/dryRun/persona/replyProbability/minReplyGapMs/maxRepliesPer10Min/quietHours/stickerChance/splitChance/patChance/botName/rooms/temperature/voiceOnVoice/healthAlert/healthAlertQuietMs/healthCheckMs。',
+    description: '读取或实时修改微信机器人的拟人参数（无需重启）。key 留空 = 查看全部；给了 value = 修改。可改：enabled/dryRun/persona/replyProbability/minReplyGapMs/maxRepliesPer10Min/quietHours/stickerChance/splitChance/patChance/botName/rooms/temperature/voiceOnVoice/voiceSay/voiceSayProbability/voiceSayOnVoiceProbability/voiceSayMaxChars/voiceSayEmotion/healthAlert/healthAlertQuietMs/healthCheckMs/videoDeleteAfterRead/videoUpgradeDelayMs/videoFrames。',
     parameters: {
       type: 'object',
       properties: {

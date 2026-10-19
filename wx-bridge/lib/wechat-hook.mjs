@@ -17,8 +17,9 @@
  */
 import http from 'node:http'
 import { execFileSync, spawn } from 'node:child_process'
-import { existsSync, mkdirSync, writeFileSync, readFileSync, readdirSync, renameSync, rmSync } from 'node:fs'
+import { copyFileSync, existsSync, mkdirSync, writeFileSync, readFileSync, readdirSync, renameSync, rmSync, unlinkSync } from 'node:fs'
 import { join, dirname } from 'node:path'
+import { tmpdir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 import { resolveDataRoot, findLatestDat, decryptDat } from './wechat-image.mjs'
 import { xmlVideoMeta, findVideoCover, findVideoFile, probeVideo } from './wechat-video.mjs'
@@ -654,6 +655,135 @@ export class WeChatHookBridge {
   }
 
   async sendFile(roomId, filePath) { return this.sendImage(roomId, filePath) }
+
+  /**
+   * 发**语音气泡**（type 34，微信里点开就播，不是"文件"）。
+   *
+   * 走上级 agent 新增的 hook 路由 `POST /SendVoiceMsg`。**实测踩过的两个坑**：
+   *  ① `str0Mode` **必须 `'bytes'`** —— 它把 SILK 原始字节交给微信（hook 会**自动补一个 0x02 前缀**，
+   *     所以我们**不要**自己加 ✗）；用 `'path'` 模式微信会把**路径字符串本身**当音频
+   *     （实测 length=17 = 路径长度 ✗ 出的是 17 字节的假语音 ✗）。
+   *  ② `durationMs` 要给（SILK 的真实时长，来自 pilk.get_duration）✓。
+   *
+   * 开关默认**关**：`<客户端目录>\hook-voice-send.on` 存在=开，或 `POST /Debug/VoiceSend {"on":true}`
+   * （内存态优先级更高）。关着时返回 **-1001**（一个字节都不碰客户端内存）。
+   *
+   * @returns {{ret:number, retmsg:string, diag:object|null}} ret=0 只代表"已交给发送器"
+   *          （真正的上传是微信异步做的）；其它错误码见 hook 文档。
+   */
+  async sendVoice(roomId, silkPath, durationMs = 0) {
+    if (!this.#guard()) return { ret: -1, retmsg: '未登录，拒绝调用发送接口', diag: null }
+    if (!silkPath || !existsSync(silkPath)) {
+      this.log(`语音：SILK 文件不存在（${silkPath || '空'}）`)
+      return { ret: -1, retmsg: 'silk 不存在', diag: null }
+    }
+
+    // ⚠️ 实测坑（-1004 / `CreateFileA failed, GetLastError=3`）：hook 跑在**微信进程**里、用
+    //    **CreateFileA（ANSI）**读文件 —— 路径里只要有**非 ASCII 字符**就"找不到文件" ✗
+    //    （我们的 data\tts 在 `D:\微信deepseek\...` 下，正好中招 ✗；实测同一条 SILK 换成
+    //     `C:\Users\...\Temp\...` 就 ret=0 ✓）。
+    //    → 发送前把 SILK **复制到一个纯 ASCII 的临时目录**再发，发完删副本 ✓（源文件不动）。
+    let sendPath = silkPath
+    let asciiCopy = ''
+    if (/[^\x20-\x7E]/.test(silkPath)) {
+      asciiCopy = this.#asciiSafeVoicePath(silkPath)
+      if (!asciiCopy) {
+        this.log('语音：源路径含非 ASCII 且找不到可用的 ASCII 临时目录 → 放弃（降级发文字）')
+        return { ret: -1, retmsg: '路径含非 ASCII，且没有可用的 ASCII 临时目录', diag: null }
+      }
+      try {
+        copyFileSync(silkPath, asciiCopy)
+        sendPath = asciiCopy
+        this.log(`语音：源路径含非 ASCII → 先复制到 ASCII 路径再发（${asciiCopy}）`)
+      } catch (e) {
+        this.log('语音：复制到 ASCII 路径失败（降级发文字）：' + String(e?.message || e).slice(0, 140))
+        return { ret: -1, retmsg: '复制到 ASCII 路径失败', diag: null }
+      }
+    }
+
+    let r = null
+    try {
+      // ⚠️ 字段名就是 str0Mode（不是 strMode）；path 给绝对路径，hook 自己读文件
+      r = await this.api('/SendVoiceMsg', {
+        wxidorgid: roomId,
+        path: sendPath,
+        str0Mode: 'bytes',
+        durationMs: Number(durationMs) || 0,
+      }, 'POST', 30_000)
+    } catch (e) {
+      this.log('语音：调 /SendVoiceMsg 失败：' + String(e?.message || e).slice(0, 160))
+      return { ret: -1, retmsg: String(e?.message || e), diag: null }
+    } finally {
+      if (asciiCopy) { try { unlinkSync(asciiCopy) } catch { /* ignore */ } }
+    }
+    const ret = Number(r?.ret ?? -1)
+    if (ret === -1001) {
+      // 这条一定要打清楚：否则"配置开了但发不出去"会查很久（任务书明确要求）
+      this.log('语音：hook 的语音发送开关**没开**（-1001）→ 需要 '
+        + `<客户端目录>\\hook-voice-send.on，或 POST /Debug/VoiceSend {"on":true}`)
+    } else if (ret !== 0) {
+      this.log(`语音：/SendVoiceMsg 返回 ${ret}（${r?.retmsg || ''}）`
+        + '｜-1002 参数非法 · -1004 文件读不了/魔数不对/超 4MB · -1005 预检没过 · -1006 工厂调用异常'
+        + ' · -1007 后校验没过 · -1008 send_message 抛异常 · -1009 并发')
+    }
+    return { ret, retmsg: String(r?.retmsg || ''), diag: r?.diag || null }
+  }
+
+  /**
+   * 给"要交给 hook 读的 SILK"找一个**纯 ASCII** 的落点（hook 用 CreateFileA，非 ASCII 路径读不到）。
+   * 优先系统临时目录；它本身含非 ASCII 时退回微信客户端目录（`D:\wxhook\wx4110`，本来就是 hook 写日志的地方）。
+   * @returns {string} 目标文件绝对路径；找不到可用目录返回 ''
+   */
+  #asciiSafeVoicePath(src) {
+    const isAscii = (p) => !/[^\x20-\x7E]/.test(String(p || ''))
+    const base = src.replace(/[\\/][^\\/]*$/, '')          // 只为取个文件名前缀，不用于输出
+    const name = `${(base.split(/[\\/]/).pop() || 'voice').slice(0, 24)}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}.silk`
+    const dirs = [join(tmpdir(), 'dsh-voice-send'), join(this.clientDir || '', 'dsh-voice-tmp')]
+    for (const d of dirs) {
+      if (!d || !isAscii(d)) continue
+      try {
+        mkdirSync(d, { recursive: true })
+        return join(d, name)
+      } catch { /* 试下一个 */ }
+    }
+    return ''
+  }
+
+  /** 查/改 hook 的语音发送开关（内存态，优先级高于 .on 文件） */
+  async voiceSendSwitch(on) {
+    try {
+      const body = (on === undefined) ? {} : { on: !!on }
+      const r = await this.api('/Debug/VoiceSend', body, 'POST', 8000)
+      return r || null
+    } catch (e) {
+      this.log('语音：调 /Debug/VoiceSend 失败：' + String(e?.message || e).slice(0, 120))
+      return null
+    }
+  }
+
+  /**
+   * **合成 + 发送**一条语音气泡（给插件用的收口）。
+   * 合成失败/发送失败都只记日志并返回 `{ok:false, error}`（调用方降级发文字，绝不阻塞）。
+   * 临时 SILK 发完就删（tts 模块本身也有 1 小时兜底清理）。
+   */
+  async sayVoice(roomId, text, { emotion = 'main' } = {}) {
+    const { synthesizeVoice } = await import('./tts.mjs')
+    const t0 = Date.now()
+    const v = synthesizeVoice(String(text || ''), { emotion, log: (s) => this.log(s) })
+    if (!v?.file) return { ok: false, error: 'TTS 合成失败（见上面的 TTS 日志）' }
+    let sent = null
+    try {
+      sent = await this.sendVoice(roomId, v.file, v.durationMs)
+    } finally {
+      try { unlinkSync(v.file) } catch { /* ignore */ }   // 发完删临时 SILK
+    }
+    if (sent?.ret !== 0) {
+      return { ok: false, error: `发送失败 ret=${sent?.ret}（${sent?.retmsg || ''}）`, bytes: v.bytes, durationMs: v.durationMs }
+    }
+    this.log(`语音气泡已发出：${v.bytes} 字节 / ${v.durationMs}ms（${emotion}，${((Date.now() - t0) / 1000).toFixed(1)}s）`)
+    return { ok: true, ret: sent.ret, bytes: v.bytes, durationMs: v.durationMs, emotion, diag: sent.diag }
+  }
+
   async pat() { return -1 }
   async revoke() { return -1 }
   async forward() { return -1 }

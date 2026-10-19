@@ -365,6 +365,26 @@ async function handle(op, a = {}) {
       }
       return { rc, parts: parts.length }
     }
+    case 'sayVoice': {
+      // 合成 + 发**语音气泡**（type 34，微信里点开就播）：TTS 合成 SILK → hook /SendVoiceMsg。
+      // 失败返回 {ok:false,error}，插件据此降级发文字（绝不阻塞）。
+      if (typeof bridge.sayVoice !== 'function') return { ok: false, error: '该接入层不支持 sayVoice' }
+      const r = await bridge.sayVoice(String(a.roomId || ''), String(a.text || ''), { emotion: String(a.emotion || 'main') })
+      if (r?.ok) counters.msgsOut++
+      return r || { ok: false, error: '未知失败' }
+    }
+    case 'sendVoice': {
+      // 直接发一个已有 SILK（手动/调试用）；一般用 sayVoice 就够了
+      if (typeof bridge.sendVoice !== 'function') return { ok: false, error: '该接入层不支持 sendVoice' }
+      const r = await bridge.sendVoice(String(a.roomId || ''), String(a.path || ''), Number(a.durationMs || 0))
+      if (r?.ret === 0) counters.msgsOut++
+      return r
+    }
+    case 'voiceSwitch': {
+      // 查/改 hook 的语音发送开关（内存态，优先级高于 hook-voice-send.on 文件）：不传 on = 查询
+      if (typeof bridge.voiceSendSwitch !== 'function') return { ok: false, error: '该接入层不支持' }
+      return await bridge.voiceSendSwitch(a.on === undefined ? undefined : !!a.on)
+    }
     case 'sendSticker': {
       const item = a.stickerId ? stickers.get(a.stickerId) : stickers.pick({ text: a.text || '', roomId: a.roomId })
       if (!item) return { rc: -1, error: '没有可用的表情包（库为空或不匹配）' }
