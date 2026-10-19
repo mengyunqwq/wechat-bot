@@ -680,8 +680,8 @@ export class WeChatHookBridge {
 
     // ⚠️ 实测坑（-1004 / `CreateFileA failed, GetLastError=3`）：hook 跑在**微信进程**里、用
     //    **CreateFileA（ANSI）**读文件 —— 路径里只要有**非 ASCII 字符**就"找不到文件" ✗
-    //    （我们的 data\tts 在 `D:\微信deepseek\...` 下，正好中招 ✗；实测同一条 SILK 换成
-    //     `C:\Users\...\Temp\...` 就 ret=0 ✓）。
+    //    （TTS 的临时目录如果落在含中文的路径下，就正好中招 ✗；实测同一条 SILK 换成
+    //     纯 ASCII 路径就 ret=0 ✓）。
     //    → 发送前把 SILK **复制到一个纯 ASCII 的临时目录**再发，发完删副本 ✓（源文件不动）。
     let sendPath = silkPath
     let asciiCopy = ''
@@ -731,7 +731,7 @@ export class WeChatHookBridge {
 
   /**
    * 给"要交给 hook 读的 SILK"找一个**纯 ASCII** 的落点（hook 用 CreateFileA，非 ASCII 路径读不到）。
-   * 优先系统临时目录；它本身含非 ASCII 时退回微信客户端目录（`D:\wxhook\wx4110`，本来就是 hook 写日志的地方）。
+   * 优先系统临时目录；它本身含非 ASCII 时退回微信客户端目录（hook 本来就在那里写日志）。
    * @returns {string} 目标文件绝对路径；找不到可用目录返回 ''
    */
   #asciiSafeVoicePath(src) {
