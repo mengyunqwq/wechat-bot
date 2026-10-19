@@ -157,7 +157,9 @@ const DEFAULT_CONFIG = {
   // 群里谁是谁：hook 拿不到联系人库（QueryDB 坏了），所以靠"引用消息里的 displayname 自动学习"
   // + 手动设置。键是 wxid，值是昵称。持久化在 data/wechat-bot/members.json
   memberNames: {},
-  allowAt: true,                 // 允许它 @ 别人（hook 不支持真 @，是"@昵称"文本形式）
+  allowAt: true,                 // 允许它 @ 别人。**真 @**：正文写 "@群昵称" + 把 wxid 传给桥填 atlist
+                                 // （hook 的 BuildTextMessage 会写 atlist → 对方收到红点提醒）；
+                                 // 名字解析不到 wxid 时退化成纯文本 "@名字"（老行为，不报错）
   atChance: 0.3,                 // 想 @ 别人时，真的带上 @ 的概率（别每条都 @）
 
   // 拟人节流
@@ -777,6 +779,33 @@ let res = await callLlm(route, sys, usr, undefined)
         }
         if (!atNames.includes(name)) atNames.push(name)
       }
+
+      // ── 真 @ 的索引（每个群各自一份）────────────────────────────
+      // 微信真 @ 的两个要求：① 正文里写 "@显示名" ② atlist 里给 wxid。
+      // 而**显示名必须是群昵称**：用备注名去 @ 有可能显示不对/不提醒（实测踩过）。
+      // 所以这里把成员的每种"叫法"（群昵称 nick / 备注 remark / 微信号 alias）都映射到 wxid，
+      // 并把显示名统一成 nick —— 模型不管写的是昵称还是备注，都能解析出同一个人。
+      const atBy = {}
+      const atNick = {}
+      for (const m of list) {
+        const wxid = String(m.wxid || '')
+        if (!wxid || wxid === selfWxid()) continue
+        const nick = String(m.nick || m.name || '').trim()
+        const remark = String(m.remark || '').trim()
+        const alias = String(m.alias || '').trim()
+        if (nick) atNick[wxid] = nick
+        // 顺序即优先级：群昵称优先，其次备注、微信号、最后是 bridge 给的 name
+        for (const n of [nick, remark, alias, String(m.name || '').trim()]) {
+          if (n && !atBy[n]) atBy[n] = wxid
+        }
+      }
+      // 兜底：把历史学到的 wxid→名字 并进来（老数据可能只有备注名）
+      for (const [wxid, nm] of Object.entries(config.memberNames || {})) {
+        const n = String(nm || '').trim()
+        if (n && wxid !== selfWxid() && !atBy[n]) atBy[n] = wxid
+      }
+      r.atBy = atBy
+      r.atNick = atNick
       if (atNames.length > 60) atNames = atNames.slice(-60)
       if (added) {
         saveNames()
@@ -1899,6 +1928,33 @@ let res = await callLlm(route, sys, usr, undefined)
       log('稍后补一条失败：' + String(e?.message || e))
     }
   }
+  /**
+   * 把回复文本里的 "@名字" 变成**真 @**（微信里会红点提醒，不是纯文本）。
+   *
+   * 微信的两个要求：① 正文里要有 "@显示名" ② atlist 里要给 wxid。
+   * 所以这里：按成员索引把名字解析成 wxid，并把文本里的显示名**统一成群昵称**
+   * （用备注名去 @ 可能显示不对/不提醒 —— 实测踩过）。
+   * 解析不到 wxid → **原样保留纯文本 @**（优雅降级，保持老行为，不报错）。
+   *
+   * @returns {{text:string, mentions:string[]}} mentions = 去重后的 wxid 数组
+   */
+  function resolveMentions(r, text) {
+    const t = String(text || '')
+    if (!config.allowAt || !t.includes('@')) return { text: t, mentions: [] }
+    const byName = r.atBy || {}
+    const nickOf = r.atNick || {}
+    if (!Object.keys(byName).length) return { text: t, mentions: [] }   // 还没同步到成员 → 退化为文本 @
+    const mentions = []
+    // 名字的字符类与 learnAtNames 保持一致（@ 后面直到标点/空白为止），避免把标点吃进名字里
+    const out = t.replace(/@([^\s@，。！？!?~…,.、:：;；"'（）()\[\]{}]{1,24})/g, (full, name) => {
+      const wxid = byName[name]
+      if (!wxid) return full                       // 认不出 → 保持纯文本 @（老行为）
+      if (!mentions.includes(wxid)) mentions.push(wxid)
+      return '@' + (nickOf[wxid] || name)          // 显示名统一成群昵称
+    })
+    return { text: out, mentions }
+  }
+
   async function deliver(r, trigger, priority, reply) {
     const roomId = r.roomId
     // 记住"我刚刚回了谁" —— 对方再接话就进对话延续模式（否则会回一句就哑）
@@ -1926,11 +1982,18 @@ let res = await callLlm(route, sys, usr, undefined)
       }
       for (let i = 0; i < parts.length; i++) {
         try {
-          await client.call('sendText', { roomId, text: parts[i] })
+          // 真 @：正文里有 "@某人" 就解析成 wxid 一起发（桥会填进 hook 的 atlist → 对方收到红点提醒）。
+          // 解析不到就只发文本（老行为）；显示名统一成群昵称，避免 @ 错人/不提醒。
+          const mm = resolveMentions(r, parts[i])
+          await client.call('sendText', {
+            roomId, text: mm.text,
+            ...(mm.mentions.length ? { mentions: mm.mentions } : {}),
+          })
+          if (mm.mentions.length) log(`真 @：${mm.mentions.length} 人 → atlist（${mm.mentions.join(',')}）`)
           stats.sentText++
-          ;(r.sentTexts ||= []).push({ text: parts[i], at: Date.now() })
+          ;(r.sentTexts ||= []).push({ text: mm.text, at: Date.now() })
           if (r.sentTexts.length > 40) r.sentTexts = r.sentTexts.slice(-40)
-          push(r, { ts: Date.now(), isSelf: true, sender: 'self', senderName: '我', text: parts[i] })
+          push(r, { ts: Date.now(), isSelf: true, sender: 'self', senderName: '我', text: mm.text })
         } catch (e) {
           log('发送失败：' + String(e?.message || e))
           return
@@ -2490,11 +2553,17 @@ let res = await callLlm(route, sys, usr, undefined)
       const text = String(args?.text ?? '').trim()
       if (!text) return '发送失败：text 不能为空'
       const room = await resolveRoom(args?.room)
-      const sent = await client.call('sendText', { roomId: room.roomId, text })
+      // 手动发送同样支持真 @：正文里写 "@某人" 就会解析成 wxid（解析不到只发文本）
+      const r0 = roomState(room.roomId, room.name)
+      const mm = resolveMentions(r0, text)
+      const sent = await client.call('sendText', {
+        roomId: room.roomId, text: mm.text,
+        ...(mm.mentions.length ? { mentions: mm.mentions } : {}),
+      })
       const rc = (sent && typeof sent === 'object') ? (sent.rc ?? JSON.stringify(sent)) : sent
       stats.sentText++
-      const r = roomState(room.roomId, room.name)
-      push(r, { ts: Date.now(), isSelf: true, sender: 'self', senderName: '我', text })
+      const r = r0
+      push(r, { ts: Date.now(), isSelf: true, sender: 'self', senderName: '我', text: mm.text })
       let extra = ''
       if (args?.sticker) {
         const picked = await client.call('pickSticker', { text, roomId: room.roomId, minScore: 0 })
