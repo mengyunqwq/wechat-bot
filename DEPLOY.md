@@ -1,7 +1,12 @@
 # 部署指南
 
 > 目标：从零把机器人跑起来。**约 30 分钟**（不含下载 VS 编译环境）。
-> 文末有 **「AI 一键部署」** 小节，可直接把整段喂给另一个 AI 让它替你装。
+>
+> 🤖 **一键部署（推荐）**：把 **[docs/AI-一键部署.md](docs/AI-一键部署.md)** 第 2 节整段复制给任意 AI 客户端
+> （豆包电脑版 / Claude Desktop / Cursor / Cline / DSH…），它会自己查环境 → 装依赖 → 复制独立微信 →
+> 拿 Hook → 改配置 → 启动 → 逐项验证。人类只需提供 **2 样东西**（微信安装目录 + 一个可以牺牲的微信号）。
+> 本文档是人读的完整版；AI 版含**逐字段配置说明、完整验证清单、装好之后怎么用**。
+> 文末第 7 节保留了简版「AI 一键部署」段落。
 
 ---
 
@@ -348,13 +353,19 @@ curl -X POST http://127.0.0.1:17300/api/hosted -H 'content-type: application/jso
 
 ## 7. 🤖 AI 一键部署（把这段直接喂给 AI）
 
+> 📄 **完整版见 [docs/AI-一键部署.md](docs/AI-一键部署.md)** —— 那份是自包含的，含：
+> 逐字段配置说明（`config.json` 每个字段 + 环境变量 + hook 开关文件 + 插件热改键）、
+> 完整验证清单（24 项可勾选）、装好之后怎么用、12 条常见问题、**已知文档/代码不一致清单**。
+> 下面这段是**精简版**，赶时间可以用它，但更容易在细节上卡住。
+> ⚠️ **AI 同时看到两段时，以 [docs/AI-一键部署.md](docs/AI-一键部署.md) 第 2 节为准** ——
+> 那段包含本段缺失的「起桥前必须先补的两个缺失模块」，否则 `npm start` 会直接退出。
+>
 > 下面是一段给 AI agent 的可执行说明。**请逐条执行并在每步后验证**，不要跳步。
 > 适用任何能读写本机文件的 AI 客户端（豆包电脑版 / Claude Desktop / Cursor / Cline …）。
 > 在**豆包电脑版**里就是新建对话 → 把下面整段贴进去 → 它自己一步步做（见 §5.4 的截图同款流程）。
 
 ```
-务务：在本机部署 dsh-wechat-bot（微信群聊机器人）。系统是 Windows。请按顺序执行，每步验证后再继续。
-
+任务：在本机部署 dsh-wechat-bot（微信群聊机器人）。系统是 Windows。请按顺序执行，每步验证后再继续。
 前置检查：
 1. 确认 node -v >= 18、python --version >= 3.10；缺则用 winget 安装。
 2. python -m pip install pycryptodome zstandard
@@ -389,6 +400,6 @@ curl -X POST http://127.0.0.1:17300/api/hosted -H 'content-type: application/jso
 ## 8. 可选：常驻运行
 
 ```powershell
-# 用务务计划程序开机自启（示例）
+# 用任务计划程序开机自启（示例）
 schtasks /create /tn "wx-bridge" /tr "node <绝对路径>\wx-bridge\server.mjs" /sc onlogon /rl highest
 ```

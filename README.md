@@ -96,7 +96,9 @@ npm start
 
 **完整部署步骤（含微信 Hook 编译、回调/轮询、排错）见 [DEPLOY.md](DEPLOY.md)。**
 
-> 给 AI agent 的部署说明也在 DEPLOY.md 里（"AI 一键部署"小节），可直接喂给另一个 AI。
+> 🤖 **想让 AI 替你装？** 把 **[docs/AI-一键部署.md](docs/AI-一键部署.md)** 第 2 节整段复制给任意 AI 客户端
+> （豆包电脑版 / Claude Desktop / Cursor / Cline / DSH…），它会自己完成环境检查 → 装依赖 → 复制独立微信 →
+> 编译 Hook → 改配置 → 启动 → 逐项验证。你只需提供**微信安装目录**和**一个可以牺牲的微信号**。
 
 ---
 
