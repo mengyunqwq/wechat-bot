@@ -48,6 +48,10 @@ export class WeChatHookBridge {
     this.selfWxid = ''
     this.selfName = ''
     this.loggedIn = false
+    this._loggedInAt = 0          // loggedIn 最近一次被**权威依据**确认的时刻
+    this._sendBanUntil = 0        // fail-closed：这个时刻之前一律不允许发送
+    this._sendBanReason = ''
+    this._sendBanLogged = false
     this.lastError = ''
     this.ready = false
     this._seq = 0
@@ -102,8 +106,73 @@ export class WeChatHookBridge {
   async apiAlive() {
     try {
       const r = await this.api('/QueryDB/status', null, 'GET', 3000)
-      return !!(r && (r.IsLogin !== undefined || r.hWeixin !== undefined))
-    } catch { return false }
+      const ok = !!(r && (r.IsLogin !== undefined || r.hWeixin !== undefined))
+      if (!ok) this.noteProbeFailure('apiAlive: /QueryDB/status 返回异常')
+      return ok
+    } catch (e) {
+      this.noteProbeFailure('apiAlive: ' + String(e?.message || e))
+      return false
+    }
+  }
+
+  // ══════════════════════════════════════════════════════════════════
+  //  fail-closed 发送守卫（2026-10-19）
+  //
+  //  为什么要有它：未登录/半死状态下调发送接口会把微信弄崩（实测踩过两次），
+  //  而"崩了自动重启"会让用户看到微信反复掉线。所以判定必须**宁可错杀**：
+  //    · 任何一次 hook/DB 探测失败 → 进入 30 秒「禁止发送」窗口；
+  //    · 窗口内所有发送类 op 直接返回错误，**连 HTTP 都不发**；
+  //    · 能不能发只看**权威判据**：GET /QueryDB/status 的 IsLogin / hWeixin；
+  //    · loggedIn 超过 60 秒没被刷新 → 同样视为不可发（数据过期就当作不可信）。
+  // ══════════════════════════════════════════════════════════════════
+
+  /** 记一次探测失败 → 打开 30 秒禁止发送窗口 */
+  noteProbeFailure(reason) {
+    const wasOpen = this._sendBanUntil > Date.now()
+    this._sendBanUntil = Date.now() + 30_000
+    this._sendBanReason = String(reason || '').slice(0, 160)
+    if (!wasOpen || !this._sendBanLogged) {
+      this._sendBanLogged = true
+      this.log('发送已临时禁止（30 秒）：探测失败 → ' + this._sendBanReason)
+    }
+  }
+
+  /** 权威判据确认"已登录"（同时刷新时间戳，供 60 秒新鲜度判定） */
+  markLoggedIn(reason) {
+    const was = this.loggedIn
+    this.loggedIn = true
+    this._loggedInAt = Date.now()
+    if (!was) {
+      this.log('判定已登录：' + String(reason || ''));
+      this.emit('login', { self: this.selfWxid, name: this.selfName })
+    }
+  }
+
+  /**
+   * 刷新登录状态 —— **只用权威判据**：GET /QueryDB/status 的 IsLogin / hWeixin。
+   * 不再依赖"数据库能不能查到东西"（那个会假死：库没打开不代表没登录）。
+   */
+  async refreshLoginState() {
+    let r = null
+    try {
+      r = await this.api('/QueryDB/status', null, 'GET', 3000)
+    } catch (e) {
+      this.noteProbeFailure('refreshLoginState: ' + String(e?.message || e))
+      return false
+    }
+    if (!r || typeof r !== 'object') {
+      this.noteProbeFailure('refreshLoginState: /QueryDB/status 返回非 JSON')
+      return false
+    }
+    const isLogin = Number(r.IsLogin) === 1
+    const hWeixin = Number(r.hWeixin) > 0
+    if (isLogin && hWeixin) {
+      if (!this.loggedIn) this.markLoggedIn('/QueryDB/status IsLogin=1 且 hWeixin>0')
+      else this._loggedInAt = Date.now()          // 只是刷新新鲜度，不重复打日志
+      return true
+    }
+    this.loggedIn = false
+    return false
   }
 
   // ── 客户端进程 ──────────────────────────────────────────────
@@ -245,9 +314,7 @@ export class WeChatHookBridge {
     // 收到任何回调 = 客户端在线且 hook 活着 → 判定已登录。
     // （不能只看 wxid：群消息回调里该字段是房间号 @chatroom，会把自己账号认错）
     if (!this.loggedIn) {
-      this.loggedIn = true
-      this.emit('login', { self: this.selfWxid, name: this.selfName })
-      this.log('回调在线判定：客户端已登录（回调 #' + this._cbCount + '）')
+      this.markLoggedIn('收到 hook 回调（#' + this._cbCount + '）')
     }
     // 私聊回调里 wxid 就是自己账号，顺手记下来
     if (recvWxid && recvWxid !== 'weixin' && !recvWxid.endsWith('@chatroom') && !this.selfWxid) {
@@ -361,20 +428,14 @@ export class WeChatHookBridge {
     // 运行时再注册一次回调（无害，保证地址正确）
     try { await this.api('/set_callback', { url: `http://127.0.0.1:${this.cbPort}` }) } catch { /* ignore */ }
     // 主动探一次账号：否则要等群里有人说话（回调）才判定"已登录"，
-    // 期间发送会被守卫拦住（例如 23:00 的晚安就发不出去）
+    // 期间发送会被守卫拦住（例如 23:00 的晚安就发不出去）。
+    // ★ 登录判定的**权威来源**是 GET /QueryDB/status 的 IsLogin / hWeixin；
+    //   selfWxid / 数据库可读都只是"顺带补全信息"，不再作为能否发送的依据。
     try {
       await this.probeSelfWxid()
-      // 新版自编译 DLL 的 /GetSelfProfile 返回空（上游那段 profile hook 在仓库里也是坏的），
-      // 所以再加一条判据：数据库能读到东西 = 已经登录（QueryDB 是我们修好的）
-      if (!this.selfWxid && await this.dbReady()) {
-        this.loggedIn = true
-        this.log('启动探测：数据库可读 → 判定已登录（self 待定，等回调或插件侧识别）')
-        this.emit('login', { self: this.selfWxid, name: this.selfName })
-      }
-      if (this.selfWxid && !this.loggedIn) {
-        this.loggedIn = true
-        this.log('启动探测：已登录 ' + this.selfWxid)
-        this.emit('login', { self: this.selfWxid, name: this.selfName })
+      await this.refreshLoginState()
+      if (!this.loggedIn && this.selfWxid) {
+        this.markLoggedIn('启动探测：selfWxid=' + this.selfWxid)
       }
     } catch { /* ignore */ }
     void this.loadContacts()
@@ -385,13 +446,13 @@ export class WeChatHookBridge {
         emit: (msg) => this.emit('msg', msg),
         log: (s) => this.log(s),
         intervalMs: Number(process.env.DB_POLL_MS || 2500),
-        // 能轮询到数据库 = 一定已登录（比探测 /GetSelfProfile 可靠，那个接口这个构建是坏的）
+        // 读库失败 = hook/DB 探测失败 → 桥侧进入 30 秒禁止发送窗口（fail-closed）
+        onReadFail: (why) => this.noteProbeFailure('轮询读库失败：' + String(why || '')),
+        // 能轮询到数据库 = 强证据（但发送守卫仍以 /QueryDB/status 为准）
         onReady: (self) => {
           if (self && !this.selfWxid) this.selfWxid = self
           if (!this.loggedIn) {
-            this.loggedIn = true
-            this.log('数据库轮询成功 → 判定已登录' + (self ? '，self=' + self : ''))
-            this.emit('login', { self: this.selfWxid, name: this.selfName })
+            this.markLoggedIn('数据库轮询成功' + (self ? '，self=' + self : ''))
           }
         },
       })
@@ -438,6 +499,7 @@ export class WeChatHookBridge {
         const ok = await this.dbHealthy()
         if (ok) { this.dbFailStreak = 0; return }
         this.dbFailStreak++
+        this.noteProbeFailure(`数据库探测失败（第 ${this.dbFailStreak} 次）`)   // → 30 秒禁止发送
         this.log('数据库探测失败（第 ' + this.dbFailStreak + ' 次）')
         // 注意：**不要**在这里自动重启客户端！
         // 教训：DB 重扫本身很慢（全内存扫描），探测超时会被误判成"失效"，
@@ -455,11 +517,19 @@ export class WeChatHookBridge {
         if (this._stopped) return
         this.guardUpdates()               // 每次巡检顺手压住自动更新（客户端会重建，必须反复压）
         if (!this.findPids().length) {
-          this.log('检测到客户端已退出 → 自动重新拉起（带回调参数）')
+          // ★★ 自动拉起客户端默认【关闭】✗✗（2026-10-20 血的教训）
+          //    它会在"用户正停在登录窗口 / 客户端刚被杀准备重开"时再 spawn 一个实例，
+          //    两个实例抢同一个数据目录 → 客户端崩溃 / 数据库损坏（实测当晚坏过一次）。
+          //    要恢复请【人工】启动客户端（正常退出用 CloseMainWindow，别强杀）。
+          //    确实需要自动拉起时，显式设 WECHAT_AUTOLAUNCH=1。
+          this.log('检测到客户端已退出（不会自动拉起；如需自动请设 WECHAT_AUTOLAUNCH=1）')
           this.loggedIn = false
           this.ready = false
           this._apiDeadSince = 0
-          try { this.launchClient() } catch (e) { this.log('拉起失败: ' + String(e?.message || e)) }
+          if (process.env.WECHAT_AUTOLAUNCH === '1') {
+            this.log('WECHAT_AUTOLAUNCH=1 → 执行自动拉起')
+            try { this.launchClient() } catch (e) { this.log('拉起失败: ' + String(e?.message || e)) }
+          }
           return
         }
         const up = await this.apiAlive()
@@ -478,6 +548,10 @@ export class WeChatHookBridge {
           return
         }
         this._apiDeadSince = 0
+        // 每 10 秒用**权威判据**刷新一次登录状态：
+        //   · 正常时 loggedIn 的新鲜度一直 < 60s → 发送守卫放行
+        //   · 一旦刷新失败/超时 → 新鲜度过期 → 发送自动变成 fail-closed（拒绝）
+        await this.refreshLoginState()
         if (!this.ready) {
           this.ready = true
           this.log('HTTP 服务恢复')
@@ -614,10 +688,26 @@ export class WeChatHookBridge {
   }
 
   // ── 发送 ────────────────────────────────────────────────────
-  // 重要：未登录时调这些接口会把微信弄崩（实测踩过），所以先拦一道
+  // 重要：未登录时调这些接口会把微信弄崩（实测踩过），所以先拦一道。
+  // 现在是 **fail-closed**：任何一次探测失败都会开一个 30 秒禁止发送窗口，
+  // 窗口内连 HTTP 都不发（见 noteProbeFailure 的说明）。
   #guard() {
+    const now = Date.now()
+    if (this._sendBanUntil > now) {
+      const left = Math.ceil((this._sendBanUntil - now) / 1000)
+      this.log(`禁止发送窗口内（还剩 ${left}s，原因：${this._sendBanReason}）→ 直接拒绝，不发 HTTP`)
+      return false
+    }
     if (!this.loggedIn) {
       this.log('未登录，拒绝调用发送接口（未登录时调 API 会导致微信崩溃）')
+      return false
+    }
+    // 登录状态必须是**新鲜的**：超过 60 秒没被权威判据刷新 → 视为不可发
+    const age = this._loggedInAt ? (now - this._loggedInAt) : Infinity
+    if (!(age <= 60_000)) {
+      this.log('登录状态已超过 60 秒没刷新（' + (Number.isFinite(age) ? Math.round(age / 1000) + 's' : '从未确认')
+        + '）→ 视为不可发，拒绝发送')
+      this.noteProbeFailure('loggedIn 过期（>60s 未刷新）')
       return false
     }
     return true
@@ -767,6 +857,8 @@ export class WeChatHookBridge {
    * 临时 SILK 发完就删（tts 模块本身也有 1 小时兜底清理）。
    */
   async sayVoice(roomId, text, { emotion = 'main' } = {}) {
+    // fail-closed：禁止发送窗口内**连合成都省掉**，直接返回错误（不发任何 HTTP）
+    if (!this.#guard()) return { ok: false, ret: -1, error: '禁止发送（fail-closed 守卫）' }
     const { synthesizeVoice } = await import('./tts.mjs')
     const t0 = Date.now()
     const v = synthesizeVoice(String(text || ''), { emotion, log: (s) => this.log(s) })

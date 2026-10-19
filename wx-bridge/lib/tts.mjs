@@ -45,10 +45,10 @@ const PY = pyExe()   // 仅用于 paths 展示
  * pitch  = 音调（±NHz）
  */
 export const VOICES = {
-  main: { voice: 'zh-CN-XiaoyiNeural', rate: '+8%', pitch: '+18Hz' },     // 主声（用户选定）
-  sweet: { voice: 'zh-CN-XiaoyiNeural', rate: '-6%', pitch: '+8Hz' },     // 撒娇/委屈
-  angry: { voice: 'zh-CN-XiaoxiaoNeural', rate: '+10%', pitch: '-4Hz' },  // 生气/吐槽
-  serious: { voice: 'zh-CN-XiaoxiaoNeural', rate: '+5%', pitch: '+12Hz' }, // 正经回答
+  main: { voice: 'zh-CN-XiaoxiaoNeural', rate: '+0%', pitch: '+8Hz' },      // 主声（用户 2026-10-20 选定：音色 10「晓晓-低柔」）
+  sweet: { voice: 'zh-CN-XiaoyiNeural', rate: '-6%', pitch: '+8Hz' },       // 撒娇/委屈（保持晓伊，更嗲）
+  angry: { voice: 'zh-CN-XiaoxiaoNeural', rate: '+10%', pitch: '-4Hz' },    // 生气/吐槽
+  serious: { voice: 'zh-CN-XiaoxiaoNeural', rate: '+5%', pitch: '+12Hz' },  // 正经回答
 }
 
 export const MAX_TEXT_CHARS = 120      // 超过直接拒绝（语音太长很怪）

@@ -53,8 +53,9 @@ export class DbPoller {
    * @param {(m:object)=>void} o.emit  收到一条消息
    * @param {(s:string)=>void} o.log
    * @param {number} [o.intervalMs]
+   * @param {(path:string,body:any,method?:string,timeout?:number)=>Promise<any>} [o.onReadFail] 读库失败回调（给上层进"禁止发送"窗口用）
    */
-  constructor({ api, emit, log, intervalMs = 2500, onReady = null }) {
+  constructor({ api, emit, log, intervalMs = 2500, onReady = null, onReadFail = null }) {
     this.api = api
     this.emit = emit
     this.log = log
@@ -65,14 +66,88 @@ export class DbPoller {
     this.stopped = true
     this._timer = null
     this.onReady = onReady
+    this.onReadFail = onReadFail
     this.selfWxid = ''       // 机器人自己的 wxid（自动从数据目录名推出来）
-    this.stats = { polls: 0, msgs: 0, errors: 0 }
+    this.stats = { polls: 0, msgs: 0, errors: 0, pauses: 0 }
+    // ── 健康度 / 暂停（不健康时**停止轮询**，别拿失败的查询去压微信）──
+    //  连续 5 次读失败 → 暂停 60 秒；还失败 → 指数退避，最多 5 分钟。
+    //  恢复时**先做一次单表探测**，成功才继续正常轮询。
+    this._consecFail = 0        // 连续读失败次数
+    this._pauseUntil = 0        // 暂停到什么时候（ms）
+    this._pauseMs = 0           // 本次暂停时长（日志用）
+    this._backoffMs = 60000     // 下次暂停时长（60s → 120s → 240s → 300s 封顶）
+    this._lastReadErr = ''
+  }
+
+  /** 当前是否处于"暂停轮询"窗口 */
+  paused() { return this._pauseUntil > 0 && Date.now() < this._pauseUntil }
+
+  /** 暂停剩余秒数（0 = 没暂停） */
+  pauseLeftSec() { return this.paused() ? Math.ceil((this._pauseUntil - Date.now()) / 1000) : 0 }
+
+  /** 读库失败：连续 5 次 → 暂停 + 指数退避 */
+  _noteReadFail(e) {
+    this.stats.errors++
+    this._consecFail++
+    this._lastReadErr = String(e?.message || e)
+    if (typeof this.onReadFail === 'function') {
+      try { this.onReadFail(this._lastReadErr) } catch { /* ignore */ }
+    }
+    if (this._consecFail >= 5 && !this.paused()) {
+      this._pauseMs = this._backoffMs
+      this._pauseUntil = Date.now() + this._pauseMs
+      this._backoffMs = Math.min(this._backoffMs * 2, 300000)   // 60s → … → 最多 5 分钟
+      this.stats.pauses++
+      this.log(`轮询暂停（连续 ${this._consecFail} 次失败，${Math.round(this._pauseMs / 1000)} 秒后重试）：`
+        + this._lastReadErr.slice(0, 120))
+    }
+  }
+
+  /** 读库成功：清零失败计数，出暂停窗口时打"轮询恢复" */
+  _noteReadOk() {
+    if (this._consecFail > 0 || this._pauseUntil > 0) {
+      this._consecFail = 0
+      this._pauseUntil = 0
+      this._backoffMs = 60000          // 恢复后重置退避
+      this.log('轮询恢复')
+    }
   }
 
   async q(db, sql, timeout = 20000) {
+    // ── 分片自动发现 ────────────────────────────────────────────────
+    // ⚠️ 实测坑：微信的消息库是【分片】的（message_0.db / message_1.db / …）。
+    //    哪个分片存在取决于微信自己（我们把 message_0.db 删掉后，它就把消息写到 message_1.db 了）。
+    //    以前这里写死 'message_0.db' → 一旦微信换了分片，桥就永远读不到消息（静默失聪）。
+    //    现在：调用方仍写 'message_0.db' 当"逻辑名"，这里透明解析成真实存在的那个分片。
+    if (db === 'message_0.db') db = await this.resolveShard(timeout)
     const r = await this.api('/QueryDB/execute', { optDbName: db, SQL: sql }, 'POST', timeout)
-    if (!r || r.status !== 0) throw new Error(`SQL 失败(${db}): ${r?.desc || 'unknown'} :: ${sql.slice(0, 60)}`)
+    // status 一定要带上：21 = SQLITE_MISUSE（句柄已关闭）、1 = SQL 写错/表不存在、5/6 = 忙
+    if (!r || r.status !== 0) throw new Error(`SQL 失败(${db}) status=${r?.status}: ${r?.desc || 'unknown'} :: ${sql.slice(0, 60)}`)
     return r.data || []
+  }
+
+  /**
+   * 解析"消息库真实分片"：从 message_0.db 起依次试，返回第一个能列出 Msg_ 表的。
+   * 结果缓存 30 秒（避免每次查询都探测）；探测失败就退回缓存的/默认值，绝不抛。
+   */
+  async resolveShard(timeout = 20000) {
+    const now = Date.now()
+    if (this._shard && now - (this._shardAt || 0) < 30_000) return this._shard
+    for (let i = 0; i < 4; i++) {
+      const name = `message_${i}.db`
+      try {
+        const r = await this.api('/QueryDB/execute',
+          { optDbName: name, SQL: "SELECT COUNT(*) AS n FROM sqlite_master WHERE type='table' AND name LIKE 'Msg_%'" },
+          'POST', Math.min(timeout, 10000))
+        if (r && r.status === 0 && Number((r.data || [])[0]?.n) > 0) {
+          if (this._shard !== name) this.log(`消息库分片：使用 ${name}（发现 ${Number((r.data || [])[0].n)} 张会话表）`)
+          this._shard = name; this._shardAt = now
+          return name
+        }
+      } catch { /* 这个分片不存在，接着试下一个 */ }
+    }
+    // 都探测不到：保持上次成功的，或退回默认（让报错信息保留原语义）
+    return this._shard || 'message_0.db'
   }
 
   /** 发现会话表、建立 hash→roomId 映射、记录各表当前最大 local_id */
@@ -80,16 +155,43 @@ export class DbPoller {
     // 1) 所有会话表
     const tabs = await this.q('message_0.db', "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'Msg_%'")
     // 2) hash → wxid（把联系人/群的 username 都算一遍 md5）
-    const contacts = await this.q('contact.db', 'SELECT username FROM contact')
+    // ⚠️ 这一步【必须可失败】：contact.db 有时拿不到句柄（微信懒加载 / 刚重启），
+    //    而它只用来把 hash 映射成 wxid。以前它是硬失败 → init() 抛错 → 轮询起不来。
+    // ⚠️ 更严重的坑（实测）：contact.db 拿不到时，若映射表为空，
+    //    roomId 会退化成"发送者 wxid" → 【群里被叫，却私聊回复】✗✗
+    //    → 所以必须用 session.db 兜底（它列着所有会话的 username，不依赖 contact.db）。
     const byHash = new Map()
-    for (const c of contacts) {
-      const u = String(c.username || '')
-      if (u) byHash.set(md5(u), u)
+    try {
+      const contacts = await this.q('contact.db', 'SELECT username FROM contact')
+      for (const c of contacts) {
+        const u = String(c.username || '')
+        if (u) byHash.set(md5(u), u)
+      }
+    } catch (e) {
+      this.log(`联系人库暂不可用（${String(e?.message || e).slice(0, 60)}）→ 改用 session.db 兜底`)
     }
-    // 3) 发送者映射：**用 message_0.db 自己的 Name2Id**（不是 contact.db 的那个！
+    if (byHash.size === 0) {
+      // 兜底：session.db 的 SessionTable 里有全部会话（群 + 个人），足够算出 hash→roomId
+      for (const db of ['session.db', 'contact.db']) {
+        try {
+          const rs = await this.q(db, 'SELECT username FROM SessionTable')
+          for (const r of rs) {
+            const u = String(r.username || '')
+            if (u) byHash.set(md5(u), u)
+          }
+          if (byHash.size > 0) { this.log(`会话映射：用 ${db} 兜底成功（${byHash.size} 条）`); break }
+        } catch { /* 换下一个 */ }
+      }
+      if (byHash.size === 0) this.log('会话映射为空（contact.db / session.db 都不可用）→ roomId 会退化成发送者')
+    }
+    // 3) 发送者映射：**用消息库自己的 Name2Id**（不是 contact.db 的那个！）
     //    contact.db.Name2Id 的 rowid 是全局联系人编号，跟 real_sender_id 对不上，实测会映射成 weixin/notifymessage）
-    const n2i = await this.q('message_0.db', 'SELECT rowid AS rid, user_name FROM Name2Id')
-    for (const r of n2i) this.senderMap.set(String(r.rid), String(r.user_name || ''))
+    try {
+      const n2i = await this.q('message_0.db', 'SELECT rowid AS rid, user_name FROM Name2Id')
+      for (const r of n2i) this.senderMap.set(String(r.rid), String(r.user_name || ''))
+    } catch (e) {
+      this.log(`Name2Id 暂不可用（${String(e?.message || e).slice(0, 60)}）→ 发送者退化为 id，轮询照常`)
+    }
 
     // 4) 自己的 wxid：从数据目录名 wxid_xxx_hash 里取（用于标记 isSelf，避免它回自己）
     if (!this.selfWxid) {
@@ -114,6 +216,8 @@ export class DbPoller {
         const mx = await this.q('message_0.db', `SELECT COALESCE(MAX(local_id),0) AS m FROM ${table}`)
         lastId = Number(mx[0]?.m || 0)
       } catch { /* ignore */ }
+      // 必须保证是有限数字：坏值会让 pollTableOnce 的 SQL 直接 prepare 失败（见那里的注释）
+      if (!Number.isFinite(lastId) || lastId < 0) lastId = 0
       this.tables.set(table, { roomId, lastId })
     }
     if (typeof this.onReady === 'function') { try { this.onReady(this.selfWxid) } catch { /* ignore */ } }
@@ -190,6 +294,28 @@ export class DbPoller {
 
   /** 轮询一轮 */
   async tick() {
+    if (this.stopped) return 0
+
+    // ── 暂停窗口内：一次查询都不发（不拿失败查询去压微信）──────────────
+    if (this.paused()) return 0
+
+    // ── 暂停到点了 → 先做**一次单表探测**，成功才回到正常轮询 ──────────
+    if (this._pauseUntil > 0) {
+      this._pauseUntil = 0
+      try {
+        await this.q('message_0.db', 'SELECT COUNT(*) AS c FROM sqlite_master', 10000)
+        this._noteReadOk()                       // 会打"轮询恢复"
+      } catch (e) {
+        this._pauseMs = this._backoffMs
+        this._pauseUntil = Date.now() + this._pauseMs
+        this._backoffMs = Math.min(this._backoffMs * 2, 300000)
+        this.stats.pauses++
+        this.log(`轮询暂停（探测仍失败，${Math.round(this._pauseMs / 1000)} 秒后重试）：`
+          + String(e?.message || e).slice(0, 120))
+        return 0
+      }
+    }
+
     // ── 每 5 分钟重扫会话表（防"拿着过期列表静默空转"）──────────────
     // 微信会重建/更换数据库文件；轮询器一旦拿着过期的表列表，就会一直空转，
     // 日志还显示"就绪"，但一条消息都收不到（实测踩过）。
@@ -217,11 +343,12 @@ export class DbPoller {
     if (this.stopped) return 0
     let got = 0
     for (const [table, info] of this.tables) {
+      if (this.paused()) break                    // 本轮中途进入暂停 → 立刻收手
       try {
         got += await this.pollTableOnce(table, info)
       } catch (e) {
-        this.stats.errors++
         if (this.stats.errors % 10 === 1) this.log(`轮询失败（${table}）：${String(e?.message || e).slice(0, 120)}`)
+        // 失败计数 / 暂停判定由 pollTableOnce 里的 _noteReadFail 负责（那里知道是不是"读失败"）
       }
     }
     // 每轮只要成功读到数据库，就刷新登录状态：
@@ -247,13 +374,27 @@ export class DbPoller {
     if (this._inflight.has(table)) return 0          // 该表已有一次读取在跑 → 让那一次负责
     this._inflight.set(table, true)
     try {
-      const rows = await this.q('message_0.db',
-        `SELECT local_id, local_type, create_time, real_sender_id, server_id, message_content, source`
-        + ` FROM ${table} WHERE local_id > ${info.lastId} ORDER BY local_id ASC LIMIT 30`, 15000)
+      // ⚠️ 实测坑：info.lastId 一旦变成 undefined/NaN，拼进 SQL 就是
+      //    `WHERE local_id > undefined` → sqlite3_prepare failed → 该表**永久读不出消息**
+      //    （实测症状：机器人完全不回复，日志每 5 秒一条"轮询失败"）。
+      //    这里强制收敛成有限数字，顺手把坏值修回 0。
+      let cur = Number(info.lastId)
+      if (!Number.isFinite(cur) || cur < 0) { cur = 0; info.lastId = 0 }
+      let rows
+      try {
+        rows = await this.q('message_0.db',
+          `SELECT local_id, local_type, create_time, real_sender_id, server_id, message_content, source`
+          + ` FROM ${table} WHERE local_id > ${cur} ORDER BY local_id ASC LIMIT 30`, 15000)
+      } catch (e) {
+        // 读失败：记账（连续 5 次 → 上层暂停轮询 + 桥侧进"禁止发送"窗口）
+        this._noteReadFail(e)
+        throw e
+      }
+      this._noteReadOk()            // 读到了（哪怕 0 条）就是健康证据
       if (!rows.length) return 0
       let got = 0
       for (const row of rows) {
-        info.lastId = Math.max(info.lastId, Number(row.local_id || 0))
+        info.lastId = Math.max(Number(info.lastId) || 0, Number(row.local_id || 0))
         const m = this.toEvent(table, info, row)
         if (m) {
           // 语音（34）：音频是磁盘文件，先旁路定位+解码成 16k WAV（失败只记日志）

@@ -62,6 +62,105 @@ function normText(s) {
 }
 
 /**
+ * ── 链接视频：插件侧的 host 白名单 ──────────────────────────────────
+ * 为什么插件要自己有一份（不 import 桥的模块）：插件跑在 DSH 进程里，够不到 wx-bridge
+ * 的源码（两者只通过 WebSocket 说话），而且给每个含 URL 的消息都发一次 WS 去问"这算不算视频链接"
+ * 太浪费。所以这里是**第一道闸**（要不要花流量去下载），桥侧 `lib/link-video.mjs` 的
+ * `SITE_HOSTS` 是**权威的第二道闸**（真下载前再校验一次）。两处 host 列表必须保持一致。
+ *
+ * 支持：抖音（含 v.douyin.com 短链）、B站（含 b23.tv 短链）、小红书（含 xhslink.com）、
+ *       微博（含 m.weibo.cn / t.cn）、TikTok、X。**快手不支持**（yt-dlp 没有解析器）。
+ */
+const LINK_VIDEO_HOSTS = [
+  { site: '抖音', re: /^(?:[\w-]+\.)*(?:douyin|iesdouyin)\.com$/i },
+  { site: 'B站', re: /^(?:[\w-]+\.)*(?:bilibili\.com|b23\.tv|bili2233\.cn)$/i },
+  { site: '小红书', re: /^(?:[\w-]+\.)*(?:xiaohongshu\.com|xhslink\.com)$/i },
+  { site: '微博', re: /^(?:[\w-]+\.)*(?:weibo\.com|weibo\.cn|t\.cn)$/i },
+  { site: 'TikTok', re: /^(?:[\w-]+\.)*tiktok\.com$/i },
+  { site: 'X', re: /^(?:[\w-]+\.)*(?:twitter\.com|x\.com|t\.co)$/i },
+]
+/** 已知视频平台但本管线不支持 → 只用来打一条"不支持"的日志（**不会被下载**） */
+const LINK_VIDEO_UNSUPPORTED = [
+  { site: '快手', re: /^(?:[\w-]+\.)*(?:kuaishou\.com|gifshow\.com|chenzhongtech\.com|kwai\.com)$/i },
+  { site: 'YouTube', re: /^(?:[\w-]+\.)*(?:youtube\.com|youtu\.be)$/i },
+]
+
+/**
+ * 从一段文本里抠出候选 URL：带协议的 + 用户手打的裸域名（`b23.tv/xxx`）。
+ * 链接卡片（type 42/49）的 XML 也吃（`<url>https://…</url>`，`&amp;` 先还原）。
+ */
+function linkCandidates(text) {
+  const s = String(text || '').replace(/&amp;/g, '&').replace(/&#39;|&apos;/g, "'")
+  const out = []
+  const seen = new Set()
+  const push = (raw) => {
+    const u = String(raw || '').trim().replace(/[）)】\]>」，。、；;！!？?'"]+$/g, '')
+    if (!u || seen.has(u)) return
+    seen.add(u)
+    out.push(u)
+  }
+  for (const m of s.matchAll(/https?:\/\/[^\s<>"'`）)】，。、；;]+/gi)) push(m[0])
+  for (const m of s.matchAll(/(?:^|[\s（(【[，,、:：])((?:[a-z0-9-]+\.)+(?:com|cn|net|org|tv|me|be|cc|io|co)(?:\/[^\s<>"'`）)】，。、；;]*)?)/gi)) push(m[1])
+  return out
+}
+
+function linkHostOf(url) {
+  try { return new URL(/^https?:/i.test(url) ? url : 'https://' + url).hostname.toLowerCase() } catch { return '' }
+}
+
+/**
+ * 从消息文本 / 链接卡片 XML 里找出**受支持的视频链接**。
+ * @returns {{url:string, site:string}|null}
+ */
+export function detectLinkVideo(text) {
+  for (const raw of linkCandidates(text)) {
+    const host = linkHostOf(raw)
+    if (!host) continue
+    for (const h of LINK_VIDEO_HOSTS) if (h.re.test(host)) return { url: /^https?:/i.test(raw) ? raw : 'https://' + raw, site: h.site }
+  }
+  return null
+}
+
+/** 找出"已知视频平台但本管线不支持"的链接（只用于日志，不下载） */
+export function detectUnsupportedLink(text) {
+  for (const raw of linkCandidates(text)) {
+    const host = linkHostOf(raw)
+    if (!host) continue
+    for (const h of LINK_VIDEO_UNSUPPORTED) if (h.re.test(host)) return { url: raw, site: h.site, host }
+  }
+  return null
+}
+
+/**
+ * 链接视频"要不要花流量去下载"的决策（**纯函数**，好单测、好排查）。
+ *
+ * 四道闸的先后顺序就是这里：被@（必须处理）→ 作息 → 同群冷却 → 概率。
+ * 注意：这里只决定**下不下载**；回复本身照样走既有 evaluate/deliver（节流/概率/上限一条都不绕过）。
+ *
+ * @param {object} o
+ * @param {boolean} [o.forced]      被 @ 了 → 必须处理（跳过作息/冷却/概率）
+ * @param {boolean} [o.quiet]       当前是否安静时段（深夜只处理被@的）
+ * @param {number} [o.lastAt]       这个群上次处理链接的时间戳（冷却用）
+ * @param {number} [o.now]
+ * @param {number} [o.rand]         概率抽样值（默认 Math.random，测试可注入）
+ * @param {number} [o.probability]
+ * @param {number} [o.cooldownMs]
+ * @returns {{ok:boolean, reason:string}}
+ */
+export function decideLinkVideo({
+  forced = false, quiet = false, lastAt = 0, now = Date.now(),
+  rand = Math.random(), probability = 0.5, cooldownMs = 120_000,
+} = {}) {
+  if (forced) return { ok: true, reason: '被@必须处理' }
+  if (quiet) return { ok: false, reason: '安静时段且没被@' }
+  const cool = Math.max(0, Number(cooldownMs) || 0)
+  const gap = now - (Number(lastAt) || 0)
+  if (cool && gap < cool) return { ok: false, reason: `冷却中（${Math.round(gap / 1000)}s<${Math.round(cool / 1000)}s）` }
+  const p = Math.min(1, Math.max(0, Number(probability) || 0))
+  return rand > p ? { ok: false, reason: `概率未命中（p=${p}）` } : { ok: true, reason: `概率命中（p=${p}）` }
+}
+
+/**
  * 为什么自己造消息对象而**不** import @deepseek-ai/dsh-llm：
  * 插件装在 profile 的 node_modules 下（`<profile>/node_modules/@dsh-external/...`），
  * 它的祖先链里没有 @deepseek-ai/*（那些在 npx-cache 里），模块级裸 import 会直接抛
@@ -136,6 +235,19 @@ const DEFAULT_CONFIG = {
   videoUpgradeDelayMs: 60_000,
   videoUpgradeMaxTries: 2,
   videoUpgradeFollowUp: true,    // 升级后让它像真人那样补一句（走既有 evaluate/节流，不绕过任何限流）
+
+  // ── 链接视频（群里分享的抖音/B站/小红书/微博…链接 → 下载 → 看懂）────────────
+  // 复用**同一条视频管线**：桥侧 yt-dlp 下载（wx-bridge/lib/link-video.mjs）→ 现成的 probeVideo
+  // 抽 N 帧拼联系表 + 抽音轨 WAV → 插件侧 describeImageCached(sheet,'videoSheet') + transcribeVoice(wav)。
+  // 三重闸（省流量省调用防刷）：host 白名单（不是见链接就下）→ 概率 → 同群冷却；
+  // 作息照旧（安静时段只处理被@的）。桥侧另有 时长/大小/超时 上限。
+  linkVideo: true,               // 总开关（默认开）
+  linkVideoProbability: 0.5,     // 不是每个链接都下（省流量、省视觉/语音调用）
+  linkVideoMaxSeconds: 300,      // 时长上限（秒）：超了桥侧直接放弃（yt-dlp --match-filter）
+  linkVideoMaxMB: 80,            // 大小上限（MB）：超了桥侧直接放弃（yt-dlp --max-filesize）
+  linkVideoCooldownMs: 120_000,  // 同一个群两分钟内只处理一条链接（防刷）
+  linkVideoTimeoutMs: 120_000,   // 桥侧下载超时（到点杀子进程；被@时也不放宽，免得卡住）
+  linkVideoFrames: 6,            // 抽几帧拼联系表（0 = 用 videoFrames）
 
   // ── 语音气泡（发真·微信语音 type 34，不是"音频文件"）────────────────
   // 走 hook 的 /SendVoiceMsg（SILK 由 tts.mjs 合成；hook 的 str0Mode 必须 'bytes'）。
@@ -554,6 +666,26 @@ const namesFile = join(dirname(memoryDir), 'members.json')
       }
     }
 
+    // 链接视频：群里分享的抖音/B站/小红书/微博链接 → 桥侧 yt-dlp 下载 → **复用同一条视频管线**看懂。
+    // 与上面 type 43 的区别只是"视频从哪来"（外部链接 vs 微信数据目录），下游完全一样。
+    // 处理完写进 m.imageDesc / m.videoAudio 并标成 video → 后面按"视频消息"参与聊天（复用既有提示词/节流）。
+    // 任何失败都只记日志 + 降级成普通文本（有标题就把标题当文本），绝不抛错。
+    if (config.linkVideo) {
+      const linkBlob = [m.text, m.xml, m.content].filter(Boolean).map(String).join('\n')
+      const hit = ['text', 'link', 'card', 'app'].includes(m.typeName) ? detectLinkVideo(linkBlob) : null
+      if (hit) {
+        try {
+          await handleLinkVideo(r, m, hit)
+        } catch (e) {
+          log('链接视频处理异常（降级成普通文本）：' + String(e?.message || e).slice(0, 160))
+        }
+      } else if (['link', 'card', 'app'].includes(m.typeName) && config.linkVideo) {
+        // 不支持的站（快手/YouTube）值得说一声：否则"发了链接机器人不理"看起来像坏了
+        const un = detectUnsupportedLink(linkBlob)
+        if (un) log(`链接视频：不支持的站点（${un.site} ${un.host}）→ 跳过（只按文本处理）｜${r.roomName || r.roomId}`)
+      }
+    }
+
     // 语音（type 34）：桥侧已把音频解码成 16k/单声道/PCM16 WAV（事件字段 voiceWav），
     // 这里转写成文字，**当成普通文本消息**继续走（记忆/历史/@ 识别/回复都用转写文字）。
     // 任何失败都保持 [语音] 原样 —— 语音处理是纯旁路，绝不阻塞、绝不抛错。
@@ -842,8 +974,9 @@ let res = await callLlm(route, sys, usr, undefined)
   async function evaluate(r, batch) {
     if (stopped) return
     const trigger = batch[batch.length - 1]
-    // 能回的类型：文本 / 应用卡片 / 已识别出内容的图片与表情包
-    const okType = ['text', 'app'].includes(trigger.typeName)
+    // 能回的类型：文本 / 应用卡片 / 链接卡片（type 42/49：链接视频失败时降级成普通文本）/
+    // 已识别出内容的图片与表情包
+    const okType = ['text', 'app', 'link', 'card'].includes(trigger.typeName)
       || (['image', 'emoticon', 'video'].includes(trigger.typeName) && (trigger.imageDesc || trigger.videoAudio))
     if (!okType) {
       stats.skipped++
@@ -1074,10 +1207,14 @@ let res = await callLlm(route, sys, usr, undefined)
       // 视频：把"抽的几帧画面 + 音轨转写"如实拼出来（只有封面时也说明白）
       if (m.videoCover || m.videoSeconds || m.videoAudio || (m.typeName === 'video' && m.imageDesc)) {
         if (m.videoCover) return `[视频封面：${m.imageDesc || '（没描述出来）'}]`
+        // 链接视频（抖音/B站/…）：把站点和标题也带上 —— 不然模型不知道这是"群里分享的链接"
+        const head = m.linkVideoSite ? `${m.linkVideoSite}视频` : '视频'
         const parts = []
+        if (m.linkVideoTitle) parts.push(`标题：${m.linkVideoTitle}`)
+        if (m.linkVideoIntro) parts.push(`他顺带说：${m.linkVideoIntro}`)
         if (m.imageDesc) parts.push(`画面（抽了 ${m.videoFrames || '?'} 帧）：${m.imageDesc}`)
         if (m.videoAudio) parts.push(`音频转写：${m.videoAudio}`)
-        return `[视频${m.videoSeconds ? ' ' + m.videoSeconds + 's' : ''}${parts.length ? '：' + parts.join('；') : '（没拿到内容）'}]`
+        return `[${head}${m.videoSeconds ? ' ' + m.videoSeconds + 's' : ''}${parts.length ? '：' + parts.join('；') : '（没拿到内容）'}]`
       }
       if (m.imageDesc) return `[图片：${m.imageDesc}]`
       if (m.voiceText) return m.voiceText            // 语音转写后的文字（当普通文本用）
@@ -1099,7 +1236,9 @@ let res = await callLlm(route, sys, usr, undefined)
           ? `${trigger.senderName} 在接着跟你聊（你刚回过他）：${showText(trigger)}`
           : priority === 'image'
             ? ((trigger.videoCover || trigger.videoSeconds || trigger.videoAudio)
-              ? `${trigger.senderName} 在群里发了一段视频，你掌握的信息：${showText(trigger)}`
+              ? (trigger.linkVideoSite
+                ? `${trigger.senderName} 在群里分享了一条${trigger.linkVideoSite}视频链接，你掌握的信息：${showText(trigger)}`
+                : `${trigger.senderName} 在群里发了一段视频，你掌握的信息：${showText(trigger)}`)
               : `${trigger.senderName} 在群里发了张图，内容：${trigger.imageDesc}`)
             : priority === 'question'
               ? `${trigger.senderName} 在群里问：${showText(trigger)}`
@@ -1118,7 +1257,7 @@ let res = await callLlm(route, sys, usr, undefined)
         ? '接着他的话回一句（像聊天一样自然接住，别重复你刚说过的）：'
         : priority === 'image'
           ? ((trigger.videoCover || trigger.videoSeconds || trigger.videoAudio)
-            ? `就这条视频接一句（可以吐槽、可以问一句、可以夸；你看到的是从视频里抽的几帧画面${trigger.videoAudio ? '和音轨转写' : ''}${trigger.videoCover ? '（只有封面帧）' : ''}，**别声称你看完了整段视频**）：`
+            ? `就这条${trigger.linkVideoSite ? trigger.linkVideoSite + '视频（群里分享的链接）' : '视频'}接一句（可以吐槽、可以问一句、可以夸；你看到的是从视频里抽的几帧画面${trigger.videoAudio ? '和音轨转写' : ''}${trigger.videoCover ? '（只有封面帧）' : ''}，**别声称你看完了整段视频**）：`
             : '就这张图接一句（可以吐槽、可以问一句、可以夸，别像在写图片说明）：')
           : '写你要发的那一条消息（只输出这句话）：',
     ].join('\n')
@@ -1374,6 +1513,130 @@ let res = await callLlm(route, sys, usr, undefined)
       })()
     }
     entry.timer = track(setTimeout(step, delay))
+  }
+
+  // ── 链接视频：收到受支持的视频链接 → 下载 → 复用视频管线"看懂" ──────────────
+  // 与 type 43 视频**共用下游**（describeImageCached + transcribeVoice），只是上游换成桥的
+  // `fetchLinkVideo` op（yt-dlp 下载 + 现成的 probeVideo 抽帧/抽音轨）。
+  // 节流/概率/作息都在这一个函数里判断，**只决定"要不要花流量下载"**；
+  // 回复本身仍然走既有 evaluate → deliver（所有既有节流一条都不绕过）。
+  const linkVideoUrls = new Map()   // roomId → Map(url → at)：同一条链接短时间内不重复下载
+
+  /** 这条消息是不是在 @ 我（链接卡片的 XML 里 atuserlist 也可能有我 —— 与语音那条路同一个坑） */
+  function isAtMeMsg(r, m) {
+    if (m.isAtMe) return true
+    const names = [...new Set([config.botName, ...(config.aliases || []), ...((r && r.selfNames) || [])].filter(Boolean))]
+    const t = String(m.text || '') + '\n' + String(m.xml || '') + '\n' + String(m.content || '')
+    if (names.some((n) => t.includes('@' + n))) return true
+    if (bridgeSelf && String(m.xml || '').includes(bridgeSelf)) return true
+    return false
+  }
+
+  /** 链接卡片 XML 里的标题（下载失败降级成文本时用：至少让"分享了什么"进上下文） */
+  function linkTitleOf(m) {
+    const s = String(m.xml || m.content || m.text || '')
+    const pick = (tag) => {
+      const x = new RegExp(`<${tag}>([\\s\\S]{1,120}?)</${tag}>`).exec(s)
+      return x ? x[1].replace(/<!\[CDATA\[|\]\]>/g, '').trim() : ''
+    }
+    return pick('title') || pick('des') || ''
+  }
+
+  /**
+   * 处理一条含受支持视频链接的消息。
+   * 四道闸：① 白名单（调用方已判定）② 概率 ③ 同群冷却 ④ 作息（安静时段只处理被@的）。
+   * **被@时跳过 ②③④**（"必须处理"）：明确要求优先；下载上限仍然生效，回复仍走既有节流。
+   */
+  async function handleLinkVideo(r, m, hit) {
+    const where = `${r.roomName || r.roomId}｜${m.senderName}`
+    const forced = isAtMeMsg(r, m)
+    if (forced) m.isAtMe = true                  // 让后续 policy 也按"被@（必回）"走
+
+    // 链接卡片/纯文本消息：文本里往往只有一坨 XML 或 `[link]` → 用标题当文本，聊天时才有的聊
+    const title = linkTitleOf(m)
+    if (title && (m.typeName === 'link' || m.typeName === 'card' || m.typeName === 'app')) {
+      m.linkTitle = title
+      m.text = `[${hit.site}视频：${title}]`
+    }
+    // 纯文本里"顺便说的那句话"要留着（否则下载成功后原话就没了，回起来像没看人说话）
+    const intro = (m.typeName === 'text' && m.text && !/^\[/.test(String(m.text)))
+      ? String(m.text).replace(/\s+/g, ' ').slice(0, 60) : ''
+
+    const now = Date.now()
+    // ①被@ → ②作息 → ③同群冷却 → ④概率（纯函数 decideLinkVideo，五种情况都有日志）
+    const d = decideLinkVideo({
+      forced,
+      quiet: isQuiet(quietWindows),
+      lastAt: Number(r.linkVideoAt) || 0,
+      now,
+      probability: config.linkVideoProbability,
+      cooldownMs: config.linkVideoCooldownMs,
+    })
+    if (!d.ok) {
+      log(`链接视频：${d.reason} → 跳过｜${where}｜${hit.site} ${hit.url}`)
+      return
+    }
+
+    // 同一条链接短时间内不重复下载（群里常有人连发两遍/被转发）
+    let seen = linkVideoUrls.get(r.roomId)
+    if (!seen) { seen = new Map(); linkVideoUrls.set(r.roomId, seen) }
+    const prev = seen.get(hit.url)
+    if (prev && now - prev < Math.max(60_000, Number(config.linkVideoCooldownMs) || 0)) {
+      log(`链接视频：这条链接 ${Math.round((now - prev) / 1000)}s 前刚处理过 → 跳过｜${where}`)
+      return
+    }
+    seen.set(hit.url, now)
+    if (seen.size > 50) for (const k of [...seen.keys()].slice(0, seen.size - 25)) seen.delete(k)
+
+    r.linkVideoAt = now
+    log(`链接视频：开始处理（${hit.site}${forced ? '｜被@必须处理' : ''}）｜${where}｜${hit.url}`)
+    const t0 = Date.now()
+    let res = null
+    try {
+      res = await client.call('fetchLinkVideo', {
+        url: hit.url,
+        text: String(m.text || '') + '\n' + String(m.xml || ''),
+        maxSeconds: Number(config.linkVideoMaxSeconds) || 300,
+        maxMB: Number(config.linkVideoMaxMB) || 80,
+        timeoutMs: Number(config.linkVideoTimeoutMs) || 120_000,
+        frames: Number(config.linkVideoFrames) || Number(config.videoFrames) || 6,
+      }, (Number(config.linkVideoTimeoutMs) || 120_000) + 60_000)
+    } catch (e) {
+      log(`链接视频：桥调用失败（降级成普通文本）：${String(e?.message || e).slice(0, 160)}｜${where}`)
+      return
+    }
+    if (!res?.sheet) {
+      log(`链接视频：没取到内容（${res?.error || '未知原因'}）→ 降级成普通文本｜${where}｜耗时 ${Math.round((Date.now() - t0) / 1000)}s`)
+      return
+    }
+
+    // ── 复用视频管线：联系表交视觉模型 + 音轨交 speechToText（与 type 43 一字不差的用法）──
+    const desc = await describeImageCached(res.sheet, 'videoSheet')
+    let audioText = ''
+    if (res.wav) audioText = await transcribeVoice(res.wav, String(m.id || '') + ':lv')
+    const siteName = String(res.siteName || hit.site || '')
+    if (desc || audioText) {
+      m.imageDesc = desc || ''
+      m.videoAudio = audioText
+      m.videoSeconds = Number(res.durationSec) || 0
+      m.videoFrames = Number(res.frames) || 0
+      m.videoFull = true                 // 拿到的是全部内容（不用像 type 43 那样等复查升级）
+      m.videoCover = false
+      m.linkVideoSite = siteName
+      m.linkVideoTitle = String(res.title || title || '')
+      if (intro) m.linkVideoIntro = intro
+      m.typeName = 'video'               // 之后完全按"视频消息"参与聊天（showText / 提示词 / 节流都复用）
+      m.linkUrl = hit.url
+      log(`链接视频识别成功（${siteName}）：${desc || '（画面没描述出来）'}`
+        + (audioText ? `｜音轨转写：${audioText}` : '')
+        + `｜${m.videoFrames} 帧/${m.videoSeconds}s/耗时 ${Math.round((Date.now() - t0) / 1000)}s｜${where}`)
+    } else {
+      log(`链接视频：画面和音轨都没识别出内容 → 降级成普通文本｜${where}`)
+    }
+
+    // 临时文件用完即删（都是副本；桥侧的下载目录它自己已经删了）
+    try { unlinkSync(res.sheet); log('已删除链接视频临时联系表') } catch { /* ignore */ }
+    if (res.wav) { try { unlinkSync(res.wav); log('已删除链接视频临时音轨 WAV') } catch { /* ignore */ } }
   }
 
   function loadVoiceCache() {
@@ -2020,6 +2283,12 @@ let res = await callLlm(route, sys, usr, undefined)
    *   ⑥ 其它 → 概率 voiceSayProbability（默认 0.2）
    * 限流不在这里管：它被 deliver 调用，而节流/上限/概率在 policy.decide 已经生效 ✓
    */
+  // 「强烈要求」= 短时间内反复要（默认 10 分钟内 ≥2 次）。第一次可以傲娇拒绝（人设 ✓），
+  // 但强烈要求必须发 —— 这是用户明确要的行为。
+  const voiceAsks = new Map()          // roomId → [ts, ts, ...]
+  const VOICE_STRONG_WINDOW_MS = 10 * 60_000
+  const VOICE_STRONG_COUNT = 2
+
   function shouldSendVoice(r, trigger, text) {
     if (!config.voiceSay) return { yes: false, why: 'voiceSay=false（总开关关着）' }
     const t = String(text || '').trim()
@@ -2027,10 +2296,26 @@ let res = await callLlm(route, sys, usr, undefined)
     const chars = [...t].length
     const max = Number(config.voiceSayMaxChars) || 60
     if (chars > max) return { yes: false, why: `太长（${chars} 字 > ${max} 字）` }
-    if (isQuiet(quietWindows)) return { yes: false, why: '安静时段（深夜不发语音）' }
-    // ★ 明确要求：用户说"发个语音/说句话"这类 → 必须发（不掷概率）
     const asked = String(trigger?.text || '')
-    if (VOICE_REQUEST_RE.test(asked)) return { yes: true, why: '群里明确要求发语音' }
+    // ★ 分级：首次要求 → 不强制（让模型自己决定，傲娇拒绝很正常）；反复要求 → 必须发
+    let strong = false
+    if (VOICE_REQUEST_RE.test(asked)) {
+      const now = Date.now()
+      const rid = r?.roomId || ''
+      const arr = (voiceAsks.get(rid) || []).filter((x) => now - x < VOICE_STRONG_WINDOW_MS)
+      arr.push(now)
+      voiceAsks.set(rid, arr)
+      strong = arr.length >= VOICE_STRONG_COUNT
+      if (!strong) {
+        // 第一次要：不拦不推，按普通消息走（模型自己决定说什么，可以是傲娇拒绝）
+        log(`语音：第 ${arr.length} 次要（10 分钟内要满 ${VOICE_STRONG_COUNT} 次才强制发）→ 这次交给模型自己决定`)
+        return { yes: false, why: `首次要求（${arr.length}/${VOICE_STRONG_COUNT}）→ 让模型自己决定` }
+      }
+      // 强烈要求 → 必须发，且【不受安静时段限制】（用户明确要的行为）
+      log(`语音：强烈要求（10 分钟内第 ${arr.length} 次）→ 必须发（安静时段也发）`)
+      return { yes: true, why: `强烈要求（${arr.length} 次）` }
+    }
+    if (isQuiet(quietWindows)) return { yes: false, why: '安静时段（深夜不发语音）' }
     const wasVoice = trigger?.typeName === 'voice' || !!trigger?.voiceText
     const p = Number(wasVoice ? config.voiceSayOnVoiceProbability : config.voiceSayProbability)
     if (!(p > 0)) return { yes: false, why: `概率为 0（p=${p}）` }
@@ -2060,9 +2345,27 @@ let res = await callLlm(route, sys, usr, undefined)
       // 判定走 shouldSendVoice（含"群里明确要求发语音"→必须发；深夜不发；概率可配）。
       // 合成/发送失败一律**降级发文字** ✓ 绝不阻塞；限流不绕过（它在 deliver 里，节流早已生效）。
       if (parts.length) {
-        const voiceText = parts.join('')          // 语音不分段：用整段（太长会被 shouldSendVoice 挡掉）
+        // 语音不分段：用整段（太长会被 shouldSendVoice 挡掉）
+        let voiceText = parts.join('')
         const vd = shouldSendVoice(r, trigger, voiceText)
         if (vd.yes) {
+          // ★ 被"强烈要求"逼出来的语音 → 开头加一句**极不情愿**的话（嘴上嫌弃、但还是照做）
+          //   这样才能体现"她本来不肯，被缠到没办法"。随机挑，不重复。
+          if (String(vd.why || '').includes('强烈要求')) {
+            const reluctant = [
+              '……行吧行吧，烦死了，就这一次啊。',
+              '……哼，别以为我乐意。听好了。',
+              '……好啦好啦，服了你了。',
+              '……真拿你没办法，就一遍。',
+              '……烦人。……哼，说吧。',
+            ]
+            const pick = reluctant[(r.sentVoiceReluctant || 0) % reluctant.length]
+            r.sentVoiceReluctant = (r.sentVoiceReluctant || 0) + 1
+            const max = Number(config.voiceSayMaxChars) || 60
+            if ([...pick].length + [...voiceText].length <= max) voiceText = pick + voiceText
+            else voiceText = pick       // 原话太长 → 只发这句嫌弃（也是"极不情愿"的正确表达）
+            log(`强制语音加"不情愿"前缀："${pick}"`)
+          }
           const delay0 = humanDelayMs(voiceText, priority)
           log(`准备发语音气泡（${vd.why}）｜${Math.round(delay0 / 1000)}s 后发`)
           await sleep(delay0)
@@ -2362,23 +2665,23 @@ let res = await callLlm(route, sys, usr, undefined)
 
     // ③④ hook 存活 + 数据库可读：**一次轻查询**同时证明两件事
     //    （searchMessages 会真读 message_0.db，是"hook 还活着吗"最直接的证据）
-    const probeRoom = (config.rooms && config.rooms[0]) || [...rooms.keys()][0] || ''
+    // ★ 探测会话：没有已知群时【别跳过】✗ —— 用 filehelper 兜底（它一定存在），
+    //   否则"数据库读不出 + 还没有已知会话"会被判成 warn（跳过），
+    //   于是机器人静默失聪时自检照样报"正常"（2026-10-19 被这个盲区坑了一整晚）。
+    const probeRoom = (config.rooms && config.rooms[0]) || [...rooms.keys()][0] || 'filehelper'
     let dbOk = false
     let dbText = ''
     let dbAdvice = ''
     if (!cs.connected) {
       dbText = '未检查（桥未连接）'
       dbAdvice = '桥恢复后自动可查'
-    } else if (!probeRoom) {
-      dbText = '未检查（还没有已知会话，无法探测）'
-      dbAdvice = '等群里来一条消息后重试'
     } else {
       try {
         const res = await client.call('searchMessages', { roomId: probeRoom, query: '', limit: 1, scan: 50 }, 15000)
         // 注意：桥的这个 op **不抛错**，失败时返回 { items: [], error: '…' }（server.mjs:329/336）
         // —— 只看 items 是数组会把它误判成"可读"，必须同时看 error 字段。
         dbOk = Array.isArray(res?.items) && !res?.error
-        dbText = dbOk ? `message_0.db 可读（探针会话取到 ${res.items.length} 条）`
+        dbText = dbOk ? `消息库可读（探针会话「${probeRoom}」取到 ${res.items.length} 条）`
           : (res?.error ? '查询失败：' + String(res.error).slice(0, 80) : '查询返回结构异常')
         dbAdvice = dbOk ? '' : 'hook 的 QueryDB 或轮询器异常：看 bridge 日志里的 SQL 失败行'
       } catch (e) {
@@ -2386,7 +2689,8 @@ let res = await callLlm(route, sys, usr, undefined)
         dbAdvice = 'hook 卡死或数据库没打开：桥会自己重试；持续失败看 bridge 日志（可能要唤醒/重启客户端）'
       }
     }
-    const dbLevel = dbOk ? 'ok' : (cs.connected && probeRoom ? 'bad' : 'warn')
+    // 桥连着却读不出库 → 一律判 bad（不再有"跳过"这条路）
+    const dbLevel = dbOk ? 'ok' : (cs.connected ? 'bad' : 'warn')
     add('hook 存活', dbOk ? 'ok' : dbLevel, dbOk ? 'QueryDB 有响应（hook 正常）' : dbText, dbAdvice)
     add('数据库可读', dbLevel, dbText, dbAdvice)
 
@@ -2699,7 +3003,7 @@ let res = await callLlm(route, sys, usr, undefined)
 
   ctx.effect(() => ctx.tools.register({
     name: 'wechat_bot_config',
-    description: '读取或实时修改微信机器人的拟人参数（无需重启）。key 留空 = 查看全部；给了 value = 修改。可改：enabled/dryRun/persona/replyProbability/minReplyGapMs/maxRepliesPer10Min/quietHours/stickerChance/splitChance/patChance/botName/rooms/temperature/voiceOnVoice/voiceSay/voiceSayProbability/voiceSayOnVoiceProbability/voiceSayMaxChars/voiceSayEmotion/healthAlert/healthAlertQuietMs/healthCheckMs/videoDeleteAfterRead/videoUpgradeDelayMs/videoFrames。',
+    description: '读取或实时修改微信机器人的拟人参数（无需重启）。key 留空 = 查看全部；给了 value = 修改。可改：enabled/dryRun/persona/replyProbability/minReplyGapMs/maxRepliesPer10Min/quietHours/stickerChance/splitChance/patChance/botName/rooms/temperature/voiceOnVoice/voiceSay/voiceSayProbability/voiceSayOnVoiceProbability/voiceSayMaxChars/voiceSayEmotion/healthAlert/healthAlertQuietMs/healthCheckMs/videoDeleteAfterRead/videoUpgradeDelayMs/videoFrames/linkVideo/linkVideoProbability/linkVideoMaxSeconds/linkVideoMaxMB/linkVideoCooldownMs/linkVideoTimeoutMs/linkVideoFrames。',
     parameters: {
       type: 'object',
       properties: {

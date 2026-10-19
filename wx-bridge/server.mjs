@@ -27,6 +27,7 @@ import { WcfBridge } from './lib/wcf.mjs'
 import { MockBridge } from './lib/mock.mjs'
 import { WxhelperBridge } from './lib/wxhelper.mjs'
 import { WeChatHookBridge } from './lib/wechat-hook.mjs'
+import { fetchLinkVideoSheet, pruneLinkVideoTemp } from './lib/link-video.mjs'
 import { generateStickerImage, listEmotions, autoBubble } from './lib/genimage.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
@@ -284,6 +285,58 @@ async function processGenRetry() {
 }
 setInterval(() => { void processGenRetry() }, 60_000)
 
+// 链接视频临时目录兜底清理：正常每次下载完就删（lib/link-video.mjs），
+// 这里防"插件崩了/桥被强杀/Windows 文件句柄没释放导致删不掉"留下的残留（10 分钟一次，超 1 小时的删）。
+setInterval(() => {
+  try {
+    const n = pruneLinkVideoTemp()
+    if (n) log(`链接视频临时目录：清掉 ${n} 个陈年残留`)
+  } catch { /* ignore */ }
+}, 10 * 60_000)
+
+// ── 看门狗：每 5 分钟自检一次（★ 只做「进程内自愈」，绝不重启客户端/桥）────────
+//  2026-10-20 教训：客户端被反复重启（尤其强杀）会把 WCDB 连接搞成"微信自己都不认"，
+//  进而触发 .factory 隔离、聊天记录丢失。所以这里【绝不】做任何重启动作，只：
+//    ① 语音发送运行时开关丢了 → 重开（客户端重启会丢）
+//    ② 轮询连续失败/暂停 → 进程内重新 init 一次
+//    ③ 其它异常只记日志（人能看清、能决定要不要人工介入）
+let _wdFails = 0
+setInterval(async () => {
+  try {
+    let hookOk = false
+    try {
+      const s = await bridge.api('/QueryDB/status', null, 'GET', 8000)
+      hookOk = !!(s && s.hWeixin)
+    } catch { hookOk = false }
+
+    try {
+      const st = await bridge.voiceSendSwitch?.()
+      if (st && st.forceOn === false) {
+        await bridge.voiceSendSwitch?.(true)
+        log('看门狗：语音发送开关被重置了 → 已重新打开')
+      }
+    } catch { /* ignore */ }
+
+    const poller = bridge.poller
+    const consec = Number(poller?._consecFail || 0)
+    const paused = typeof poller?.paused === 'function' ? poller.paused() : false
+
+    if (hookOk && (consec >= 5 || paused)) {
+      _wdFails++
+      log(`看门狗：⚠️ 轮询异常（连续失败 ${consec}，暂停中=${paused}）→ 进程内重新初始化`)
+      try { await poller?.init?.() } catch (e) { log('看门狗：重init轮询失败 ' + String(e?.message || e)) }
+    } else if (!hookOk) {
+      _wdFails++
+      log(`看门狗：⚠️ hook 无响应（连续第 ${_wdFails} 次）→ 只记日志，不重启任何东西`)
+    } else if (_wdFails > 0) {
+      log('看门狗：✅ 已恢复正常')
+      _wdFails = 0
+    }
+  } catch (e) { log('看门狗自身异常：' + String(e?.message || e)) }
+}, 5 * 60_000)
+
+
+
 async function handle(op, a = {}) {
   switch (op) {
     case 'status':
@@ -440,6 +493,21 @@ async function handle(op, a = {}) {
       // 尽力取到消息里的媒体图（表情包能取到，图片 type=3 通常取不到）
       const file = await bridge.fetchMedia(String(a.xml || ''), Number(a.type || 0), String(a.roomId || ''), Number(a.ts || 0))
       return { file: file || null }
+    }
+    case 'fetchLinkVideo': {
+      // 群里分享的**外部视频链接**（抖音/B站/小红书/微博…）：yt-dlp 下载 → **复用 probeVideo**
+      // 抽帧拼联系表 + 抽音轨 WAV（见 lib/link-video.mjs）。音轨转写仍由插件侧做。
+      // 失败一律返回 `{ sheet: '', error }`（**不抛**）—— 插件侧只记日志、降级成普通文本。
+      const url = String(a.url || '')
+      const r = await fetchLinkVideoSheet(url, {
+        maxSeconds: Number(a.maxSeconds) || 300,
+        maxMB: Number(a.maxMB) || 80,
+        timeoutMs: Number(a.timeoutMs) || 120_000,
+        cookies: String(a.cookies || ''),
+        frames: Number(a.frames) || 6,
+        log,
+      })
+      return r ? { ...r } : { sheet: '', wav: '', error: '未能取到该链接的视频（超时长/超大小/需要 cookies/站点不支持/网络失败）' }
     }
     case 'addBubble': {
       // 给已有表情加文字气泡（验证/手动补气泡用）：AI 不画字，气泡由 Pillow 后画
