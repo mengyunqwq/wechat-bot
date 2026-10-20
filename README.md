@@ -1,3 +1,7 @@
+
+> ⚠️ **动手改部署前请先读 [docs/OPERATIONS-RULES.md](docs/OPERATIONS-RULES.md)** ——
+> 那里记着「为什么不能强杀微信 / 为什么不能自动拉起客户端 / 为什么看门狗只做进程内自愈」，
+> 每一条都是真实事故换来的。重启客户端请用 [scripts/safe-restart-client.ps1](scripts/safe-restart-client.ps1)（会先备份、正常退出、等加载）。
 # 微信机器人
 
 把微信变成一个有性格、有记忆、会发表情包、看得懂图的**群聊机器人**，并提供 **MCP / WebSocket / HTTP** 三种接口，让**任意 AI agent** 都能驱动它。
