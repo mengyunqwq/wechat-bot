@@ -674,6 +674,16 @@ const namesFile = join(dirname(memoryDir), 'members.json')
       }
     }
 
+    // ★ 有人让它"去刷抖音" → 立刻刷一趟（不受 2 小时间隔 / 作息限制，但仍受每日上限）
+    //   触发词：刷抖音 / 刷个抖音 / 去刷视频 / 刷刷看 …（不要求被 @，但会回到这条消息所在的群）
+    if (config.douyinShare) {
+      const dt = String(m.text || '')
+      if (/刷.{0,6}抖音|抖音.{0,6}刷|去刷.{0,4}视频|刷刷看/.test(dt)) {
+        log(`抖音：被要求刷一趟（${r.roomName || r.roomId}）：${dt.slice(0, 40)}`)
+        void douyinTick({ force: true, roomId: r.roomId })
+      }
+    }
+
     // 链接视频：群里分享的抖音/B站/小红书/微博链接 → 桥侧 yt-dlp 下载 → **复用同一条视频管线**看懂。
     // 与上面 type 43 的区别只是"视频从哪来"（外部链接 vs 微信数据目录），下游完全一样。
     // 处理完写进 m.imageDesc / m.videoAudio 并标成 video → 后面按"视频消息"参与聊天（复用既有提示词/节流）。
@@ -2622,19 +2632,25 @@ let res = await callLlm(route, sys, usr, undefined)
   let douyinDay = ''
   let douyinDayCount = 0
   let douyinBusy = false
-  async function douyinTick() {
+  async function douyinTick(opts = {}) {
+    // force=true：有人在群里让它"去刷抖音" → 不看间隔、不看作息（但仍受每日上限 + 忙碌锁）
+    const force = !!opts.force
     if (!config.douyinShare || douyinBusy) return
-    if (isQuiet(quietWindows)) return
+    if (!force && isQuiet(quietWindows)) return
     const now = Date.now()
     const dstr = new Date().toISOString().slice(0, 10)
     if (dstr !== douyinDay) { douyinDay = dstr; douyinDayCount = 0 }
     if (douyinDayCount >= (Number(config.douyinShareMaxPerDay) || 3)) return
-    if (now - douyinLastAt < (Number(config.douyinShareIntervalMs) || 7_200_000)) return
+    if (!force && now - douyinLastAt < (Number(config.douyinShareIntervalMs) || 7_200_000)) return
     const targets = [...rooms.values()].filter((r) => r.roomId && String(r.roomId).endsWith('@chatroom'))
     if (!targets.length) return
-    // ★ 优先发到【最近真正回复成功过的群】——那个群一定是通的（见 deliver 里的说明）。
-    //   其次按 lastMsgAt 倒序（最近有消息的群），实在没有就随便挑一个。
-    if (lastDeliveredRoom && rooms.has(lastDeliveredRoom)) {
+    // ★ 优先发到【要求它刷的那个群】（一定是你正在看的群 → 一定送得到）
+    //   其次发到【最近真正回复成功过的群】（lastDeliveredRoom，一定通）
+    //   最后按 lastMsgAt 倒序。
+    const askRoom = opts.roomId && rooms.has(opts.roomId) ? opts.roomId : ''
+    if (askRoom) {
+      targets.sort((a, b) => (a.roomId === askRoom ? -1 : 1) - (b.roomId === askRoom ? -1 : 1))
+    } else if (lastDeliveredRoom && rooms.has(lastDeliveredRoom)) {
       targets.sort((a, b) => (a.roomId === lastDeliveredRoom ? -1 : 1) - (b.roomId === lastDeliveredRoom ? -1 : 1))
     } else {
       targets.sort((a, b) => (Number(b.lastMsgAt) || 0) - (Number(a.lastMsgAt) || 0))
@@ -2673,7 +2689,28 @@ let res = await callLlm(route, sys, usr, undefined)
       const item = res.items.find((x) => Number(x.i) === Number(picked.i)) || res.items[0]
       const r = targets[0]
       const title = String(item.desc || '抖音上刷到的').split('\n')[0].slice(0, 80)
-      const caption = String(picked.comment || '刷到一个好玩的').slice(0, 40)
+      let caption = String(picked.comment || '').slice(0, 40)
+      // ★ 关键：先【真的看一遍】这条视频（桥侧在 20%/50%/80% 抽了 3 帧拼成联系表），
+      //   再把"看到的内容"交给她，让她用自己的话吐槽 —— 而不是只复述标题（那样很呆）。
+      let seen = ''
+      if (item.sheet) {
+        try {
+          seen = await describeImageCached(String(item.sheet), 'videoSheet')
+          if (seen) log('抖音：已看懂这条视频 → ' + String(seen).slice(0, 80))
+        } catch (e) { log('抖音：看视频失败（只用标题） ' + String(e?.message || e).slice(0, 60)) }
+      }
+      try {
+        const sys2 = '你是网络上的鲸鱼娘「大肥鱼」，刚在抖音刷到一条视频，现在要在微信群里随口说一句。'
+          + '要求：像真人吐槽，20 字以内；不要"这是/视频中/画面里"这种解说腔；不要复述标题；'
+          + '可以只说感受、笑点、槽点。只回一句话，不要引号、不要解释。'
+        const user2 = (seen ? '你看完的内容：' + seen + '\n' : '')
+          + '视频标题：' + title + '\n'
+          + (caption ? '你第一眼的印象：' + caption + '\n' : '')
+          + '现在说一句。'
+        const out2 = await callLlm(resolveRoute(), sys2, user2, 'low')
+        const t2 = String(out2 || '').replace(/^["'「『]+|["'」』]+$/g, '').split('\n')[0].trim()
+        if (t2) caption = t2.slice(0, 60)
+      } catch (e) { log('抖音：生成吐槽失败（用兜底文案） ' + String(e?.message || e).slice(0, 60)) }
       if (item.shot && typeof item.shot === 'string') {
         try { await client.call('sendImage', { roomId: r.roomId, path: item.shot }, 60_000) }
         catch (e) { log('抖音：发截图失败 ' + String(e?.message || e).slice(0, 60)) }

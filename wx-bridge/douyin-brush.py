@@ -255,6 +255,50 @@ async def main():
                     await pg.screenshot(path=shot)
                 except Exception:
                     shot = ""
+                # ★ 真要"看懂"而不只是读标题：在 20%/50%/80% 三处各截一帧，拼成一张联系表，
+                #   交给视觉模型一次看完（和群里发视频的识别链路复用同一个函数）。
+                sheet = ""
+                frames = []
+                try:
+                    dur = await pg.evaluate("""() => {
+                        const vs = [...document.querySelectorAll('video')].filter((v) => {
+                            const r = v.getBoundingClientRect();
+                            return r.bottom > 40 && r.top < window.innerHeight - 20;
+                        });
+                        return vs.length ? Number(vs[0].duration || 0) : 0;
+                    }""")
+                    total = float(dur) if dur and float(dur) > 2 else 15.0
+                    if total > 60:
+                        total = 60.0        # 长视频只看前 60 秒
+                    for frac in (0.2, 0.5, 0.8):
+                        try:
+                            await pg.evaluate("""(t) => {
+                                const vs = [...document.querySelectorAll('video')].filter((v) => {
+                                    const r = v.getBoundingClientRect();
+                                    return r.bottom > 40 && r.top < window.innerHeight - 20;
+                                });
+                                if (vs.length) vs[0].currentTime = t;
+                            }""", total * frac)
+                            await pg.wait_for_timeout(1100)
+                            fp = os.path.join(args.out, "f-%02d-%d.png" % (n, int(frac * 100)))
+                            await pg.screenshot(path=fp)
+                            frames.append(fp)
+                        except Exception:
+                            pass
+                    if frames:
+                        from PIL import Image
+                        ims = [Image.open(f) for f in frames]
+                        tw = 620
+                        ims = [im.resize((tw, max(1, int(im.height * tw / im.width)))) for im in ims]
+                        th = max(im.height for im in ims)
+                        canvas = Image.new("RGB", (tw * len(ims), th), (18, 18, 18))
+                        for idx, im in enumerate(ims):
+                            canvas.paste(im, (idx * tw, 0))
+                        sp = os.path.join(args.out, "sheet-%02d.png" % n)
+                        canvas.save(sp, quality=82)
+                        sheet = sp
+                except Exception as e:
+                    print("[%d] 抽帧失败（不影响分享）：%s" % (n, str(e)[:60]), flush=True)
                 # 截完再确认一次标题没变
                 c = (await read_item(pg)).get("desc") or ""
                 if c[:30] != b[:30]:
@@ -280,6 +324,7 @@ async def main():
                 "author": author,
                 "url": (d.get("url") or "").strip(),
                 "shot": shot,
+                "sheet": sheet,
             })
             print("[%d/%d] %s | 赞 %s" % (n, args.count, final_desc[:60], like[:12]), flush=True)
             await pg.keyboard.press("ArrowDown")
