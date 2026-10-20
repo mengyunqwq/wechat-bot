@@ -14,8 +14,8 @@
  * 端口：WS/HTTP 127.0.0.1:17300（--port 可改）；WCF SDK 用 10086/10087。
  */
 import http from 'node:http'
-import { execFileSync } from 'node:child_process'
-import { mkdirSync, appendFileSync, writeFileSync } from 'node:fs'
+import { execFileSync, execFile } from 'node:child_process'
+import { mkdirSync, appendFileSync, writeFileSync, readFileSync, existsSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { WebSocketServer } from 'ws'
@@ -508,6 +508,46 @@ async function handle(op, a = {}) {
         log,
       })
       return r ? { ...r } : { sheet: '', wav: '', error: '未能取到该链接的视频（超时长/超大小/需要 cookies/站点不支持/网络失败）' }
+    }
+    case 'douyinBrush': {
+      // 只读「刷抖音」：跑 wx-bridge/douyin-brush.py（Playwright + 独立已登录 profile）
+      //   → 打开推荐流、真实鼠标点「推荐」、键盘 ArrowDown 翻页、读标题/点赞、逐条截图。
+      // 返回 { ok, items:[{i,desc,like,author,url,shot}], dir }；失败返回 { ok:false, error }（**不抛**）。
+      // ★ 只读：不点赞、不评论、不关注、不私信（脚本里写死）。
+      const count = Math.max(1, Math.min(12, Number(a.count) || 8))
+      const here = process.cwd()               // 桥的工作目录就是 wx-bridge/
+      const script = join(here, 'douyin-brush.py')
+      if (!existsSync(script)) return { ok: false, error: '没有 douyin-brush.py（' + script + '）' }
+      const outDir = join(here, '..', 'data', '_douyin', 'batch-' + Date.now())
+      try { mkdirSync(outDir, { recursive: true }) } catch { /* ignore */ }
+      try {
+        const py = process.env.PYTHON_EXE || 'D:\\Python311\\python.exe'
+        // ★ 必须异步：这个脚本要跑 1~2 分钟，用 execFileSync 会把桥的事件循环卡死
+        //   （实测：WS 客户端直接超时、插件收不到消息）。
+        await new Promise((resolve, reject) => {
+          execFile(py, [script, '--count', String(count), '--out', outDir], {
+            cwd: here,
+            env: { ...process.env, PYTHONIOENCODING: 'utf-8' },
+            timeout: 10 * 60_000,
+            maxBuffer: 8 * 1024 * 1024,
+            encoding: 'utf8',
+          }, (err, stdout, stderr) => {
+            if (err) return reject(new Error(String(err.message || err) + ' | ' + String(stderr || '').slice(0, 300)))
+            try { log('刷抖音输出：' + String(stdout || '').split('\n').slice(-3).join(' / ').slice(0, 300)) } catch { }
+            resolve()
+          })
+        })
+      } catch (e) {
+        return { ok: false, error: '刷抖音失败：' + String(e?.message || e).slice(0, 300), dir: outDir }
+      }
+      const jf = join(outDir, 'items.json')
+      if (!existsSync(jf)) return { ok: false, error: '脚本没产出 items.json', dir: outDir }
+      try {
+        const items = JSON.parse(readFileSync(jf, 'utf8'))
+        return { ok: true, items, dir: outDir }
+      } catch (e) {
+        return { ok: false, error: 'items.json 解析失败：' + String(e?.message || e).slice(0, 120), dir: outDir }
+      }
     }
     case 'addBubble': {
       // 给已有表情加文字气泡（验证/手动补气泡用）：AI 不画字，气泡由 Pillow 后画

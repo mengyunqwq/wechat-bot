@@ -249,6 +249,14 @@ const DEFAULT_CONFIG = {
   linkVideoTimeoutMs: 120_000,   // 桥侧下载超时（到点杀子进程；被@时也不放宽，免得卡住）
   linkVideoFrames: 6,            // 抽几帧拼联系表（0 = 用 videoFrames）
 
+  // ── 抖音自动刷（★ 只读）+ 挑一条分享到群 ──────────────────────────
+  //   红线：只读（不点赞 / 不评论 / 不关注 / 不私信）—— 脚本里写死。
+  //   为什么只读：抖音风控对"写操作"极敏感，自动点赞/评论基本必封号。
+  douyinShare: true,                  // 总开关（关掉就完全不刷）
+  douyinShareIntervalMs: 7_200_000,   // 至少隔多久刷一次（默认 2 小时）
+  douyinBrushCount: 8,                // 每次刷几条候选
+  douyinShareMaxPerDay: 3,            // 每天最多分享几条（防刷屏）
+
   // ── 语音气泡（发真·微信语音 type 34，不是"音频文件"）────────────────
   // 走 hook 的 /SendVoiceMsg（SILK 由 tts.mjs 合成；hook 的 str0Mode 必须 'bytes'）。
   // hook 侧还有独立开关（<客户端目录>\hook-voice-send.on 或 POST /Debug/VoiceSend {"on":true}）——
@@ -2323,11 +2331,16 @@ let res = await callLlm(route, sys, usr, undefined)
     return { yes: false, why: `概率未命中（p=${p}）` }
   }
 
+  // ★ 最近一次"真正发送成功"的群 —— 抖音分享优先发这里。
+  //   为什么：微信 hook 的 /SendTextMsg 只对"当前打开/活跃的会话"真正送达，
+  //   发到没打开的群会 rc=0 但静默丢失（实测 2026-10-20）。而"刚回复过的群"一定是通的。
+  let lastDeliveredRoom = ''
   async function deliver(r, trigger, priority, reply) {
     const roomId = r.roomId
     // 记住"我刚刚回了谁" —— 对方再接话就进对话延续模式（否则会回一句就哑）
     r.lastRepliedSender = trigger.sender
     r.lastRepliedAt = Date.now()
+    lastDeliveredRoom = roomId
     if (reply.text) {
       // 防重复③：这句回复最近说过一模一样的话 → 不重复发（复读最不像人）
       const nReply = normText(reply.text)
@@ -2599,6 +2612,84 @@ let res = await callLlm(route, sys, usr, undefined)
     const iv = setInterval(() => { void healthTick() }, Number(config.healthCheckMs) || 300_000)
     return () => clearInterval(iv)
   }, SHORT + ': health heartbeat')
+
+  // ── 抖音自动刷（只读）→ 她挑一条 → 发到群里 ───────────────────────
+  // 链路：桥 op `douyinBrush`（Playwright + 独立已登录 profile，真实鼠标点「推荐」+
+  //      ArrowDown 翻页，见 wx-bridge/douyin-brush.py）→ 拿回 {desc, like, shot}
+  //      → 交给模型按【她自己的眼光】挑一条 → 发截图 + 一句吐槽。
+  // 红线：只读（不点赞/不评论/不关注/不私信）；不刷屏；深夜不刷；一天最多 N 条。
+  let douyinLastAt = 0
+  let douyinDay = ''
+  let douyinDayCount = 0
+  let douyinBusy = false
+  async function douyinTick() {
+    if (!config.douyinShare || douyinBusy) return
+    if (isQuiet(quietWindows)) return
+    const now = Date.now()
+    const dstr = new Date().toISOString().slice(0, 10)
+    if (dstr !== douyinDay) { douyinDay = dstr; douyinDayCount = 0 }
+    if (douyinDayCount >= (Number(config.douyinShareMaxPerDay) || 3)) return
+    if (now - douyinLastAt < (Number(config.douyinShareIntervalMs) || 7_200_000)) return
+    const targets = [...rooms.values()].filter((r) => r.roomId && String(r.roomId).endsWith('@chatroom'))
+    if (!targets.length) return
+    // ★ 优先发到【最近真正回复成功过的群】——那个群一定是通的（见 deliver 里的说明）。
+    //   其次按 lastMsgAt 倒序（最近有消息的群），实在没有就随便挑一个。
+    if (lastDeliveredRoom && rooms.has(lastDeliveredRoom)) {
+      targets.sort((a, b) => (a.roomId === lastDeliveredRoom ? -1 : 1) - (b.roomId === lastDeliveredRoom ? -1 : 1))
+    } else {
+      targets.sort((a, b) => (Number(b.lastMsgAt) || 0) - (Number(a.lastMsgAt) || 0))
+    }
+    douyinBusy = true
+    try {
+      douyinLastAt = now
+      log('抖音：开始刷推荐流（只读）…')
+      const res = await client.call('douyinBrush', { count: Number(config.douyinBrushCount) || 8 }, 11 * 60_000)
+      if (!res?.ok || !Array.isArray(res.items) || !res.items.length) {
+        log('抖音：什么都没刷到（' + String(res?.error || '空结果') + '）')
+        return
+      }
+      const list = res.items.map((x) => `#${x.i} 赞${x.like || '?'} ${String(x.desc || '').slice(0, 100)}`).join('\n')
+      const sys = '你是一个爱刷抖音的鲸鱼娘「大肥鱼」。从下面几条里挑【一条你最想分享到微信群】的：'
+        + '按你自己的口味（搞笑/可爱/美食/感叹/猎奇都行），但【绝不】挑政治、争议、广告、低俗内容。'
+        + '只回一行 JSON，不要解释：{"i":编号,"comment":"发到群里的一句吐槽，15 字内"}'
+      let picked = null
+      try {
+        const out = await callLlm(resolveRoute(), sys, list, 'low')
+        const mm = String(out || '').match(/\{[\s\S]{0,300}?\}/)
+        if (mm) picked = JSON.parse(mm[0])
+      } catch (e) { log('抖音：挑视频失败 ' + String(e?.message || e).slice(0, 80)) }
+      if (!picked || !picked.i) {
+        // ★ 兜底：模型没给出可解析结果（空回复/带代码块/格式错）时，
+        //   挑【点赞最高】的一条 —— 保证不会白刷一趟，也保证分享是有价值的。
+        const score = (x) => {
+          const s = String(x.like || '').replace('万', '0000').replace(/[^0-9.]/g, '')
+          const n = parseFloat(s)
+          return Number.isFinite(n) ? n : 0
+        }
+        const best = [...res.items].sort((a, b) => score(b) - score(a))[0]
+        picked = { i: best.i, comment: '刷到这个，有点上头' }
+        log('抖音：模型没挑出结果 → 兜底挑点赞最高的 #' + best.i)
+      }
+      const item = res.items.find((x) => Number(x.i) === Number(picked.i)) || res.items[0]
+      const r = targets[0]
+      const title = String(item.desc || '抖音上刷到的').split('\n')[0].slice(0, 80)
+      const caption = String(picked.comment || '刷到一个好玩的').slice(0, 40)
+      if (item.shot && typeof item.shot === 'string') {
+        try { await client.call('sendImage', { roomId: r.roomId, path: item.shot }, 60_000) }
+        catch (e) { log('抖音：发截图失败 ' + String(e?.message || e).slice(0, 60)) }
+      }
+      await client.call('sendText', { roomId: r.roomId, text: `刷到一个好玩的：${title}\n${caption}` }, 30_000)
+      douyinDayCount++
+      stats.douyinShared = (stats.douyinShared || 0) + 1
+      log(`抖音：已分享「${title.slice(0, 30)}」→ ${r.roomId}（今日第 ${douyinDayCount} 条）`)
+    } catch (e) {
+      log('抖音：出错 ' + String(e?.message || e).slice(0, 140))
+    } finally { douyinBusy = false }
+  }
+  ctx.effect(() => {
+    const iv = setInterval(() => { void douyinTick() }, 10 * 60_000)   // 每 10 分钟看一次该不该刷
+    return () => clearInterval(iv)
+  }, SHORT + ': douyin share')
 
   // ── 健康自检与失联监控 ───────────────────────────────────────
   // 为什么要有：这台机器人经常"静默失联"（桥掉线 / hook 卡死 / 数据库轮询失败 /
