@@ -60,14 +60,27 @@ export class BridgeClient {
         this._status.connected = false
         this._failWaiters('bridge 连接已断开')
         if (this.closed) return
-        // 被桥判定为"旧实例已被新实例接管"（close code 4000）→ 绝不重连。
-        // 否则两个【同版本】实例会互相踢 → 无限 ping-pong → 每条消息被处理两遍
-        // → 群里出现重复回答（实测踩过：同一对消息差 1 秒发了两次）。
+        // 被桥判定为"旧实例已被新实例接管"（close code 4000）。
+        // 原来这里是【永久停止重连】—— 但这会误伤：
+        //   桥重启 / DSH 重启时也会发 4000，插件就彻底哑了，
+        //   而实际上并没有别的实例（实测 2026-10-20 18:16：桥活着、连接数 0、
+        //   插件却再也不重连，只能靠手工重载插件救回来）。
+        // 现在改成：退避 5 分钟后重试；连续 3 次 4000 才真的放弃
+        // （真有重复实例时，另一个实例会一直占着连接，这里最多每 5 分钟试一次，代价可接受）。
         if (ev && ev.code === 4000) {
-          this.closed = true
-          this._status.lastError = '已被新实例接管，停止重连'
-          this.log('已被新实例接管（close 4000）→ 本实例停止重连并退出')
+          this._status.replaced = (this._status.replaced || 0) + 1
+          if (this._status.replaced >= 3) {
+            this.closed = true
+            this._status.lastError = '连续 3 次被新实例接管，停止重连'
+            this.log('连续 3 次 close 4000 → 本实例停止重连并退出（确实有另一个实例在跑）')
+            this.onEvent({ t: 'ws-close', replaced: true })
+            return
+          }
+          const waitMs = 5 * 60_000
+          this._status.lastError = `被新实例接管（第 ${this._status.replaced} 次）→ ${Math.round(waitMs / 60000)} 分钟后重试`
+          this.log(`收到 close 4000（第 ${this._status.replaced} 次）→ ${Math.round(waitMs / 60000)} 分钟后重连（不会永久放弃）`)
           this.onEvent({ t: 'ws-close', replaced: true })
+          setTimeout(() => this.connect(), waitMs)
           return
         }
         this._status.reconnects += 1

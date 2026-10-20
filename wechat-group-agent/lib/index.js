@@ -254,7 +254,7 @@ const DEFAULT_CONFIG = {
   //   为什么只读：抖音风控对"写操作"极敏感，自动点赞/评论基本必封号。
   douyinShare: true,                  // 总开关（关掉就完全不刷）
   douyinShareIntervalMs: 7_200_000,   // 至少隔多久刷一次（默认 2 小时）
-  douyinBrushCount: 8,                // 每次刷几条候选
+  douyinBrushCount: 3,                // 每次刷几条候选（3 条挑 1 条，够快也不至于没得选）
   douyinShareMaxPerDay: 3,            // 每天最多分享几条（防刷屏）
 
   // ── 语音气泡（发真·微信语音 type 34，不是"音频文件"）────────────────
@@ -2662,10 +2662,19 @@ let res = await callLlm(route, sys, usr, undefined)
       targets.sort((a, b) => (Number(b.lastMsgAt) || 0) - (Number(a.lastMsgAt) || 0))
     }
     douyinBusy = true
+    // ★ 发送前先确认桥连上：桥重连后有几秒状态不同步（实测 10:47:28 重连、
+    //   10:47:34 却报 "bridge 未连接" → 分享白跑）。这里最多等 15 秒。
+    const waitBridge = async (ms = 15000) => {
+      const t0 = Date.now()
+      while (Date.now() - t0 < ms && !client.connected) {
+        await new Promise((r) => setTimeout(r, 1000))
+      }
+      return !!client.connected
+    }
     try {
       douyinLastAt = now
       log('抖音：开始刷推荐流（只读）…')
-      const res = await client.call('douyinBrush', { count: Number(config.douyinBrushCount) || 8 }, 11 * 60_000)
+      const res = await client.call('douyinBrush', { count: Number(config.douyinBrushCount) || 3 }, 11 * 60_000)
       if (!res?.ok || !Array.isArray(res.items) || !res.items.length) {
         log('抖音：什么都没刷到（' + String(res?.error || '空结果') + '）')
         return
@@ -2711,7 +2720,19 @@ let res = await callLlm(route, sys, usr, undefined)
         + '只回一行 JSON，不要解释、不要代码块：{"i":编号,"why":"你为什么感兴趣（10字内）","comment":"发到群里的一句话（20字内，像真人说话）"}'
       let picked = null
       try {
-        const out = await callLlm(resolveRoute(), sys, list, 'low')
+        // ★ callLlm 返回的是对象 { text, diag }，不是字符串！（踩了一整轮）
+        const r1 = await callLlm(resolveRoute(), sys, list, 'low')
+        let out = (r1 && typeof r1 === 'object') ? String(r1.text || '') : String(r1 || '')
+        if (!out.trim()) {
+          // 空回复 → 把诊断打出来（chunks/finish/failure/err），再用短提示词重试一次
+          try { log('抖音：挑视频 LLM 空回复，诊断=' + JSON.stringify(r1 && r1.diag || {}).slice(0, 320)) } catch { }
+          const shortSys = '从下面几条抖音里挑一条最好玩的，只回一行 JSON：{"i":编号,"why":"10字内","comment":"20字内"}'
+          const shortList = fresh.map((x) => `#${x.i} ${String(x.desc || '').split('\n')[0].slice(0, 30)}`).join('\n')
+          const r1b = await callLlm(resolveRoute(), shortSys, shortList, undefined)
+          out = (r1b && typeof r1b === 'object') ? String(r1b.text || '') : String(r1b || '')
+          if (out.trim()) log('抖音：短提示词重试成功 → ' + out.slice(0, 80))
+          else { try { log('抖音：短提示词也空，诊断=' + JSON.stringify(r1b && r1b.diag || {}).slice(0, 320)) } catch { } }
+        }
         // ★ callLlm 有时直接返回对象（不是字符串）→ 直接 String() 会变 [object Object]
         const raw = typeof out === 'string' ? out : JSON.stringify(out || '')
         // ★ 贪婪匹配【最外层】JSON：模型有时会返回 {"i":1,"comment":{"text":"..."}} 这种嵌套，
@@ -2756,13 +2777,25 @@ let res = await callLlm(route, sys, usr, undefined)
           + (heard ? '【你听到的台词】\n' + heard + '\n\n' : '')
           + (caption ? '【你第一眼的感觉】' + caption + '\n\n' : '')
           + '现在用你自己的话，说出你觉得最好玩/最戳你的那个点。'
-        const out2 = await callLlm(resolveRoute(), sys2, user2, 'low')
+        const r2 = await callLlm(resolveRoute(), sys2, user2, 'low')
+        const out2 = (r2 && typeof r2 === 'object') ? String(r2.text || '') : String(r2 || '')
+        if (!String(out2).trim()) {
+          try { log('抖音：写评论 LLM 空回复，诊断=' + JSON.stringify(r2 && r2.diag || {}).slice(0, 320)) } catch { }
+        }
         const t2 = String(out2 || '').replace(/^["'「『]+|["'」』]+$/g, '').split('\n')[0].trim()
         if (t2) caption = t2.slice(0, 80)
       } catch (e) { log('抖音：生成吐槽失败（用兜底文案） ' + String(e?.message || e).slice(0, 60)) }
+      await waitBridge()
       if (item.shot && typeof item.shot === 'string') {
-        try { await client.call('sendImage', { roomId: r.roomId, path: item.shot }, 60_000) }
-        catch (e) { log('抖音：发截图失败 ' + String(e?.message || e).slice(0, 60)) }
+        let ok = false
+        for (let k = 0; k < 3 && !ok; k++) {
+          try { await client.call('sendImage', { roomId: r.roomId, path: item.shot }, 60_000); ok = true }
+          catch (e) {
+            log(`抖音：发截图失败（第 ${k + 1}/3 次）` + String(e?.message || e).slice(0, 50))
+            await new Promise((res) => setTimeout(res, 5000))
+            await waitBridge()
+          }
+        }
       }
       // ★ 让她"按自己的理解发言"：只用她【看完视频后】说的这一句，
       //   不再拼「刷到一个好玩的：<标题>」—— 那行标题会让人以为它只是在读文案。
@@ -2770,11 +2803,21 @@ let res = await callLlm(route, sys, usr, undefined)
       // 最后一道守卫：绝不允许把 [object Object] / undefined 发出去
       let safeCaption = String(caption || '').trim()
       if (!safeCaption || safeCaption.includes('[object ') || safeCaption === 'undefined' || safeCaption === 'null') {
-        safeCaption = '这个有点意思'
+        const fb = ['这个有点意思', '刷到了个不错的', '有点东西啊', '哈哈哈哈这个', '这个我可以']
+        safeCaption = fb[Math.floor(Math.random() * fb.length)]
       }
       const outText = [safeCaption, String(item.shareUrl || '').trim()]
         .filter(Boolean).join('\n')
-      await client.call('sendText', { roomId: r.roomId, text: outText }, 30_000)
+      let sent = false
+      for (let k = 0; k < 3 && !sent; k++) {
+        try { await client.call('sendText', { roomId: r.roomId, text: outText }, 30_000); sent = true }
+        catch (e) {
+          log(`抖音：发文字失败（第 ${k + 1}/3 次）` + String(e?.message || e).slice(0, 50))
+          await new Promise((res) => setTimeout(res, 5000))
+          await waitBridge()
+        }
+      }
+      if (!sent) { log('抖音：文字 3 次都没发出去 → 放弃本轮'); return }
       log(`抖音：分享文案 = 「${outText.slice(0, 40)}」`)
       douyinDayCount++
       try { seenKeys.add(keyOf(item)) } catch { }

@@ -21,6 +21,8 @@
 
 import argparse
 import asyncio
+import glob
+import shutil
 import json
 import os
 import sys
@@ -180,7 +182,7 @@ async def main():
     ap.add_argument("--count", type=int, default=8, help="刷多少条")
     ap.add_argument("--profile", default=PROF_DEFAULT)
     ap.add_argument("--out", default=OUT_DEFAULT)
-    ap.add_argument("--gap", type=float, default=3.5, help="每条之间停顿秒数")
+    ap.add_argument("--gap", type=float, default=2.0, help="每条之间停顿秒数")
     ap.add_argument("--headless", action="store_true")
     args = ap.parse_args()
 
@@ -196,7 +198,13 @@ async def main():
             locale="zh-CN",
             accept_downloads=True,
             permissions=["clipboard-read", "clipboard-write"],
-            args=["--disable-blink-features=AutomationControlled", "--autoplay-policy=no-user-gesture-required"],
+            # ★ 有头模式（headless 会被抖音弹验证码），但把窗口【移到屏幕外】，
+            #   用户看不到、也不占用桌面（--window-position 给个巨大的负坐标即可）。
+            #   注意：仍然必须有头，否则推荐流/验证码过不去。
+            args=["--disable-blink-features=AutomationControlled",
+                  "--autoplay-policy=no-user-gesture-required",
+                  "--window-position=-32000,-32000",
+                  "--window-size=1280,900"],
             ignore_default_args=["--enable-automation"],
         )
         await ctx.add_init_script("Object.defineProperty(navigator,'webdriver',{get:()=>undefined});")
@@ -337,7 +345,7 @@ async def main():
                             await pg.wait_for_timeout(600)
                     except Exception:
                         pass
-                    for k in range(9):
+                    for k in range(6):                # 6 帧（3×2）够读字幕，比 9 帧快 1/3
                         try:
                             fp = os.path.join(args.out, "f-%02d-%d.png" % (n, k + 1))
                             await pg.screenshot(path=fp)
@@ -349,16 +357,16 @@ async def main():
                         from PIL import Image
                         # 3×3 网格：每格宽度固定，行高取该行最大
                         tw = 560
-                        cols, rows = 3, 3
+                        cols, rows = 3, 2
                         cells = []
-                        for f in frames[:9]:
+                        for f in frames[:6]:
                             im = Image.open(f)
                             cells.append(im.resize((tw, max(1, int(im.height * tw / im.width)))))
-                        while len(cells) < 9:
+                        while len(cells) < 6:
                             cells.append(Image.new("RGB", (tw, 320), (18, 18, 18)))
                         ch = max(c.height for c in cells)
                         canvas = Image.new("RGB", (tw * cols, ch * rows), (18, 18, 18))
-                        for idx, c in enumerate(cells[:9]):
+                        for idx, c in enumerate(cells[:6]):
                             canvas.paste(c, ((idx % cols) * tw, (idx // cols) * ch))
                         sp = os.path.join(args.out, "sheet-%02d.png" % n)
                         canvas.save(sp, quality=82)
@@ -372,7 +380,7 @@ async def main():
                 #   再交给本地语音识别（SenseVoice）就真的"听懂"了。
                 audio = ""
                 try:
-                    rec = await pg.evaluate(RECORD_JS, 6)
+                    rec = await pg.evaluate(RECORD_JS, 4)        # 4 秒够听出在说什么
                     if rec and rec.get("b64"):
                         import base64 as _b64
                         webm = os.path.join(args.out, "a-%02d.webm" % n)
@@ -487,6 +495,25 @@ async def main():
 
         with open(os.path.join(args.out, "items.json"), "w", encoding="utf-8") as f:
             json.dump(items, f, ensure_ascii=False, indent=1)
+
+        # ★ 自动清理旧批次：每次刷产出 ~30MB（帧+截图+录音+网格），
+        #   不清理的话一天 360MB、一周 2.5GB（实测堆到过 202MB）。
+        #   只保留最近 2 批（当前这批 + 上一批），更早的整目录删掉。
+        try:
+            base = os.path.dirname(os.path.abspath(args.out))
+            dirs = [d for d in glob.glob(os.path.join(base, "batch-*")) if os.path.isdir(d)]
+            dirs.sort(key=os.path.getmtime, reverse=True)
+            cur = os.path.abspath(args.out)
+            keep = set([cur] + dirs[:2])
+            removed = 0
+            for d in dirs:
+                if os.path.abspath(d) not in keep:
+                    shutil.rmtree(d, ignore_errors=True)
+                    removed += 1
+            if removed:
+                print("清理旧批次：删了 %d 个目录（保留最近 2 批）" % removed, flush=True)
+        except Exception as e:
+            print("清理旧批次失败（不影响本次）:", str(e)[:60], flush=True)
         # 去重统计（按标题前 30 字）
         uniq = {x["desc"][:30] for x in items if x["desc"]}
         print("DONE: %d 条，不同标题 %d 个 → %s" % (len(items), len(uniq), os.path.join(args.out, "items.json")), flush=True)

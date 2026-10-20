@@ -1,5 +1,5 @@
 /**
- * Agnes 图像生成 → 微信表情包
+ * 图像生成 → 微信表情包（**后端可配置**）
  *
  * 为什么这么设计：
  *  - 用**图生图**（extra_body.image 传参考图 Data URI），严格保留角色外观，
@@ -8,18 +8,52 @@
  *    发微信快很多，也更像表情包尺寸。
  *  - **按情绪缓存**：同一种情绪只生成一次，之后复用（省调用 + 角色一致）。
  *
- * Agnes 接口（实测通过）：
- *   POST https://apihub.agnes-ai.com/v1/images/generations
- *   { model:'agnes-image-2.1-flash', prompt, size:'1K', ratio:'1:1',
+ * 后端可配置（不需要改代码）：
+ *   优先级：环境变量 > data/image-gen.json > 内置默认
+ *     IMAGE_API_URL   图片生成接口（默认 Agnes：https://apihub.agnes-ai.com/v1/images/generations）
+ *     IMAGE_MODEL     模型 id（默认 agnes-image-2.1-flash）
+ *     IMAGE_API_KEY   接口 key（也支持沿用 AGNES_API_KEY）
+ *
+ *   data/image-gen.json 例子：
+ *   {
+ *     "apiUrl": "https://apihub.agnes-ai.com/v1/images/generations",
+ *     "model": "mimov2.6flash",
+ *     "apiKey": "sk-xxxx"
+ *   }
+ *
+ * 接口约定（OpenAI images/generations 风格）：
+ *   POST {apiUrl}
+ *   { model, prompt, size:'1K', ratio:'1:1',
  *     extra_body:{ image:['data:image/jpeg;base64,...'], response_format:'url' } }
- *   返回 data[0].url（图片在 platform-outputs.agnes-ai.space）
+ *   返回 data[0].url
  */
 import { existsSync, mkdirSync, readFileSync, writeFileSync, unlinkSync } from 'node:fs'
-import { join } from 'node:path'
+import { join, dirname } from 'node:path'
 import { homedir } from 'node:os'
+import { fileURLToPath } from 'node:url'
 
-const API = 'https://apihub.agnes-ai.com/v1/images/generations'
-const MODEL = 'agnes-image-2.1-flash'
+const DEFAULTS = {
+  apiUrl: 'https://apihub.agnes-ai.com/v1/images/generations',
+  model: 'agnes-image-2.1-flash',
+  keyRef: 'AGNES_API_KEY',
+}
+
+/** 图片生成的配置（每次调用都读一次，改 json 不用重启桥） */
+export function loadImageConfig() {
+  let fileCfg = {}
+  try {
+    // data/image-gen.json（相对 wx-bridge/lib/../../data）
+    const here = dirname(fileURLToPath(import.meta.url))
+    const f = join(here, '..', '..', 'data', 'image-gen.json')
+    if (existsSync(f)) fileCfg = JSON.parse(readFileSync(f, 'utf8')) || {}
+  } catch { /* 没配置就用默认 */ }
+  return {
+    apiUrl: String(process.env.IMAGE_API_URL || fileCfg.apiUrl || DEFAULTS.apiUrl),
+    model: String(process.env.IMAGE_MODEL || fileCfg.model || DEFAULTS.model),
+    apiKey: String(process.env.IMAGE_API_KEY || fileCfg.apiKey || ''),
+    keyRef: String(process.env.IMAGE_KEY_REF || fileCfg.keyRef || DEFAULTS.keyRef),
+  }
+}
 
 /** 情绪 → 画面描述（提示词片段） */
 export const EMOTION_PROMPTS = {
@@ -167,36 +201,54 @@ export function resolveAgnesKey(ref = 'AGNES_API_KEY') {
 export async function generateStickerImage({
   emotion, refImage, outDir, extra = '', style = '', size = 512, log = () => {},
 }) {
-  const key = resolveAgnesKey()
+  const cfg = loadImageConfig()
+  const key = cfg.apiKey || resolveAgnesKey(cfg.keyRef)
   if (!key) throw new Error('没有 AGNES_API_KEY（环境变量或 ~/.dsh/.credentials.yaml）')
   if (!refImage || !existsSync(refImage)) throw new Error('参考图不存在：' + refImage)
 
   const refB64 = readFileSync(refImage).toString('base64')
   const styleText = style || 'Q 版卡通贴纸风格，线条干净，色彩明快，主体清晰突出'
+  // ★ 场景灵感（每次随机一个）：避免背景总是"家里 / 室内客厅"同一个样子。
+  //   实测：只在提示词里写"房间/街道/户外"，模型会默认画室内客厅；
+  //   给一个具体的场景灵感，背景才有变化。
+  const SCENE_IDEAS = [
+    '户外街边，有路灯和店铺招牌', '窗边的咖啡店，玻璃上有反光',
+    '热闹的夜市，灯笼和小摊', '阳光下的公园草地，远处有树',
+    '海边沙滩，有浪花和海鸥', '深夜的办公室，只亮着一盏台灯',
+    '山顶看日落，天边一大片橘红', '老式厨房，挂着的锅铲和蒸汽',
+    '地铁车厢里，车窗外的光带', '下雨的屋檐下，雨帘和水洼',
+    '雪地里，脚下有脚印', '屋顶天台，城市的楼群在远处',
+    '书堆成山的小房间，台灯发黄', '菜市场，摊位上堆满蔬果',
+  ]
+  const sceneIdea = extra ? '' : SCENE_IDEAS[Math.floor(Math.random() * SCENE_IDEAS.length)]
   // ★ 为什么这么写（2026-10-20 实测教训）：
   //   参考图本身是一张【完整场景 + 画框 + 气泡】的图。原来第一条写的是
   //   "画风必须与参考图完全一致"，图生图模型于是把【整张图】当基准照抄，
-  //   背景/构图/姿势全被带走 → 生成出来的背景永远一样。
-  //   所以现在第一句就明确：参考图【只用来定角色长相】，画面内容全部重新画。
+  //   背景/构图/姿势全被带走 → 生成出来的背景永远一样，而且永远是"家里"。
+  //   所以现在：① 第一句就明确"参考图只用来定角色长相" ② 背景明确禁止默认室内
+  //   ③ 每次给一个随机场景灵感，逼它换地方。
   const prompt = [
     '【只学角色，不学画面】下面这张参考图只用来确定角色的长相：发色发型、脸型、五官、配色、服装风格、Q 版卡通画风。',
     '**背景、构图、镜头、姿势、道具、光影全部重新设计**，必须与参考图完全不同；',
     '禁止照搬参考图的背景，禁止出现参考图里的画框、气泡、文字、摆件。',
     `【题材】${subjectPrompt(emotion)}。`,
     extra ? `【本次画面要求】${extra}。` : '',
-    '【背景】必须为这个题材**新画一张**完整的场景（房间/街道/桌面/户外等），',
-    '要有这个题材该有的道具和环境细节（例如：吃饭=摆满热菜的餐桌；加班=只剩一盏灯的深夜办公室），',
-    '背景可以有层次但不能抢主体；**禁止纯白底，禁止只有人物悬浮在空背景上**。',
+    '【背景】必须为这个题材**新画一张**完整的场景，要有这个题材该有的道具和环境细节',
+    '（例如：吃饭=摆满热菜的餐桌；加班=只剩一盏灯的深夜办公室）。',
+    '**不要默认画成室内客厅 / 家里的沙发** —— 场景可以自由发挥：户外、街边、办公室、咖啡店、',
+    '夜市、海边、山顶、雪地、菜市场、地铁……只要跟题材搭得上、有画面感就行。',
+    sceneIdea ? `本次可以试试这个场景：**${sceneIdea}**。` : '',
+    '背景要有层次但不能抢主体；**禁止纯白底，禁止只有人物悬浮在空背景上**。',
     '【构图】人物居中偏下，半身或七分身，头部和表情清晰可辨。',
     `【风格】${styleText}，整体像一张聊天里发的表情包。`,
     '【禁止】不要任何文字、字幕、水印、对话框、气泡。',
   ].filter(Boolean).join('')
 
-  log(`Agnes 图生图：${emotion}${extra ? '｜' + extra : ''}（参考图 ${Math.round(refB64.length / 1024)}KB base64）`)
+  log(`图生图：${emotion}${extra ? '｜' + extra : ''}｜model=${cfg.model}｜${String(cfg.apiUrl).replace(/^https?:\/\//, '').slice(0, 40)}（参考图 ${Math.round(refB64.length / 1024)}KB base64）`)
 
   // 带退避的重试：Agnes 高峰期会返回 503 "image queue is full"，直接放弃会白丢一张表情
   const body = JSON.stringify({
-    model: MODEL,
+    model: cfg.model,
     prompt,
     size: '1K',
     ratio: '1:1',
@@ -205,7 +257,7 @@ export async function generateStickerImage({
   let res = null
   let text = ''
   for (let attempt = 1; attempt <= 4; attempt++) {
-    res = await fetch(API, {
+    res = await fetch(cfg.apiUrl, {
       method: 'POST',
       headers: { Authorization: `Bearer ${key}`, 'content-type': 'application/json' },
       body,
