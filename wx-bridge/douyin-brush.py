@@ -122,6 +122,52 @@ def is_blocked(text: str) -> bool:
     return any(w in t for w in BLOCK_WORDS)
 
 
+# ★ 录音：把当前可见视频的声音录成 webm（base64 回传）
+#   踩过的坑：
+#   ① 启动参数【不能带 --mute-audio】—— 浏览器层静音会让 captureStream 拿不到音轨（实测 RMS=0）
+#   ② 不能用 AudioContext.createMediaElementSource —— 抖音播放器已经接管了该元素，
+#      会抛 "already connected"（实测）
+#   ③ 正确姿势：video.muted=false → video.captureStream() → 取 audioTracks → MediaRecorder
+#      （实测能录到真声音：转 wav 后 RMS 13000+）
+RECORD_JS = r"""
+async (seconds) => {
+  try {
+    const vs = [...document.querySelectorAll('video')].filter((v) => {
+      const r = v.getBoundingClientRect();
+      return r.bottom > 40 && r.top < window.innerHeight - 20;
+    });
+    if (!vs.length) return {err: 'no visible video'};
+    const v = vs[0];
+    v.muted = false;
+    v.volume = 1;
+    try { await v.play(); } catch (e) { }
+    if (!v.captureStream) return {err: 'captureStream unsupported'};
+    let stream;
+    try { stream = v.captureStream(); } catch (e) { return {err: 'captureStream threw: ' + (e && e.message)}; }
+    const at = stream.getAudioTracks ? stream.getAudioTracks() : [];
+    if (!at.length) return {err: 'no audio track', all: [...stream.getTracks()].map(t => t.kind)};
+    const rec = new MediaRecorder(new MediaStream(at), {mimeType: 'audio/webm'});
+    const chunks = [];
+    rec.ondataavailable = (e) => { if (e.data && e.data.size) chunks.push(e.data); };
+    const stopped = new Promise((res) => { rec.onstop = res; });
+    rec.start(250);
+    await new Promise(r => setTimeout(r, seconds * 1000));
+    rec.stop();
+    await stopped;
+    const buf = new Uint8Array(await new Blob(chunks).arrayBuffer());
+    let bin = '';
+    const CH = 0x8000;
+    for (let i = 0; i < buf.length; i += CH) {
+      bin += String.fromCharCode.apply(null, buf.subarray(i, i + CH));
+    }
+    return {b64: btoa(bin), size: buf.length};
+  } catch (e) {
+    return {err: String(e && e.message || e)};
+  }
+}
+"""
+
+
 async def read_item(pg):
     try:
         return await pg.evaluate(READ_JS)
@@ -148,7 +194,9 @@ async def main():
             headless=bool(args.headless),
             viewport={"width": 1280, "height": 900},
             locale="zh-CN",
-            args=["--disable-blink-features=AutomationControlled", "--mute-audio"],
+            accept_downloads=True,
+            permissions=["clipboard-read", "clipboard-write"],
+            args=["--disable-blink-features=AutomationControlled", "--autoplay-policy=no-user-gesture-required"],
             ignore_default_args=["--enable-automation"],
         )
         await ctx.add_init_script("Object.defineProperty(navigator,'webdriver',{get:()=>undefined});")
@@ -267,38 +315,93 @@ async def main():
                         });
                         return vs.length ? Number(vs[0].duration || 0) : 0;
                     }""")
-                    total = float(dur) if dur and float(dur) > 2 else 15.0
-                    if total > 60:
-                        total = 60.0        # 长视频只看前 60 秒
-                    for frac in (0.2, 0.5, 0.8):
+                    # ★ 9 帧（3×3 网格）：抖音视频大多把台词烧在画面字幕里，
+                    #   多取几帧 + 让视觉模型逐帧读字幕 = 真的"看懂讲了什么"，
+                    #   （试过下载原视频走 yt-dlp，抖音要 fresh cookies 且详情接口在推荐流返回空，
+                    #    不通；所以走"多帧 + 读字幕"这条稳的路）
+                    # ★ 不靠 seek（实测 currentTime 赋值后画面不变 → 9 帧全一样），
+                    #   改成【让它播着连续截】：点一下画面确保在播，然后每 700ms 截一张，
+                    #   共 9 张 → 一定覆盖不同时刻。
+                    try:
+                        cpos = await pg.evaluate("""() => {
+                            const vs = [...document.querySelectorAll('video')].filter((v) => {
+                                const r = v.getBoundingClientRect();
+                                return r.bottom > 40 && r.top < window.innerHeight - 20;
+                            });
+                            if (!vs.length) return null;
+                            const b = vs[0].getBoundingClientRect();
+                            return {x: b.x + b.width / 2, y: b.y + b.height / 2};
+                        }""")
+                        if cpos:
+                            await pg.mouse.click(cpos["x"], cpos["y"])   # 确保在播放
+                            await pg.wait_for_timeout(600)
+                    except Exception:
+                        pass
+                    for k in range(9):
                         try:
-                            await pg.evaluate("""(t) => {
-                                const vs = [...document.querySelectorAll('video')].filter((v) => {
-                                    const r = v.getBoundingClientRect();
-                                    return r.bottom > 40 && r.top < window.innerHeight - 20;
-                                });
-                                if (vs.length) vs[0].currentTime = t;
-                            }""", total * frac)
-                            await pg.wait_for_timeout(1100)
-                            fp = os.path.join(args.out, "f-%02d-%d.png" % (n, int(frac * 100)))
+                            fp = os.path.join(args.out, "f-%02d-%d.png" % (n, k + 1))
                             await pg.screenshot(path=fp)
                             frames.append(fp)
                         except Exception:
                             pass
+                        await pg.wait_for_timeout(700)
                     if frames:
                         from PIL import Image
-                        ims = [Image.open(f) for f in frames]
-                        tw = 620
-                        ims = [im.resize((tw, max(1, int(im.height * tw / im.width)))) for im in ims]
-                        th = max(im.height for im in ims)
-                        canvas = Image.new("RGB", (tw * len(ims), th), (18, 18, 18))
-                        for idx, im in enumerate(ims):
-                            canvas.paste(im, (idx * tw, 0))
+                        # 3×3 网格：每格宽度固定，行高取该行最大
+                        tw = 560
+                        cols, rows = 3, 3
+                        cells = []
+                        for f in frames[:9]:
+                            im = Image.open(f)
+                            cells.append(im.resize((tw, max(1, int(im.height * tw / im.width)))))
+                        while len(cells) < 9:
+                            cells.append(Image.new("RGB", (tw, 320), (18, 18, 18)))
+                        ch = max(c.height for c in cells)
+                        canvas = Image.new("RGB", (tw * cols, ch * rows), (18, 18, 18))
+                        for idx, c in enumerate(cells[:9]):
+                            canvas.paste(c, ((idx % cols) * tw, (idx // cols) * ch))
                         sp = os.path.join(args.out, "sheet-%02d.png" % n)
                         canvas.save(sp, quality=82)
                         sheet = sp
                 except Exception as e:
                     print("[%d] 抽帧失败（不影响分享）：%s" % (n, str(e)[:60]), flush=True)
+
+                # ★★ 录视频里的声音（WebAudio：AudioContext + MediaStreamDestination + MediaRecorder）
+                #   为什么：光看帧只能"看到画面"，抖音的内容一半在台词里。
+                #   实测这条路能拿到真声音（转 wav 后 RMS 5000+），
+                #   再交给本地语音识别（SenseVoice）就真的"听懂"了。
+                audio = ""
+                try:
+                    rec = await pg.evaluate(RECORD_JS, 6)
+                    if rec and rec.get("b64"):
+                        import base64 as _b64
+                        webm = os.path.join(args.out, "a-%02d.webm" % n)
+                        with open(webm, "wb") as f:
+                            f.write(_b64.b64decode(rec["b64"]))
+                        wav = os.path.join(args.out, "a-%02d.wav" % n)
+                        try:
+                            import imageio_ffmpeg, subprocess
+                            ff = imageio_ffmpeg.get_ffmpeg_exe()
+                            # ★ 必须加 -fflags +bitexact 等参数：
+                            #   ffmpeg 默认会往 wav 里塞一个 LIST 块，导致 data 不在第 44 字节，
+                            #   DSH 的语音识别会直接报 "Invalid speech WAV"（实测踩过 8 次全是这个）。
+                            subprocess.run([ff, "-y", "-i", webm,
+                                            "-ac", "1", "-ar", "16000",
+                                            "-fflags", "+bitexact", "-flags", "+bitexact",
+                                            "-map_metadata", "-1", "-write_bext", "0",
+                                            "-f", "wav", wav],
+                                           capture_output=True, timeout=60)
+                            if os.path.exists(wav) and os.path.getsize(wav) > 2000:
+                                audio = wav
+                                print("      录音: %d KB" % (os.path.getsize(wav) // 1024), flush=True)
+                            else:
+                                print("      录音转 wav 失败/太小", flush=True)
+                        except Exception as e:
+                            print("      转 wav 失败: %s" % str(e)[:60], flush=True)
+                    else:
+                        print("      录音失败: %s" % str((rec or {}).get("err"))[:60], flush=True)
+                except Exception as e:
+                    print("      录音异常（不影响画面理解）: %s" % str(e)[:60], flush=True)
                 # 截完再确认一次标题没变
                 c = (await read_item(pg)).get("desc") or ""
                 if c[:30] != b[:30]:
@@ -325,8 +428,60 @@ async def main():
                 "url": (d.get("url") or "").strip(),
                 "shot": shot,
                 "sheet": sheet,
+                "audio": audio,
             })
             print("[%d/%d] %s | 赞 %s" % (n, args.count, final_desc[:60], like[:12]), flush=True)
+
+            # ★ 取这条视频的分享链接（点分享 → 复制链接 → 读剪贴板）
+            #   有了它，群里的人点开就能看；比"下载原视频"稳（抖音对下载限制很多，
+            #   yt-dlp 又卡在 fresh cookies 上，实测都走不通）。
+            try:
+                # ★ 用坐标点（element.click 会被遮挡超时 ✗ 实测）
+                shpos = await pg.evaluate("""() => {
+                    const es = [...document.querySelectorAll('[data-e2e="video-player-share"]')];
+                    for (const e of es) {
+                        const b = e.getBoundingClientRect();
+                        if (b.width > 8 && b.height > 8 && b.top > 0 && b.top < window.innerHeight) {
+                            return { x: b.x + b.width / 2, y: b.y + b.height / 2 };
+                        }
+                    }
+                    return null;
+                }""")
+                if shpos:
+                    await pg.mouse.move(shpos["x"] - 30, shpos["y"] - 20, steps=8)
+                    await pg.wait_for_timeout(300)
+                    await pg.mouse.click(shpos["x"], shpos["y"])
+                    await pg.wait_for_timeout(1800)
+                    pos = await pg.evaluate("""() => {
+                        for (const e of document.querySelectorAll('div,span,button,li,a')) {
+                            const t = String(e.innerText || '').trim();
+                            if (t === '复制链接') {
+                                const b = e.getBoundingClientRect();
+                                if (b.width > 8 && b.height > 8) return {x: b.x + b.width / 2, y: b.y + b.height / 2};
+                            }
+                        }
+                        return null;
+                    }""")
+                    if pos:
+                        await pg.mouse.click(pos["x"], pos["y"])
+                        await pg.wait_for_timeout(1200)
+                        try:
+                            clip = await pg.evaluate("() => navigator.clipboard.readText()")
+                            import re as _re
+                            m = _re.search(r"https://v\.douyin\.com/[A-Za-z0-9]+/?", str(clip or ""))
+                            if m:
+                                items[-1]["shareUrl"] = m.group(0)
+                                print("      链接: %s" % m.group(0), flush=True)
+                        except Exception as e:
+                            print("      读剪贴板失败: %s" % str(e)[:50], flush=True)
+                    # 关掉分享面板
+                    try:
+                        await pg.keyboard.press("Escape")
+                    except Exception:
+                        pass
+                    await pg.wait_for_timeout(600)
+            except Exception as e:
+                print("      取链接失败（不影响其它）: %s" % str(e)[:60], flush=True)
             await pg.keyboard.press("ArrowDown")
             await pg.wait_for_timeout(int(args.gap * 1000))
 

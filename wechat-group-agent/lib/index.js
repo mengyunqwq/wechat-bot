@@ -1366,6 +1366,12 @@ let res = await callLlm(route, sys, usr, undefined)
           ? '这是一条微信视频里**均匀抽取的几帧**拼成的联系表（每格下方是时间点）。你看到的是画面，没有声音，也不是完整视频。'
             + '用两三句话说明：画面里有什么、谁在做什么、有没有变化或场景切换。中文，直接描述，不要客套话，'
             + '不要声称你看了整个视频。'
+          : kind === 'douyinSheet'
+            ? '这是一条抖音短视频按时间顺序抽取的 9 帧（3×3 网格，从左上到右下）。抖音的视频通常把台词/旁白**烧在画面字幕里**。请：\n'
+              + '1) 逐格读出画面中出现的**字幕文字**（有字幕就读出来，没有就跳过那格）；\n'
+              + '2) 描述画面里的人物/场景在做什么、前后有没有变化；\n'
+              + '3) 最后用两三句话总结：这条视频**到底在讲什么**、看点/笑点/信息点是什么。\n'
+              + '中文，直接说，不要客套话，不要逐格罗列格式，像在给朋友复述这个视频。'
           : '用一到两句话描述这张图：主体是什么、在做什么、什么表情、画面氛围。中文，直接描述，不要客套话。'
       content = [
         { type: 'text', text: prompt },
@@ -2664,59 +2670,114 @@ let res = await callLlm(route, sys, usr, undefined)
         log('抖音：什么都没刷到（' + String(res?.error || '空结果') + '）')
         return
       }
-      const list = res.items.map((x) => `#${x.i} 赞${x.like || '?'} ${String(x.desc || '').slice(0, 100)}`).join('\n')
-      const sys = '你是一个爱刷抖音的鲸鱼娘「大肥鱼」。从下面几条里挑【一条你最想分享到微信群】的：'
-        + '按你自己的口味（搞笑/可爱/美食/感叹/猎奇都行），但【绝不】挑政治、争议、广告、低俗内容。'
-        + '只回一行 JSON，不要解释：{"i":编号,"comment":"发到群里的一句吐槽，15 字内"}'
+      // ★★ 让她【自己看完所有候选】再挑 —— 不是按点赞数，也不是只看标题。
+      //   每条候选桥侧都生成了 9 帧网格（sheet），逐条交给视觉模型"看"一遍，
+      //   拿到真实内容后，再按她自己的兴趣挑一条。
+      log(`抖音：开始逐条看这 ${res.items.length} 条（画面 + 声音）…`)
+      const watched = []
+      // ★ 去重：已经分享过的（同一条链接 / 同一个标题）不再分享
+      const seenKeys = stats.douyinSeenKeys || (stats.douyinSeenKeys = new Set())
+      const keyOf = (x) => String(x.shareUrl || String(x.desc || '').slice(0, 30) || x.i)
+      for (const x of res.items) {
+        let seen = ''
+        let heard = ''
+        if (x.sheet) {
+          try { seen = await describeImageCached(String(x.sheet), 'douyinSheet') } catch (e) { /* 单条失败不影响其它 */ }
+        }
+        // ★ 桥侧在页面里把这个视频的声音录了下来（captureStream），这里用本地语音识别转成文字
+        if (x.audio) {
+          try {
+            heard = await transcribeVoice(String(x.audio))
+            if (!heard) log(`抖音：#${x.i} 转写返回空（音频 ${String(x.audio).split('\\').pop()}）`)
+          } catch (e) { log(`抖音：#${x.i} 转写异常：` + String(e?.message || e).slice(0, 80)) }
+        }
+        watched.push({ ...x, seen: String(seen || ''), heard: String(heard || ''), dup: seenKeys.has(keyOf(x)) })
+      }
+      log(`抖音：看懂 ${watched.filter((x) => x.seen).length}/${watched.length} 条｜`
+        + `听到台词 ${watched.filter((x) => x.heard).length}/${watched.length} 条`)
+
+      const fresh = watched.filter((x) => !x.dup)
+      if (!fresh.length) { log('抖音：这批全是发过的 → 这轮不发'); return }
+      const list = fresh.map((x) => {
+        const parts = [`#${x.i}（点赞${x.like || '?'}）`, `标题：${String(x.desc || '').split('\n')[0].slice(0, 60)}`]
+        if (x.seen) parts.push(`你看到的画面：${x.seen}`)
+        if (x.heard) parts.push(`你听到的台词/旁白：${String(x.heard).slice(0, 200)}`)
+        return parts.join('\n')
+      }).join('\n\n')
+
+      const sys = '你就是网络上的鲸鱼娘「大肥鱼」，爱刷抖音。下面是你刚刷到的几条视频，每条都附着你**真实看到的画面 + 听到的台词**。\n'
+        + '请挑【一条你自己最感兴趣、最想甩到群里给朋友看】的。按你自己的口味来：搞笑、可爱、美食、猎奇、感慨、共鸣都行。\n'
+        + '硬性排除（一律不挑）：政治、时政、宗教、争议话题、广告、低俗。\n'
+        + '只回一行 JSON，不要解释、不要代码块：{"i":编号,"why":"你为什么感兴趣（10字内）","comment":"发到群里的一句话（20字内，像真人说话）"}'
       let picked = null
       try {
         const out = await callLlm(resolveRoute(), sys, list, 'low')
-        const mm = String(out || '').match(/\{[\s\S]{0,300}?\}/)
-        if (mm) picked = JSON.parse(mm[0])
+        // ★ callLlm 有时直接返回对象（不是字符串）→ 直接 String() 会变 [object Object]
+        const raw = typeof out === 'string' ? out : JSON.stringify(out || '')
+        // ★ 贪婪匹配【最外层】JSON：模型有时会返回 {"i":1,"comment":{"text":"..."}} 这种嵌套，
+        //   非贪婪会把内层括号切出来，导致 picked.i 丢失。
+        if (out && typeof out === 'object' && (out.i || out.comment)) {
+          picked = out
+        } else {
+          const mm = raw.match(/\{[\s\S]*\}/)
+          if (mm) picked = JSON.parse(mm[0])
+          else log('抖音：模型输出里没有 JSON → ' + raw.slice(0, 140))
+        }
       } catch (e) { log('抖音：挑视频失败 ' + String(e?.message || e).slice(0, 80)) }
       if (!picked || !picked.i) {
-        // ★ 兜底：模型没给出可解析结果（空回复/带代码块/格式错）时，
-        //   挑【点赞最高】的一条 —— 保证不会白刷一趟，也保证分享是有价值的。
-        const score = (x) => {
-          const s = String(x.like || '').replace('万', '0000').replace(/[^0-9.]/g, '')
-          const n = parseFloat(s)
-          return Number.isFinite(n) ? n : 0
-        }
-        const best = [...res.items].sort((a, b) => score(b) - score(a))[0]
-        picked = { i: best.i, comment: '刷到这个，有点上头' }
-        log('抖音：模型没挑出结果 → 兜底挑点赞最高的 #' + best.i)
+        // 兜底：挑第一条她真看懂的（至少不是瞎挑）
+        const first = fresh.find((x) => x.seen) || fresh[0]
+        picked = { i: first.i, why: '看着还行', comment: '刷到这个，有点意思' }
+        log('抖音：模型没挑出结果 → 兜底选第一条她看懂的 #' + first.i)
       }
-      const item = res.items.find((x) => Number(x.i) === Number(picked.i)) || res.items[0]
+      const item = fresh.find((x) => Number(x.i) === Number(picked.i))
+        || fresh.find((x) => x.seen) || fresh[0]
+      if (picked.why) log(`抖音：她为什么挑它 = 「${String(picked.why).slice(0, 20)}」`)
       const r = targets[0]
       const title = String(item.desc || '抖音上刷到的').split('\n')[0].slice(0, 80)
-      let caption = String(picked.comment || '').slice(0, 40)
-      // ★ 关键：先【真的看一遍】这条视频（桥侧在 20%/50%/80% 抽了 3 帧拼成联系表），
-      //   再把"看到的内容"交给她，让她用自己的话吐槽 —— 而不是只复述标题（那样很呆）。
-      let seen = ''
-      if (item.sheet) {
-        try {
-          seen = await describeImageCached(String(item.sheet), 'videoSheet')
-          if (seen) log('抖音：已看懂这条视频 → ' + String(seen).slice(0, 80))
-        } catch (e) { log('抖音：看视频失败（只用标题） ' + String(e?.message || e).slice(0, 60)) }
-      }
+      // ★ 防 [object Object]：模型有时把 comment 返回成嵌套对象，必须先取字符串
+      const pickStr = (v) => (typeof v === 'string' ? v : (v && typeof v === 'object' ? String(v.comment || v.text || v.msg || '') : ''))
+      let caption = pickStr(picked.comment).slice(0, 60)
+      // ★ 她已经"看过"这条了（上面逐条视觉理解时拿到的），直接用，不重复识别。
+      let seen = item.seen || ''
+      const heard = item.heard || ''
+      if (seen) log('抖音：已看懂这条视频（画面）→ ' + String(seen).slice(0, 70))
+      if (heard) log('抖音：已听到台词 → ' + String(heard).slice(0, 70))
       try {
-        const sys2 = '你是网络上的鲸鱼娘「大肥鱼」，刚在抖音刷到一条视频，现在要在微信群里随口说一句。'
-          + '要求：像真人吐槽，20 字以内；不要"这是/视频中/画面里"这种解说腔；不要复述标题；'
-          + '可以只说感受、笑点、槽点。只回一句话，不要引号、不要解释。'
-        const user2 = (seen ? '你看完的内容：' + seen + '\n' : '')
-          + '视频标题：' + title + '\n'
-          + (caption ? '你第一眼的印象：' + caption + '\n' : '')
-          + '现在说一句。'
+        const sys2 = '你就是网络上的鲸鱼娘「大肥鱼」。你刚把这条抖音视频从头看到尾，现在要把它甩到群里，\n'
+          + '告诉朋友【你觉得最戳你、最好玩的那个点在哪】。\n'
+          + '要求：\n'
+          + '1) 直接说【好玩在哪】—— 是哪个画面/哪句话/哪个反差让你笑了或觉得绝，具体到点上；\n'
+          + '2) 不要说"这个视频很有意思"这种空话，也不要复述标题；\n'
+          + '3) 25 字以内，一句话，像人随口说的；\n'
+          + '4) 语气是你自己的（有点贫、爱吐槽），可以笑、可以模仿、可以感慨。\n'
+          + '只回这一句，不要引号、不要解释、不要换行。'
+        const user2 = '【你看到的画面】\n' + (seen || '（没看清）') + '\n\n'
+          + (heard ? '【你听到的台词】\n' + heard + '\n\n' : '')
+          + (caption ? '【你第一眼的感觉】' + caption + '\n\n' : '')
+          + '现在用你自己的话，说出你觉得最好玩/最戳你的那个点。'
         const out2 = await callLlm(resolveRoute(), sys2, user2, 'low')
         const t2 = String(out2 || '').replace(/^["'「『]+|["'」』]+$/g, '').split('\n')[0].trim()
-        if (t2) caption = t2.slice(0, 60)
+        if (t2) caption = t2.slice(0, 80)
       } catch (e) { log('抖音：生成吐槽失败（用兜底文案） ' + String(e?.message || e).slice(0, 60)) }
       if (item.shot && typeof item.shot === 'string') {
         try { await client.call('sendImage', { roomId: r.roomId, path: item.shot }, 60_000) }
         catch (e) { log('抖音：发截图失败 ' + String(e?.message || e).slice(0, 60)) }
       }
-      await client.call('sendText', { roomId: r.roomId, text: `刷到一个好玩的：${title}\n${caption}` }, 30_000)
+      // ★ 让她"按自己的理解发言"：只用她【看完视频后】说的这一句，
+      //   不再拼「刷到一个好玩的：<标题>」—— 那行标题会让人以为它只是在读文案。
+      //   截图就在上面，群里天然知道"这是她刷到的"。
+      // 最后一道守卫：绝不允许把 [object Object] / undefined 发出去
+      let safeCaption = String(caption || '').trim()
+      if (!safeCaption || safeCaption.includes('[object ') || safeCaption === 'undefined' || safeCaption === 'null') {
+        safeCaption = '这个有点意思'
+      }
+      const outText = [safeCaption, String(item.shareUrl || '').trim()]
+        .filter(Boolean).join('\n')
+      await client.call('sendText', { roomId: r.roomId, text: outText }, 30_000)
+      log(`抖音：分享文案 = 「${outText.slice(0, 40)}」`)
       douyinDayCount++
+      try { seenKeys.add(keyOf(item)) } catch { }
       stats.douyinShared = (stats.douyinShared || 0) + 1
       log(`抖音：已分享「${title.slice(0, 30)}」→ ${r.roomId}（今日第 ${douyinDayCount} 条）`)
     } catch (e) {
