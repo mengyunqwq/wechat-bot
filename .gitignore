@@ -11,3 +11,6 @@ config.json
 version.dll
 *.dll
 启动微信机器人*
+
+# 运行态缓存（会话表→群号映射，本机生成）
+data/table-map.json

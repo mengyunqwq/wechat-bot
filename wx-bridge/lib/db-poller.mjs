@@ -161,6 +161,18 @@ export class DbPoller {
     //    roomId 会退化成"发送者 wxid" → 【群里被叫，却私聊回复】✗✗
     //    → 所以必须用 session.db 兜底（它列着所有会话的 username，不依赖 contact.db）。
     const byHash = new Map()
+    // ── ★ 映射持久化（磁盘）───────────────────────────────────────────────
+    //  ⚠️ 实测：contact.db / session.db 会被微信【反复卸载】（懒加载），
+    //  映射表一空，table→roomId 就退化成"发送者 wxid"，
+    //  于是【群里被叫、却私聊回复】（2026-10-20 用户实际踩到）。
+    //  所以把映射写盘：DB 读不到时用上次的，读得到就更新。
+    const MAP_FILE = process.cwd() + '/../data/table-map.json'
+    try {
+      const fs = await import('node:fs')
+      const saved = JSON.parse(fs.readFileSync(MAP_FILE, 'utf8'))
+      for (const [h, u] of Object.entries(saved || {})) if (h && u) byHash.set(h, u)
+      if (byHash.size) this.log(`会话映射：从磁盘缓存载入 ${byHash.size} 条（DB 不可用时的保底）`)
+    } catch { /* 没有缓存就算了 */ }
     try {
       const contacts = await this.q('contact.db', 'SELECT username FROM contact')
       for (const c of contacts) {
@@ -182,7 +194,17 @@ export class DbPoller {
           if (byHash.size > 0) { this.log(`会话映射：用 ${db} 兜底成功（${byHash.size} 条）`); break }
         } catch { /* 换下一个 */ }
       }
-      if (byHash.size === 0) this.log('会话映射为空（contact.db / session.db 都不可用）→ roomId 会退化成发送者')
+      if (byHash.size === 0) this.log('会话映射为空（contact.db / session.db / 磁盘缓存 都不可用）→ roomId 会退化成发送者')
+    }
+    // 把映射写回磁盘（下次 contact.db 被卸载时还能用 → 避免群消息被当成私聊）
+    if (byHash.size > 0) {
+      try {
+        const fs = await import('node:fs')
+        const dir = process.cwd() + '/../data'
+        fs.mkdirSync(dir, { recursive: true })
+        fs.writeFileSync(MAP_FILE, JSON.stringify(Object.fromEntries(byHash)), 'utf8')
+        this.log(`会话映射：已缓存 ${byHash.size} 条到磁盘`)
+      } catch (e) { this.log('会话映射缓存写入失败：' + String(e?.message || e).slice(0, 80)) }
     }
     // 3) 发送者映射：**用消息库自己的 Name2Id**（不是 contact.db 的那个！）
     //    contact.db.Name2Id 的 rowid 是全局联系人编号，跟 real_sender_id 对不上，实测会映射成 weixin/notifymessage）
