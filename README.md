@@ -440,15 +440,28 @@ python wx-bridge/douyin-brush.py --count 8
 **第三方部分（微信 Hook、微信客户端）版权归各自作者**，本项目不分发其二进制，仅提供补丁。
 使用前请阅读 [NOTICE.md](NOTICE.md)。
 
-## 🎨 生图模型（本地 ComfyUI）
+## 🎨 生图（默认走云端 Agnes）
 
-本项目默认用**本机 ComfyUI + SDXL** 出表情包，不依赖云端（Agnes 的 i2i 队列经常 503）。
+> **⚠️ 本地 ComfyUI + SDXL 那套方案已弃用**（本机模型已删除）。
+>
+> 原因：只用一张扁平贴纸参考图，SDXL 做不到「角色细节不变 + 动作/背景自由变化」——
+> 实测换过 img2img / inpaint / IPAdapter / 合成融合 / 训练角色 LoRA 五条路，都没达到要求。
+> 下面的内容仅作**留档参考**；要用本地方案，得先准备多张同风格角色参考图。
+
+默认链路是**云端 Agnes**（`backend=agnes`，模型 `agnes-image-2.5-flash`）：
+队列忙或失败时自动回退到现成表情包库，不会卡住聊天。
+
+---
+
+<details>
+<summary>📦 留档：本地 ComfyUI 方案（已弃用，点开看细节）</summary>
+
 
 ### 推荐底模（各约 6.9GB，SDXL 架构，8G 显存可跑）
 
 | 模型 | 特点 |
 |---|---|
-| **NoobAI-XL v1.0**（默认）| Illustrious 系衍生，**角色/画风还原最强**，最适合固定 OC 出图 |
+| **NoobAI-XL v1.0**（留档）| Illustrious 系衍生，**角色/画风还原最强**，最适合固定 OC 出图 |
 | **Illustrious-XL v1.0** | 上游基础模型，**提示词遵循最强**、线条最干净 |
 
 下载（国内镜像）：
@@ -487,3 +500,4 @@ curl.exe -L -C - -o "<你的模型目录>\checkpoints\Illustrious-XL-v1.0.safete
   "comfyModel": "NoobAI-XL-v1.0.safetensors",
   "comfyDenoise": 0.55, "comfyWidth": 768, "comfyHeight": 1024 }
 ```
+</details>

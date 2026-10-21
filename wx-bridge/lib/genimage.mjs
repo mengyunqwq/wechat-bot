@@ -117,8 +117,8 @@ export function loadImageConfig() {
     // i2i = 图生图（带参考图，角色最像，但 Agnes 的 i2i 队列很小容易 503）
     // t2i = 文生图（不带图，队列空、快，但角色只有约 95% 像）
     mode: String(process.env.IMAGE_MODE || fileCfg.mode || 'i2i'),
-    // backend: comfy = 用本机 ComfyUI（推荐，10 秒出图、不排队）；agnes = 用云端（会排队 503）
-    backend: String(process.env.IMAGE_BACKEND || fileCfg.backend || 'comfy'),
+    // backend: agnes = 云端（默认）；comfy = 本机 ComfyUI（已弃用，仅留档）—— 本地 SDXL 实测达不到「角色不变+动作自由」，模型已删
+    backend: String(process.env.IMAGE_BACKEND || fileCfg.backend || 'agnes'),
     comfyUrl: String(process.env.COMFY_URL || fileCfg.comfyUrl || 'http://127.0.0.1:8188'),
     comfyModel: String(process.env.COMFY_MODEL || fileCfg.comfyModel || 'NoobAI-XL-v1.0.safetensors'),
     comfyDenoise: Number(process.env.COMFY_DENOISE || fileCfg.comfyDenoise || 0.55),
