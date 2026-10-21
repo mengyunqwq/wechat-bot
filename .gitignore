@@ -14,3 +14,8 @@ version.dll
 
 # 运行态缓存（会话表→群号映射，本机生成）
 data/table-map.json
+# ── 私有：实现细节不进公库（2026-10-21）──
+docs/cdn-download-re.md
+docs/*-re.md
+bin/
+provider/

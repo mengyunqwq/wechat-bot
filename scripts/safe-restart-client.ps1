@@ -1,4 +1,4 @@
-﻿# 安全重启微信客户端（唯一允许的方式）
+# 安全重启微信客户端（唯一允许的方式）
 #
 #  为什么有这个脚本：2026-10-19 夜间反复用 Stop-Process -Force 强杀微信，
 #  把 WCDB 的 WAL 停在半提交状态 → 微信把消息库移进 .factory 隔离 → 用户聊天记录消失。
@@ -169,20 +169,64 @@ else {
 }
 
 # ── 5) 等加载 ──────────────────────────────────────────────────────────────
-# ── 4.5) 自动点「进入微信」（用户要求：不需要人工点）──────────────────────
-#   UIA 的 Invoke 对 Qt 窗口无效，但「UIA 拿坐标 + 真实鼠标点击」可行
-#   （实测 2026-10-21 08:43：进程 1→5，dbs 0→19，一次点中）。
-Say "[4.5/7] 自动点「进入微信」"
+# ── 4.5) 自动进入微信（★ 用户 2026-10-21 15:42 明确：登录窗口直接按回车就行）──
+#   为什么改成回车：UIA 的 Invoke 对 Qt 窗口无效；「UIA 坐标+鼠标点击」实测会失手
+#   （15:39 那次点两次没反应，窗口前台/坐标都会漂）。回车是纯键盘动作，无坐标依赖。
+#   顺序：找到 mmui::LoginWindow → 置前台 → 发 ENTER → 验证（进程变多/窗口变 MainWindow）
+#   失败才回落到旧的鼠标点击脚本。
+Say "[4.5/7] 自动进入微信（登录窗口按回车）"
 if ($DryRun) {
-  Say "（DryRun）会调用 scripts/click-enter-wechat.ps1 点登录按钮"
+  Say "（DryRun）会找到登录窗口并发送 ENTER（失败才回落到 click-enter-wechat.ps1）"
 } else {
-  $clickScript = Join-Path $PSScriptRoot "click-enter-wechat.ps1"
-  if (Test-Path $clickScript) {
-    try {
-      & pwsh -NoProfile -File $clickScript -ApiPort $ApiPort -Wait -MaxSeconds 90 2>&1 | ForEach-Object { Say "    $_" }
-    } catch { Say "    ⚠️ 自动点击失败（不影响后续，可以人工点）: $($_.Exception.Message)" }
-  } else {
-    Say "    ⚠️ 没找到 click-enter-wechat.ps1，跳过自动点击"
+  $entered = $false
+  try {
+    Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes, System.Windows.Forms -EA SilentlyContinue
+    $sig = '[DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
+[DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int c);'
+    $win32 = Add-Type -MemberDefinition $sig -Name WinEnter -Namespace WxEnter -PassThru -EA SilentlyContinue
+    $deadline = (Get-Date).AddSeconds(90)
+    while ((Get-Date) -lt $deadline) {
+      $rootEl = [System.Windows.Automation.AutomationElement]::RootElement
+      $loginWin = $null
+      foreach ($proc in (Get-Process -Name Weixin -EA SilentlyContinue)) {
+        $cond = New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::ProcessIdProperty, $proc.Id)
+        foreach ($w in $rootEl.FindAll([System.Windows.Automation.TreeScope]::Children, $cond)) {
+          if ($w.Current.ClassName -match 'LoginWindow') { $loginWin = $w; break }
+        }
+        if ($loginWin) { break }
+      }
+      if ($loginWin) {
+        $h = [IntPtr]$loginWin.Current.NativeWindowHandle
+        try { $win32::ShowWindow($h, 9) | Out-Null } catch { }
+        try { $win32::SetForegroundWindow($h) | Out-Null } catch { }
+        Start-Sleep -Milliseconds 500
+        [System.Windows.Forms.SendKeys]::SendWait('{ENTER}')
+        Say "    已向登录窗口发送 ENTER，等 12 秒验证…"
+        Start-Sleep -Seconds 12
+        $np = (Get-Process -Name Weixin -EA SilentlyContinue | Measure-Object).Count
+        $stillLogin = $false
+        foreach ($proc in (Get-Process -Name Weixin -EA SilentlyContinue)) {
+          $cond2 = New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::ProcessIdProperty, $proc.Id)
+          foreach ($w in $rootEl.FindAll([System.Windows.Automation.TreeScope]::Children, $cond2)) {
+            if ($w.Current.ClassName -match 'LoginWindow') { $stillLogin = $true; break }
+          }
+          if ($stillLogin) { break }
+        }
+        if (-not $stillLogin -and $np -ge 3) { Ok "    回车进入成功（进程 $np 个，登录窗口已消失）"; $entered = $true; break }
+        Say "    回车后仍在登录页（进程 $np 个）→ 再试一次"
+        continue
+      }
+      Start-Sleep -Seconds 3
+    }
+  } catch { Say "    ⚠️ 回车进入异常: $($_.Exception.Message)" }
+
+  if (-not $entered) {
+    Say "    回车没成功 → 回落到鼠标点击脚本"
+    $clickScript = Join-Path $PSScriptRoot "click-enter-wechat.ps1"
+    if (Test-Path $clickScript) {
+      try { & pwsh -NoProfile -File $clickScript -ApiPort $ApiPort -Wait -MaxSeconds 90 2>&1 | ForEach-Object { Say "    $_" } }
+      catch { Say "    ⚠️ 点击也失败（不影响后续，可以人工点）: $($_.Exception.Message)" }
+    } else { Say "    ⚠️ 没找到 click-enter-wechat.ps1" }
   }
 }
 
