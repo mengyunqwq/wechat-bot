@@ -154,6 +154,78 @@ xmgr::StartEarlyInitThread();
 
 ---
 
+## 四之二、遗留问题（重要 —— 这个修复**只解决了一半**）
+
+上面的数据来自**一台特定的机器**。在另一台机器上复测时，仍然失败，症状不同：
+
+```json
+"hooks":    { "prepare": true, "open_v2": true },
+"registry": { "count": 38, "named": 31, "unnamed": 7 },
+"counters": { "registrations": 39, "open_v2_names": 0,
+              "lookup_ok": 0, "lookup_miss": 3 },
+"cache":    [ { "db": "message_0.db", "source": "name_pass", "registered": true } ]
+```
+
+关键差异：
+
+| 现象 | 说明 |
+|---|---|
+| `registrations=39` | hook **装上了也命中了**（本节修复有效）|
+| `named=31` 但来源全是 `name_pass` | 名字是**扫描猜的**，不是从 `db_filename` 读的 |
+| `open_v2_names=0` | `open_v2` 钩子一次都没命中 |
+| `lookup_ok=0` | 猜的名字和真实的对不上 → 按名查找全 miss |
+
+### 为什么 `open_v2` 钩子不命中
+
+对比同一进程里各 sqlite 函数的地址：
+
+```
+open       = 0x7FFB75078E20   （Weixin.dll 内）
+prepare    = 0x7FFB76E1DB00   （Weixin.dll 内）
+db_filename= 0x7FFB7507A9E0   （Weixin.dll 内）
+open_v2    = 0x7FFC28868DE0   ← 完全不同的内存段，不在 Weixin.dll 里
+```
+
+**`sqlite3_api_routines` 表里的 `open_v2` 槽位指向的并不是微信实际使用的那个函数。**
+微信静态链接了 sqlite，内部直接调用函数体；hook API 表里那个指针地址自然拦不到。
+
+### 为什么名字取不到
+
+取名依赖 `api->db_filename`。在出问题的机器上，这个槽位**非空但调用返回空**
+（`safeDbName` 失败）—— 于是只能退化成"扫描内存猜文件名"，猜错的概率很高。
+
+### 当前状态：**未彻底解决**
+
+已做的两处缓解（都没能根治）：
+
+1. `verifyName` 不再"拿不到名字就丢弃句柄"，改为"失败过的才丢弃"
+   —— 让扫描到的健康句柄至少能被用上
+2. 低频补名（`nameUnnamedFromApi`）：按名查找失败时用 `db_filename` 补一次
+
+**还需要做的**（下一步方向）：
+
+```
+方案 A：不依赖 db_filename，直接扫描到句柄后用 SQL 探测它是哪个库
+        （message_*.db 有 Msg_<hash> 表、contact.db 有 contact 表、
+          session.db 有 session 表 —— 查一次 sqlite_master 就能判定）
+        代价：违背"不主动探测"的设计红线，需要严格限频
+
+方案 B：在 Weixin.dll 内用特征码定位真正的 sqlite3_open_v2（而不是读 API 表槽位），
+        hook 它拿"文件名 + 句柄"的对应关系
+```
+
+如果你遇到同样问题，欢迎提供这两个端点的完整输出 —— 这是定位的关键：
+
+```bash
+curl http://127.0.0.1:30001/Debug/ApiTable
+curl http://127.0.0.1:30001/Debug/DBRescan
+```
+
+> ⚠️ 一句话总结：**本页修复解决了"hook 装得太晚"，没有解决"名字取不到"。**
+> 看到 `named` 全是 `name_pass` 来源、`lookup_ok` 一直是 0，就说明命中了后一个问题。
+
+---
+
 ## 五、排查这类问题的顺序
 
 ```
