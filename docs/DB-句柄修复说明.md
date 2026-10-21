@@ -154,77 +154,91 @@ xmgr::StartEarlyInitThread();
 
 ---
 
-## 四之二、遗留问题（重要 —— 这个修复**只解决了一半**）
+## 四之三、真正的根因：**数据目录不能包含中文**
 
-上面的数据来自**一台特定的机器**。在另一台机器上复测时，仍然失败，症状不同：
+> 这一节是排查了两天之后才找到的答案。前面那些「hook 装太晚」「open_v2 不命中」「verifyName 丢句柄」都是真的，
+> 但**都不是**某些机器上"名字永远取不到"的原因。
 
-```json
-"hooks":    { "prepare": true, "open_v2": true },
-"registry": { "count": 38, "named": 31, "unnamed": 7 },
-"counters": { "registrations": 39, "open_v2_names": 0,
-              "lookup_ok": 0, "lookup_miss": 3 },
-"cache":    [ { "db": "message_0.db", "source": "name_pass", "registered": true } ]
+### 现象
+
+同一份代码，两台机器：
+
+| 指标 | A 机器 | B 机器 |
+|---|---|---|
+| `registrations` | 40 | 40（hook 命中了）|
+| `named` | 33 | 31 |
+| **名字来源** | `prepare`（真实文件名）| **全部 `name_pass`（扫描猜的）** |
+| `db_count` | 19 | 0 |
+| **`lookup_ok`** | 204 | **0** |
+
+`db_filename` 槽位非空、可读、在模块内 —— 函数是好的，但**调用结果被我们自己扔掉了**。
+
+### 根因
+
+`db_filename` 返回的是**完整路径**（含目录）。而取值函数里有一条 ASCII 白名单：
+
+```cpp
+size_t n = 0;
+while (n < 260 && fn[n] != '\0') {
+    const unsigned char c = (unsigned char)fn[n];
+    if (c < 0x20 || c > 0x7E) return false;      // ★ 只放行可见 ASCII
+    ++n;
+}
+out = baseName(std::string(fn, n));              // ← 先检查完整路径，才取文件名
 ```
 
-关键差异：
-
-| 现象 | 说明 |
-|---|---|
-| `registrations=39` | hook **装上了也命中了**（本节修复有效）|
-| `named=31` 但来源全是 `name_pass` | 名字是**扫描猜的**，不是从 `db_filename` 读的 |
-| `open_v2_names=0` | `open_v2` 钩子一次都没命中 |
-| `lookup_ok=0` | 猜的名字和真实的对不上 → 按名查找全 miss |
-
-### 为什么 `open_v2` 钩子不命中
-
-对比同一进程里各 sqlite 函数的地址：
+**UTF-8 编码的中文字符，每个字节都 > 0x7E**。所以：
 
 ```
-open       = 0x7FFB75078E20   （Weixin.dll 内）
-prepare    = 0x7FFB76E1DB00   （Weixin.dll 内）
-db_filename= 0x7FFB7507A9E0   （Weixin.dll 内）
-open_v2    = 0x7FFC28868DE0   ← 完全不同的内存段，不在 Weixin.dll 里
+D:\Users\Administrator\xwechat_files\wxid_xxx\...\message_1.db    → 纯 ASCII，通过 ✓
+C:\Users\xxx\Documents\微信数据\db_storage\message\message_0.db    → 含中文，直接 return false ✗
 ```
 
-**`sqlite3_api_routines` 表里的 `open_v2` 槽位指向的并不是微信实际使用的那个函数。**
-微信静态链接了 sqlite，内部直接调用函数体；hook API 表里那个指针地址自然拦不到。
+**而且这个检查在 `baseName()` 之前** —— 连文件名都没机会取，整个函数就失败了。
 
-### 为什么名字取不到
+于是：
+1. 名字取不到 → 句柄只能靠 `name_pass`（扫描内存找 `.db` 字符串）猜
+2. 扫描是"按地址邻近猜"，命中率不高
+3. 猜的名字和真实的对不上 → `findByName` 全 miss → `lookup_ok = 0`
+4. 表现就是 `GetAllDBName` 能列库、`QueryDB/execute` 一律失败
 
-取名依赖 `api->db_filename`。在出问题的机器上，这个槽位**非空但调用返回空**
-（`safeDbName` 失败）—— 于是只能退化成"扫描内存猜文件名"，猜错的概率很高。
+### 修复
 
-### 当前状态：**未彻底解决**
-
-已做的两处缓解（都没能根治）：
-
-1. `verifyName` 不再"拿不到名字就丢弃句柄"，改为"失败过的才丢弃"
-   —— 让扫描到的健康句柄至少能被用上
-2. 低频补名（`nameUnnamedFromApi`）：按名查找失败时用 `db_filename` 补一次
-
-**还需要做的**（下一步方向）：
-
-```
-方案 A：不依赖 db_filename，直接扫描到句柄后用 SQL 探测它是哪个库
-        （message_*.db 有 Msg_<hash> 表、contact.db 有 contact 表、
-          session.db 有 session 表 —— 查一次 sqlite_master 就能判定）
-        代价：违背"不主动探测"的设计红线，需要严格限频
-
-方案 B：在 Weixin.dll 内用特征码定位真正的 sqlite3_open_v2（而不是读 API 表槽位），
-        hook 它拿"文件名 + 句柄"的对应关系
+```cpp
+// 只挡控制字符（< 0x20），允许 UTF-8 多字节（中文路径）；
+// 取到文件名（baseName）之后再用 looksLikeDbName 校验 —— 文件名本身是 ASCII 的 *.db
+size_t n = 0;
+while (n < 512 && fn[n] != '\0') {
+    const unsigned char c = (unsigned char)fn[n];
+    if (c < 0x20) return false;
+    ++n;
+}
+if (n == 0 || n >= 512) return false;
+out = baseName(std::string(fn, n));
+return looksLikeDbName(out);
 ```
 
-如果你遇到同样问题，欢迎提供这两个端点的完整输出 —— 这是定位的关键：
+### ⚠️ 部署建议
 
-```bash
-curl http://127.0.0.1:30001/Debug/ApiTable
-curl http://127.0.0.1:30001/Debug/DBRescan
-```
+**微信数据目录（`xwechat_files` 所在路径）不要包含中文、空格以外的特殊字符。**
 
-> ⚠️ 一句话总结：**本页修复解决了"hook 装得太晚"，没有解决"名字取不到"。**
-> 看到 `named` 全是 `name_pass` 来源、`lookup_ok` 一直是 0，就说明命中了后一个问题。
+- 默认位置通常是 `C:\Users\<用户名>\Documents\xwechat_files` —— 如果**用户名是中文**，路径里就会带中文
+- 换到纯 ASCII 路径（如 `D:\WeChatData\`）可以从根源上避开这类问题
+- 在**微信 → 设置 → 文件管理** 里可以看到当前的数据目录
 
----
+> 注：本项目 v2026-10-22 之后的版本已修复这个解析问题，
+> 但**仍然建议**把数据目录放在纯 ASCII 路径下 —— 第三方组件（hook、SQLite、备份工具）
+> 对非 ASCII 路径的支持程度各不相同，这类坑不止一处。
+
+### 另外两个已知但已被兜住的问题
+
+1. **`open_v2` 槽位是坏的**
+   `sqlite3_api_routines` 表里 `open_v2` 指向的地址不在 `Weixin.dll` 内（而在 `0x7FFC...` 段），
+   所以 hook 它一次都不命中。当前做法是 **open / open16 / open_v2 三个入口都挂**，命中哪个算哪个。
+
+2. **`verifyName` 会丢弃健康句柄**
+   原来"拿不到名字就判 false"，导致扫描到的句柄被 `m_dbs.erase()` 扔掉。
+   现在改成"失败过的才丢弃（`fail>=1`），没失败过的先放行"。
 
 ## 五、排查这类问题的顺序
 

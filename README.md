@@ -164,6 +164,39 @@ config.example.json         配置模板
 
 ---
 
+## ⚠️ 路径要求（踩过坑，务必看）
+
+**微信数据目录（`xwechat_files` 所在的路径）不要包含中文。**
+
+```
+✅ D:\WeChatData\                              纯 ASCII，安全
+✅ C:\Users\alice\Documents\xwechat_files      用户名是英文，安全
+❌ C:\Users\张三\Documents\xwechat_files        用户名是中文 → 路径带中文
+❌ D:\微信数据\
+```
+
+**为什么**：数据库名是从 `sqlite3_db_filename()` 返回的**完整路径**里提取的，
+而早期版本的提取函数有一条 ASCII 白名单：
+
+```cpp
+if (c < 0x20 || c > 0x7E) return false;   // 只放行可见 ASCII
+```
+
+UTF-8 中文字符每个字节都 `> 0x7E`，于是**整个函数直接失败**：
+
+```
+名字取不到 → 句柄只能靠"扫描内存猜文件名" → 猜的名和真实的对不上
+→ 按名查找全 miss → GetAllDBName 能列库，但 QueryDB/execute 一律返回
+  {"status":-1,"desc":"get database handle which named message_0.db failed"}
+```
+
+该缺陷已修（2026-10-22），但**仍然建议**把数据目录放在纯 ASCII 路径下 ——
+hook、SQLite、备份脚本对非 ASCII 路径的支持程度各不相同，这类坑不止一处。
+
+查看当前数据目录：**微信 → 设置 → 文件管理 → 文件保存位置**。
+
+> 详细排查过程见 [docs/DB-句柄修复说明.md](docs/DB-句柄修复说明.md)。
+
 ## 安全提示
 
 **Hook 的 HTTP 接口默认只监听 `127.0.0.1`**（不是 `0.0.0.0`）。
