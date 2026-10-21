@@ -401,6 +401,23 @@ async function _generateStickerImageInner({
   }
 }
 
+// ★ 释放 ComfyUI 显存：unload_models + free_memory
+//   为什么：SDXL 权重约 3~4G，常驻会把 8G 卡吃满。每次出完图就踢掉，
+//   下次再出时重新加载（冷启动 +10~30s，可接受）。
+async function freeComfyVram(BASE, log = () => {}) {
+  try {
+    const r = await fetch(BASE + '/free', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ unload_models: true, free_memory: true }),
+      signal: AbortSignal.timeout(20_000),
+    })
+    if (r.ok) log('已释放显存（unload_models + free_memory）')
+    else log('释放显存失败 HTTP ' + r.status)
+  } catch (e) {
+    log('释放显存异常：' + String(e?.message || e).slice(0, 80))
+  }
+}
+
 // ★★ 本地 ComfyUI 后端（图生图）：上传参考图 → img2img → 拉回图片
 //   为什么用它：Agnes 的 i2i 队列太窄（高峰期一直 503，熬 3 分钟都不通），
 //   本机 ComfyUI 单卡单队列串行，实测 10 秒出图，且角色一致（参考图 + denoise 0.55）。
@@ -439,7 +456,21 @@ async function generateViaComfy({ emotion, refImage, outDir, extra = '', size = 
 
   // 2) 组装 img2img 工作流
   const subj = EN_EMOTION[emotion] || EN_ACTIVITY[emotion] || String(emotion || 'smile')
-  const pos = [EN_QUALITY, EN_CHARACTER, subj, extra ? String(extra) : '', 'simple background, white background']
+  // ★ 背景/动作可以自由发挥，只锁角色（用户要求）。
+  //   注意：这里【绝不能】写 "white background / simple background" —— 那等于强制白底。
+  const SCENES = [
+    'outdoors, street, city lights', 'cafe, window seat, indoor',
+    'night market, lanterns, food stalls', 'park, grass, sunny, cherry blossoms',
+    'beach, ocean, waves', 'office at night, desk lamp',
+    'mountain top, sunset, clouds', 'kitchen, steam, hanging pots',
+    'subway train, window light', 'rainy street, umbrella, puddle',
+    'snow field, footprints', 'rooftop, city skyline',
+    'cozy room, books piled up, warm lamp', 'market, vegetable stalls',
+  ]
+  // extra 里如果已经描述了场景，就不再随机（以调用方为准）
+  const sceneTag = extra ? '' : SCENES[Math.floor(Math.random() * SCENES.length)]
+  const pos = [EN_QUALITY, EN_CHARACTER, subj, extra ? String(extra) : '', sceneTag,
+    'detailed background, scenery']
     .filter(Boolean).join(', ')
   const model = String(cfg.comfyModel || 'animagineXL40_opt.safetensors')
   const isSd15 = /meinamix|sd15|v1-5/i.test(model)
@@ -486,7 +517,7 @@ async function generateViaComfy({ emotion, refImage, outDir, extra = '', size = 
     }
     break
   }
-  if (!img) throw new Error('本地出图超时（4 分钟内没出图）')
+  if (!img) { await freeComfyVram(BASE, log); throw new Error('本地出图超时（4 分钟内没出图）') }
 
   // 4) 拉图
   const qs = new URLSearchParams({ filename: img.filename, subfolder: img.subfolder || '', type: 'output' })
@@ -507,6 +538,8 @@ async function generateViaComfy({ emotion, refImage, outDir, extra = '', size = 
     fs.writeFileSync(out, await im.getBuffer('image/jpeg', { quality: 88 }))
     try { fs.unlinkSync(rawPath) } catch { }
     log('本地出图完成：' + out + '（' + Math.round(fs.statSync(out).size / 1024) + 'KB）')
+    // ★ 用完立刻释放显存（用户要求：不想让大模型常驻占着 3~4G）
+    await freeComfyVram(BASE, log)
     return { file: out, raw: out, url: BASE + '/view?filename=' + encodeURIComponent(img.filename) }
   } catch (e) {
     log('缩图失败（直接用原图）：' + String(e?.message || e).slice(0, 80))
