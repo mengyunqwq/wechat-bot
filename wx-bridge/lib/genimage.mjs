@@ -482,22 +482,21 @@ async function generateViaComfy({ emotion, refImage, outDir, extra = '', size = 
   //   i2i        ：img2img（参考图整图混合）—— 背景不太变得动，衣服容易漂
   //   inpaint    ：只重画背景 —— 角色 100% 不变但动作也变不了
   const MODE = String(cfg.comfyMode || 'ipadapter')
-  let model = String(cfg.comfyModel || 'animagineXL40_opt.safetensors')
-  if (MODE === 'ipadapter' && !/meinamix|sd15|v1-5/i.test(model)) {
-    // 自动降级到 SD1.5，避免 8G 显存 OOM
-    log(`IPAdapter 模式下 8G 显存用 SDXL 会 OOM → 改用 SD1.5（${model} → meinamix_v11）`)
-    model = 'meinamix_v11.safetensors'
-  }
+  const model = String(cfg.comfyModel || 'animagineXL40_opt.safetensors')
   const isSd15 = /meinamix|sd15|v1-5/i.test(model)
-  const w = isSd15 ? 512 : 832
-  const h = isSd15 ? 768 : 1216
+  // ★ SDXL 在 8G 上跑 IPAdapter：必须让 ComfyUI 带 --vram-headroom 2.5 启动（已写进 启动ComfyUI.bat）
+  //   且分辨率压到 768x1024（832x1216 会 OOM）。实测 768x1024 + headroom 2.5 = 74 秒稳定出图。
+  const w = Number(cfg.comfyWidth || (isSd15 ? 512 : 768))
+  const h = Number(cfg.comfyHeight || (isSd15 ? 768 : 1024))
   let wf
   if (MODE === 'ipadapter') {
     wf = {
       '4': { class_type: 'CheckpointLoaderSimple', inputs: { ckpt_name: model } },
       // IPAdapter 三件套：模型 + CLIP Vision + 参考图
       '20': { class_type: 'IPAdapterModelLoader', inputs: {
-        ipadapter_file: String(cfg.ipadapterFile || 'ip-adapter-plus_sd15.safetensors') } },
+        ipadapter_file: String(cfg.ipadapterFile || (isSd15
+          ? 'ip-adapter-plus_sd15.safetensors'
+          : 'ip-adapter-plus_sdxl_vit-h.safetensors')) } },
       '21': { class_type: 'CLIPVisionLoader', inputs: {
         clip_name: String(cfg.clipVision || 'CLIP-ViT-H-14-laion2B-s32B-b79K.safetensors') } },
       '10': { class_type: 'LoadImage', inputs: { image: uploaded } },
