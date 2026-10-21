@@ -101,23 +101,17 @@ npm start
 
 **完整部署步骤（含微信 Hook 编译、回调/轮询、排错）见 [DEPLOY.md](DEPLOY.md)。**
 
-### 不想自己编译 Hook？用预编译版
-
-编译 Hook 需要 VS 2022 生成工具 + 网络拉上游源码，这一步最容易卡住。
-可以直接下载 **[Releases](../../releases)** 里的 `version.dll`（约 750KB）：
-
-```powershell
-# 1) 完全退出微信（托盘右键 → 退出微信）
-# 2) 备份原文件
-copy /Y "D:\wxhook\wx4110\version.dll" "D:\wxhook\wx4110\version.dll.bak"
-# 3) 用下载的 version.dll 覆盖
-# 4) 启动微信 → 登录窗口按【回车】
-```
-
-> **只适配微信 4.1.10.27（x64）**，其他版本请自行编译上游源码。
-> 这个预编译版**基于 [aixed/WeChat-Hook](https://github.com/aixed/WeChat-Hook) 修改**，
-> 只包含"让本项目正常跑起来"所需的修复（数据库句柄登记 / hook 初始化时机），
-> **不含**原作者已移除的 CDN 相关功能。请优先使用原项目。
+> ⚠️ **关于预编译 Hook（version.dll）**
+> 本仓库**暂时不提供**预编译的 `version.dll`。
+> 原因：数据库句柄的 hook 时机在不同机器上表现不一致（详见
+> [docs/DB-句柄修复说明.md](docs/DB-句柄修复说明.md)），
+> 未在足够多的环境验证前，提供一个"可能装了就坏"的二进制是不负责任的。
+>
+> 请按 [DEPLOY.md](DEPLOY.md) 自己编译（用的是补丁版源码，包含本项目需要的全部修复），
+> 或者先使用 [aixed/WeChat-Hook](https://github.com/aixed/WeChat-Hook) 的官方 release。
+>
+> 如果你确实需要预编译版，欢迎在 Issue 里说明你的环境（微信版本 / 是否静态链接），
+> 我会在有把握的时候再提供。
 
 > 🤖 **想让 AI 替你装？** 把 **[docs/AI-一键部署.md](docs/AI-一键部署.md)** 第 2 节整段复制给任意 AI 客户端
 > （豆包电脑版 / Claude Desktop / Cursor / Cline / DSH…），它会自己完成环境检查 → 装依赖 → 复制独立微信 →
