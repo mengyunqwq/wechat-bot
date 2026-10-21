@@ -439,3 +439,51 @@ python wx-bridge/douyin-brush.py --count 8
 本项目**原创部分**采用 MIT（见 [LICENSE](LICENSE)）。
 **第三方部分（微信 Hook、微信客户端）版权归各自作者**，本项目不分发其二进制，仅提供补丁。
 使用前请阅读 [NOTICE.md](NOTICE.md)。
+
+## 🎨 生图模型（本地 ComfyUI）
+
+本项目默认用**本机 ComfyUI + SDXL** 出表情包，不依赖云端（Agnes 的 i2i 队列经常 503）。
+
+### 推荐底模（各约 6.9GB，SDXL 架构，8G 显存可跑）
+
+| 模型 | 特点 |
+|---|---|
+| **NoobAI-XL v1.0**（默认）| Illustrious 系衍生，**角色/画风还原最强**，最适合固定 OC 出图 |
+| **Illustrious-XL v1.0** | 上游基础模型，**提示词遵循最强**、线条最干净 |
+
+下载（国内镜像）：
+```powershell
+curl.exe -L -C - -o "<你的模型目录>\checkpoints\NoobAI-XL-v1.0.safetensors" `
+  "https://hf-mirror.com/Laxhar/noobai-XL-1.0/resolve/main/NoobAI-XL-v1.0.safetensors"
+curl.exe -L -C - -o "<你的模型目录>\checkpoints\Illustrious-XL-v1.0.safetensors" `
+  "https://hf-mirror.com/OnomaAIResearch/Illustrious-XL-v1.0/resolve/main/Illustrious-XL-v1.0.safetensors"
+```
+
+### 8G 显存必须加的启动参数
+
+这版 ComfyUI 是 DynamicVRAM，`--medvram` 已废弃。SDXL（6.9G）+ IPAdapter + CLIP-ViT-H（2.4G）
+会超过 8G 直接崩进程，正确做法：
+
+```
+--reserve-vram 0.6 --vram-headroom 2.5 --cpu-vae
+```
+
+`--vram-headroom 2.5` 强制保留 2.5G 显存不被分配，DynamicVRAM 就不会冲爆。
+本仓库的 `wx-bridge/lib/genimage.mjs` 会在此基础上把分辨率压到 768×1024（832×1216 仍会 OOM）。
+
+### 两段式出图（默认 `comfyMode=twopass`）
+
+单纯 img2img 有个死结：denoise 低则背景不变，denoise 高则角色漂移。所以拆成两段：
+
+1. **img2img（denoise 0.55）**：以参考图为 latent 起点 → 角色身份最稳，动作/表情按提示词微调
+2. **inpaint（denoise 1.0）**：自动算出背景蒙版（边缘 flood fill，只吃与边框相连的近白区域，
+   角色身上的白围裙/蕾丝不会被误伤）→ 背景整个重画，**角色像素一个不动**
+
+实测 NoobAI-XL v1.0 / 768×1024：第一段 ~55s + 第二段 ~43s，显存不爆，用完 `POST /free` 释放。
+
+配置在 `data/image-gen.json`：
+```json
+{ "backend": "comfy", "comfyMode": "twopass",
+  "comfyModel": "NoobAI-XL-v1.0.safetensors",
+  "comfyDenoise": 0.55, "comfyWidth": 768, "comfyHeight": 1024 }
+```

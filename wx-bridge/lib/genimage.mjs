@@ -120,7 +120,7 @@ export function loadImageConfig() {
     // backend: comfy = 用本机 ComfyUI（推荐，10 秒出图、不排队）；agnes = 用云端（会排队 503）
     backend: String(process.env.IMAGE_BACKEND || fileCfg.backend || 'comfy'),
     comfyUrl: String(process.env.COMFY_URL || fileCfg.comfyUrl || 'http://127.0.0.1:8188'),
-    comfyModel: String(process.env.COMFY_MODEL || fileCfg.comfyModel || 'animagineXL40_opt.safetensors'),
+    comfyModel: String(process.env.COMFY_MODEL || fileCfg.comfyModel || 'NoobAI-XL-v1.0.safetensors'),
     comfyDenoise: Number(process.env.COMFY_DENOISE || fileCfg.comfyDenoise || 0.55),
   }
 }
@@ -547,7 +547,7 @@ async function generateViaComfy({ emotion, refImage, outDir, extra = '', size = 
     .filter(Boolean).join(', ')
 
   const MODE = String(cfg.comfyMode || 'twopass')
-  const model = String(cfg.comfyModel || 'animagineXL40_opt.safetensors')
+  const model = String(cfg.comfyModel || 'NoobAI-XL-v1.0.safetensors')
   const isSd15 = /meinamix|sd15|v1-5/i.test(model)
   const w = Number(cfg.comfyWidth || (isSd15 ? 512 : 768))
   const h = Number(cfg.comfyHeight || (isSd15 ? 768 : 1024))
