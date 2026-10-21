@@ -122,6 +122,15 @@ export function loadImageConfig() {
     comfyUrl: String(process.env.COMFY_URL || fileCfg.comfyUrl || 'http://127.0.0.1:8188'),
     comfyModel: String(process.env.COMFY_MODEL || fileCfg.comfyModel || 'NoobAI-XL-v1.0.safetensors'),
     comfyDenoise: Number(process.env.COMFY_DENOISE || fileCfg.comfyDenoise || 0.55),
+    // ★ 下面这些之前【漏了】—— 导致 comfyMode/comfyWidth 等配置永远读不到，
+    //   模式切换全部失效、永远走默认值（踩过的坑，别删）
+    comfyMode: String(process.env.COMFY_MODE || fileCfg.comfyMode || 'composite'),
+    comfyWidth: Number(process.env.COMFY_WIDTH || fileCfg.comfyWidth || 768),
+    comfyHeight: Number(process.env.COMFY_HEIGHT || fileCfg.comfyHeight || 1024),
+    comfyMergeDenoise: Number(process.env.COMFY_MERGE_DENOISE || fileCfg.comfyMergeDenoise || 0.62),
+    ipadapterFile: String(process.env.IPADAPTER_FILE || fileCfg.ipadapterFile || ''),
+    clipVision: String(process.env.CLIP_VISION || fileCfg.clipVision || 'CLIP-ViT-H-14-laion2B-s32B-b79K.safetensors'),
+    ipadapterWeight: Number(process.env.IPADAPTER_WEIGHT || fileCfg.ipadapterWeight || 0.9),
   }
 }
 

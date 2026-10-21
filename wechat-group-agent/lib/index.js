@@ -1107,6 +1107,31 @@ let res = await callLlm(route, sys, usr, undefined)
     throw new Error('无法确定 LLM 路由（可在插件配置里显式指定 provider/model）')
   }
 
+  // ── 时间观念 ────────────────────────────────────────────────
+  //   以前只给模型一个 HH:MM，它不知道今天几号、星期几、什么时段，
+  //   也不会按时间说话（深夜还跟人唠嗑、早上不说早）。
+  const WEEK_CN = ['日', '一', '二', '三', '四', '五', '六']
+  function nowInfo(ts = Date.now()) {
+    const d = new Date(ts)
+    const h = d.getHours(), mn = d.getMinutes()
+    const part = h < 5 ? '凌晨' : h < 8 ? '清早' : h < 11 ? '上午' : h < 13 ? '中午'
+      : h < 17 ? '下午' : h < 19 ? '傍晚' : h < 23 ? '晚上' : '深夜'
+    const hhmm = String(h).padStart(2, '0') + ':' + String(mn).padStart(2, '0')
+    return {
+      hhmm, part, hour: h, weekday: WEEK_CN[d.getDay()],
+      dateLine: d.getFullYear() + ' 年 ' + (d.getMonth() + 1) + ' 月 ' + d.getDate()
+        + ' 日 星期' + WEEK_CN[d.getDay()] + ' ' + hhmm + '（' + part + '）',
+    }
+  }
+  function gapText(ms) {
+    if (!ms || ms < 60000) return ''
+    const m = Math.floor(ms / 60000)
+    if (m < 60) return m + ' 分钟'
+    const h = Math.floor(m / 60), r = m % 60
+    if (h < 24) return r ? h + ' 小时 ' + r + ' 分钟' : h + ' 小时'
+    return Math.floor(h / 24) + ' 天' + (h % 24 ? ' ' + (h % 24) + ' 小时' : '')
+  }
+
   function buildSystem(r) {
     const names = r.memberNames.slice(0, 40).join('、')
     // 群里谁是谁（让机器人知道成员、也才可能 @ 对人）
@@ -1117,6 +1142,13 @@ let res = await callLlm(route, sys, usr, undefined)
     return [
       `你在微信群里扮演「${config.botName}」—— DeepSeek 的鲸鱼娘（社区昵称"大肥鱼"）。`,
       `群名：${r.roomName || '（未知）'}`,
+      // ★ 时间观念：她知道今天几号、星期几、现在什么时段，并会按时间说话
+      `【现在的时间】${nowInfo().dateLine}`,
+      '  · 你有真实的时间概念：知道今天几号、星期几、现在几点。说到「昨天/前天/明天/下周」时按真实日期算；'
+        + '别人问你今天几号、现在几点，就照上面如实答。',
+      '  · 会按时间说话（这才像活人）：清早/上午顺口问个早；快到饭点（11~13、17~19）会提吃饭；'
+        + '深夜（23 点后）会催人去睡（「这么晚还不睡啊」「熬什么夜」）；周末会提周末；节日/季节也能顺口带上。',
+      '  · 但别每句都报时间、别当报时钟，自然带过就行；不要主动宣布「今天是 X 月 X 日」除非跟话题相关。',
       known.length ? `群里的人：${known.join('、')}` : (names ? `群成员：${names}` : ''),
       // 长期记忆：每次都带上（用户要求"每次都通过记忆系统"）
       (r.facts || []).length
@@ -1273,8 +1305,13 @@ let res = await callLlm(route, sys, usr, undefined)
       return m.text
     }
     const lines = r.msgs.slice(-config.contextMessages).map((m) => `${m.isSelf ? '我' : m.senderName}: ${showText(m)}`)
+    // ★ 时间观念：完整日期 + 星期 + 时段（不再只给 HH:MM）
     const now = new Date()
-    const hhmm = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`
+    const ti = nowInfo(now.getTime())
+    // 距上一条消息隔了多久 —— 让她知道是「刚说完」还是「消失两小时」
+    const lastTwo = r.msgs.slice(-2)
+    const gapMs = lastTwo.length === 2 ? (lastTwo[1].ts - lastTwo[0].ts) : 0
+    const gap = gapText(gapMs)
     const trig = priority === 'at'
       ? `有人 @ 了你（${trigger.senderName}）：${showText(trigger)}`
       : priority === 'name'
@@ -1291,7 +1328,7 @@ let res = await callLlm(route, sys, usr, undefined)
               ? `${trigger.senderName} 在群里问：${showText(trigger)}`
               : `${trigger.senderName} 刚说：${showText(trigger)}`
     return [
-      `当前时间：${hhmm}`,
+      `当前时间：${ti.dateLine}` + (gap ? `（距上一条消息 ${gap}）` : ''),
       '最近群聊：',
       ...lines,
       '',

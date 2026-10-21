@@ -20,6 +20,47 @@ import { execFileSync, spawn } from 'node:child_process'
 import { copyFileSync, existsSync, mkdirSync, writeFileSync, readFileSync, readdirSync, renameSync, rmSync, unlinkSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { tmpdir } from 'node:os'
+
+// ── 读图片实际分辨率（判断拿到的是不是缩略图）──
+//   JPEG 扫 SOF 段；PNG 读 IHDR；GIF 读逻辑屏；WebP 读 VP8X/VP8/VP8L。
+//   为什么要它：微信 CDN 对无鉴权请求经常只回缩略图（8~30KB），
+//   光看「字段存在与否」判断不出清晰度，必须看真实像素。
+function imageDims(buf) {
+  try {
+    if (buf.length > 24 && buf[0] === 0x89 && buf[1] === 0x50) {
+      return { w: buf.readUInt32BE(16), h: buf.readUInt32BE(20) }
+    }
+    if (buf[0] === 0xff && buf[1] === 0xd8) {
+      let i = 2
+      while (i < buf.length - 9) {
+        if (buf[i] !== 0xff) { i++; continue }
+        const mk = buf[i + 1]
+        if (mk === 0xd8 || mk === 0xd9 || (mk >= 0xd0 && mk <= 0xd7)) { i += 2; continue }
+        const len = buf.readUInt16BE(i + 2)
+        if (len < 2) { i += 2; continue }
+        if (mk >= 0xc0 && mk <= 0xcf && mk !== 0xc4 && mk !== 0xc8 && mk !== 0xcc) {
+          return { h: buf.readUInt16BE(i + 5), w: buf.readUInt16BE(i + 7) }
+        }
+        i += 2 + len
+      }
+      return null
+    }
+    if (buf.slice(0, 3).toString('latin1') === 'GIF') {
+      return { w: buf.readUInt16LE(6), h: buf.readUInt16LE(8) }
+    }
+    if (buf.slice(0, 4).toString('latin1') === 'RIFF' && buf.slice(8, 12).toString('latin1') === 'WEBP') {
+      const kind = buf.slice(12, 16).toString('latin1')
+      if (kind === 'VP8X') return { w: 1 + buf.readUIntLE(24, 3), h: 1 + buf.readUIntLE(27, 3) }
+      if (kind === 'VP8 ') return { w: buf.readUInt16LE(26) & 0x3fff, h: buf.readUInt16LE(28) & 0x3fff }
+      if (kind === 'VP8L') {
+        const b0 = buf[21], b1 = buf[22], b2 = buf[23], b3 = buf[24]
+        return { w: 1 + (((b1 & 0x3f) << 8) | b0), h: 1 + (((b3 & 0x0f) << 10) | (b2 << 2) | ((b1 & 0xc0) >> 6)) }
+      }
+    }
+  } catch { /* ignore */ }
+  return null
+}
+
 import { fileURLToPath } from 'node:url'
 import { resolveDataRoot, findLatestDat, decryptDat } from './wechat-image.mjs'
 import { xmlVideoMeta, findVideoCover, findVideoFile, probeVideo } from './wechat-video.mjs'
@@ -1015,8 +1056,16 @@ export class WeChatHookBridge {
             out = decryptDat(f.path, { tag: 'chat-retry' })
           }
           if (out) {
-            this.log(`本地解密图片成功：${f.name} → ${out}（${Math.round(f.size / 1024)}KB）`)
-            return out
+            // ★ 记录真实分辨率；本地若只有缩略图（_t.dat），再去 CDN 试更大的
+            let dims = null
+            try { dims = imageDims(readFileSync(out)) } catch { /* ignore */ }
+            const longSide = dims ? Math.max(dims.w, dims.h) : 0
+            this.log(`本地解密图片成功：${f.name} → ${out}（${Math.round(f.size / 1024)}KB`
+              + `${dims ? `，${dims.w}x${dims.h}` : ''}）`)
+            if (longSide >= 700) return out
+            this.log(`本地解出的图偏小（${dims ? longSide + 'px' : '尺寸未知'}）→ 再去 CDN 找更大的原图`)
+            const bigger = await this.tryCdnImages(xml, type)
+            return bigger || out
           }
           this.log(`本地解密失败（密钥可能失效）：${f.name}`)
         } else {
@@ -1028,34 +1077,56 @@ export class WeChatHookBridge {
     }
 
     if (!xml) return null
+    return await this.tryCdnImages(xml, type)
+  }
+
+  /**
+   * 从 CDN 候选里挑【实际分辨率最大】的那张（原图 > 中图 > 缩略图）。
+   * 为什么：微信 CDN 对无鉴权请求经常只回缩略图，而且很多消息**只有** cdnthumburl。
+   * 以前按「第一个存在的 URL 就拿」→ 常常拿到 8KB 缩略图 → 视觉模型看不清细节。
+   */
+  async tryCdnImages(xml, type) {
     const attr = (k) => {
       const m = new RegExp(`${k}="([^"]*)"`).exec(xml)
       return m ? m[1].replace(/&amp;/g, '&') : ''
     }
-    const cands = type === 47
-      ? ['cdnurl', 'cdnthumburl', 'encrypturl']
-      : ['cdnbigimgurl', 'cdnmidimgurl', 'cdnthumburl', 'cdnurl']
-    const url = cands.map(attr).find((u) => /^https?:\/\//i.test(u))
-    if (!url) return null
-    try {
-      const r = await fetch(url, { headers: { 'user-agent': 'MicroMessenger' }, signal: AbortSignal.timeout(30_000) })
-      if (!r.ok) { this.log(`取图失败 HTTP ${r.status}`); return null }
-      const buf = Buffer.from(await r.arrayBuffer())
-      if (buf.length < 100) { this.log('取图内容过小，放弃'); return null }
-      const head = buf.slice(0, 4)
-      const ext = head[0] === 0xff && head[1] === 0xd8 ? 'jpg'
-        : head[0] === 0x89 ? 'png'
-          : buf.slice(0, 3).toString('latin1') === 'GIF' ? 'gif' : 'bin'
-      const dir = join(this.dataDir, 'wechat-media')
-      mkdirSync(dir, { recursive: true })
-      const file = join(dir, `${Date.now()}-${type}.${ext}`)
-      writeFileSync(file, buf)
-      this.log(`取到媒体图：${file}（${Math.round(buf.length / 1024)}KB，${ext}）`)
-      return file
-    } catch (e) {
-      this.log('取图异常：' + String(e?.message || e))
-      return null
+    const list = type === 47
+      ? [['cdnurl', '原图'], ['cdnthumburl', '缩略'], ['encrypturl', '加密']]
+      : [['cdnbigimgurl', '原图'], ['cdnmidimgurl', '中图'], ['cdnthumburl', '缩略'], ['cdnurl', '链接']]
+    const cands = []
+    for (const [k, label] of list) {
+      const u = attr(k)
+      if (/^https?:\/\//i.test(u) && !cands.some((x) => x.url === u)) cands.push({ url: u, label })
     }
+    if (!cands.length) return null
+    let best = null
+    for (const c of cands) {
+      try {
+        const r = await fetch(c.url, { headers: { 'user-agent': 'MicroMessenger' }, signal: AbortSignal.timeout(25_000) })
+        if (!r.ok) { this.log(`取图(${c.label}) HTTP ${r.status}`); continue }
+        const buf = Buffer.from(await r.arrayBuffer())
+        if (buf.length < 100) { this.log(`取图(${c.label}) 内容过小`); continue }
+        const d = imageDims(buf)
+        const area = d ? d.w * d.h : buf.length
+        this.log(`取图(${c.label}) ${Math.round(buf.length / 1024)}KB` + (d ? ` ${d.w}x${d.h}` : ''))
+        if (!best || area > best.area) best = { buf, d, area, label: c.label }
+        if (d && Math.max(d.w, d.h) >= 1200) break
+      } catch (e) {
+        this.log(`取图(${c.label}) 异常：${String(e?.message || e).slice(0, 80)}`)
+      }
+    }
+    if (!best) return null
+    const head = best.buf.slice(0, 4)
+    const ext = head[0] === 0xff && head[1] === 0xd8 ? 'jpg'
+      : head[0] === 0x89 ? 'png'
+        : best.buf.slice(0, 3).toString('latin1') === 'GIF' ? 'gif' : 'bin'
+    const dir = join(this.dataDir, 'wechat-media')
+    mkdirSync(dir, { recursive: true })
+    const file = join(dir, `${Date.now()}-${type}.${ext}`)
+    writeFileSync(file, best.buf)
+    this.log(`取到媒体图(${best.label})：${file}（${Math.round(best.buf.length / 1024)}KB`
+      + `${best.d ? `，${best.d.w}x${best.d.h}` : ''}）`)
+    return file
   }
 
   /** 群列表：库里读不到，就返回"见过的群"（回调出现过的 + 表情包库记录的） */
