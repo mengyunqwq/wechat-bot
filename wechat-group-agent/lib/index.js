@@ -2130,6 +2130,35 @@ let res = await callLlm(route, sys, usr, undefined)
     }
   }
 
+    // ── 表情场景翻译（中文 → 英文 danbooru 标签）──────────────────────
+    //   为什么：她输出的是中文场景（如「坐在餐桌前大口扒饭，桌上摆满菜」），
+    //   而本地 ComfyUI 的三个底模只认英文标签，中文几乎无效。
+    //   → 先用模型翻成标签再喂给本地生图；按中文原文缓存，同一个场景只翻一次。
+    const sceneTagCache = new Map()
+    async function sceneToTags(zh) {
+      const key = String(zh || '').trim()
+      if (!key) return ''
+      if (sceneTagCache.has(key)) return sceneTagCache.get(key)
+      try {
+        const sysT = '你是 Danbooru 标签翻译器。把中文的场景/动作/道具描述翻译成英文 danbooru 标签，'
+          + '只输出【逗号分隔的英文标签】，不要句子、不要中文、不要解释。'
+          + '例：「坐在餐桌前大口扒饭，桌上摆满菜」→ dining table, eating, rice, chopsticks, many dishes, indoor '
+          + '例：「盖着被子睡得很香」→ sleeping, bed, blanket, closed eyes, bedroom'
+        const r = await callLlm(resolveRoute(), sysT, key, undefined)
+        let tags = String((r && typeof r === 'object') ? (r.text || '') : (r || ''))
+          .replace(/[^A-Za-z0-9,\s_-]/g, '').replace(/\s+/g, ' ').trim()
+        tags = tags.split(',').map((x) => x.trim()).filter(Boolean).slice(0, 12).join(', ')
+        sceneTagCache.set(key, tags)
+        if (tags) log(`场景翻译：${key.slice(0, 24)} → ${tags.slice(0, 80)}`)
+        return tags
+      } catch (e) {
+        log('场景翻译失败（用题材默认场景）: ' + String(e?.message || e).slice(0, 60))
+        sceneTagCache.set(key, '')
+        return ''
+      }
+    }
+
+
   /**
    * 后台生成表情包：**不阻塞回复** —— 文字先发出去，图生成好了再单独补一条。
    * 用户要求："生成图片慢就算了，为什么不先回复消息，之后图片生成好了再发图"。
@@ -2142,7 +2171,9 @@ let res = await callLlm(route, sys, usr, undefined)
     try {
       log(`后台开始生成：${emotion}${scene ? '｜' + scene : ''}${bubble ? '｜气泡「' + bubble + '」' : ''}（${why}）`)
       const force = Math.random() < (config.genForceChance ?? 0.5)
-      const gen = await client.call('genSticker', { emotion, extra: scene || '', bubble: bubble || '', force }, 220_000)
+      // ★ 把她的中文场景翻成英文标签，本地模型才认（失败就用题材默认场景）
+      const sceneTags = scene ? await sceneToTags(scene) : ''
+      const gen = await client.call('genSticker', { emotion, extra: sceneTags || '', bubble: bubble || '', force }, 220_000)
       if (gen?.stickerId) {
         const sec = ((Date.now() - t0) / 1000).toFixed(0)
         log(`后台生成完成（${sec}s，${gen.cached ? '复用' : '新画'}）→ 稍后补发`)
@@ -3411,8 +3442,11 @@ let res = await callLlm(route, sys, usr, undefined)
     async execute(args) {
       const emotion = String(args?.emotion || '开心').trim()
       log(`工具触发生成表情：${emotion}`)
+      // ★ extra 若是中文场景，也翻译成英文标签（本地模型只认标签）
+      const rawExtra = String(args?.extra || '').trim()
+      const extraTags = /[\u4e00-\u9fa5]/.test(rawExtra) ? await sceneToTags(rawExtra) : rawExtra
       const gen = await client.call('genSticker', {
-        emotion, extra: args?.extra || '', force: !!args?.force,
+        emotion, extra: extraTags || '', force: !!args?.force,
       }, 240_000)
       const lines = [`生成：情绪「${emotion}」｜${gen?.cached ? '复用已生成的' : '本次新生成'}｜stickerId=${gen?.stickerId}`]
       if (gen?.file) lines.push(`本地文件：${gen.file}`)
