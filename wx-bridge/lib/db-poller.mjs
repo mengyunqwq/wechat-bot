@@ -119,7 +119,7 @@ export class DbPoller {
     //    哪个分片存在取决于微信自己（我们把 message_0.db 删掉后，它就把消息写到 message_1.db 了）。
     //    以前这里写死 'message_0.db' → 一旦微信换了分片，桥就永远读不到消息（静默失聪）。
     //    现在：调用方仍写 'message_0.db' 当"逻辑名"，这里透明解析成真实存在的那个分片。
-    if (db === 'message_0.db') db = await this.resolveShard(timeout)
+    if (db === 'message_0.db') { db = await this.resolveShard(timeout); if (!db) throw new Error('消息库分片暂不可用（客户端句柄还没挂载）') }
     const r = await this.api('/QueryDB/execute', { optDbName: db, SQL: sql }, 'POST', timeout)
     // status 一定要带上：21 = SQLITE_MISUSE（句柄已关闭）、1 = SQL 写错/表不存在、5/6 = 忙
     if (!r || r.status !== 0) throw new Error(`SQL 失败(${db}) status=${r?.status}: ${r?.desc || 'unknown'} :: ${sql.slice(0, 60)}`)
@@ -133,21 +133,34 @@ export class DbPoller {
   async resolveShard(timeout = 20000) {
     const now = Date.now()
     if (this._shard && now - (this._shardAt || 0) < 30_000) return this._shard
-    for (let i = 0; i < 4; i++) {
-      const name = `message_${i}.db`
-      try {
-        const r = await this.api('/QueryDB/execute',
-          { optDbName: name, SQL: "SELECT COUNT(*) AS n FROM sqlite_master WHERE type='table' AND name LIKE 'Msg_%'" },
-          'POST', Math.min(timeout, 10000))
-        if (r && r.status === 0 && Number((r.data || [])[0]?.n) > 0) {
-          if (this._shard !== name) this.log(`消息库分片：使用 ${name}（发现 ${Number((r.data || [])[0].n)} 张会话表）`)
-          this._shard = name; this._shardAt = now
-          return name
-        }
-      } catch { /* 这个分片不存在，接着试下一个 */ }
+    // ★ 2026-10-21：先问 hook「到底有哪些库名」，只探测真实存在的分片。
+    //   原因：查不存在的 message_0.db 会让 hook 缓存一个坏句柄，之后连 message_1.db 也读不了
+    //   （实测：桥每次重启探测 message_0.db 之后就整库读不到，得重启微信才能恢复）。
+    let shardNames = []
+    try {
+      const dd = await this.api('/QueryDB/debug', null, 'GET', 6000)
+      const all = Array.isArray(dd?.dbs) ? dd.dbs : []
+      shardNames = all.map((x) => x?.dbName).filter((n) => n && /^message_\d+\.db$/.test(n))
+    } catch { /* 拿不到就退回盲试 */ }
+    if (shardNames.length) {
+      for (const name of shardNames) {
+        try {
+          const r = await this.api('/QueryDB/execute',
+            { optDbName: name, SQL: "SELECT COUNT(*) AS n FROM sqlite_master WHERE type='table' AND name LIKE 'Msg_%'" },
+            'POST', Math.min(timeout, 10000))
+          if (r && r.status === 0 && Number((r.data || [])[0]?.n) > 0) {
+            if (this._shard !== name) this.log(`消息库分片：${name}（${Number((r.data || [])[0].n)} 张会话表）`)
+            this._shard = name; this._shardAt = now
+            return name
+          }
+        } catch { /* 试下一个 */ }
+      }
     }
-    // 都探测不到：保持上次成功的，或退回默认（让报错信息保留原语义）
-    return this._shard || 'message_0.db'
+    // ★ 2026-10-21：探测不到就【不要盲试】message_0/1/2/3.db
+    //   盲试不存在的库会让 hook 缓存坏句柄，之后连正确的分片也读不了（实测整库失聪）。
+    //   这里返回 null，让调用方当作「暂时读不到」重试。
+    if (shardNames.length) this.log(`消息库分片探测失败（候选 ${shardNames.join(",")}），下次再试`)
+    return null
   }
 
   /** 发现会话表、建立 hash→roomId 映射、记录各表当前最大 local_id */
