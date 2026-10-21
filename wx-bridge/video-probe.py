@@ -18,6 +18,7 @@
   {"ok":true,"sheet":"<联系表.jpg>","wav":"<音轨.wav>","durationSec":5.0,"frames":6,...}
 失败：`失败: <原因>` + 非 0 退出（桥侧只记日志并降级）。
 """
+import math
 import argparse
 import json
 import os
@@ -30,7 +31,8 @@ import wave
 
 # ── 配置 ──────────────────────────────────────────────────────
 TARGET_RATE = 16000        # speechToText 硬要求
-MAX_FRAMES = 12            # 上限（防一次抽太多帧把联系表搞得巨大）
+MAX_FRAMES = 60            # 上限（每秒 1 帧，60 秒内按实际时长；超长视频截断到 60 帧）
+PER_SHEET = 20             # 每张联系表最多几格（60 帧 → 3 张）
 CELL_W = 360               # 联系表每格宽度（像素）
 JPEG_Q = 85
 
@@ -71,17 +73,26 @@ def probe_duration(ff, src):
     return int(m.group(1)) * 3600 + int(m.group(2)) * 60 + float(m.group(3))
 
 
-def pick_frame_times(duration, frames):
-    """均匀取 N 个时间点（取每格中点）。短视频少抽几帧。"""
+def pick_frame_times(duration, frames, fps=1.0):
+    """按【每秒 fps 帧】取时间点（用户要求：每秒 1 帧）。
+    - 已知时长：帧数 = ceil(时长 × fps)，上限 MAX_FRAMES
+    - 未知时长：退回按 frames 参数（默认 6）等间隔
+    """
+    try: fps = float(fps)
+    except Exception: fps = 1.0
+    if fps <= 0: fps = 1.0
+    if duration and duration > 0:
+        want = int(math.ceil(duration * fps))
+        n = max(1, min(want, MAX_FRAMES))
+        # 取每帧的代表时间点：第 i 帧取 (i + 0.5) / fps 秒
+        out = []
+        for i in range(n):
+            t = (i + 0.5) / fps
+            if t >= duration: t = max(0.0, duration - 0.05)
+            out.append(t)
+        return out, n
     n = max(1, min(int(frames or 6), MAX_FRAMES))
-    if duration > 0:
-        # 每秒最多 1~2 帧，避免 1 秒的视频抽 6 帧（全是同一画面，浪费）
-        n = max(2, min(n, int(duration) + 1)) if duration >= 1 else min(n, 2)
-    if duration <= 0:
-        # 拿不到时长：退化成按固定间隔抽（ffmpeg 抽到没有就停）
-        return [i * 1.0 for i in range(n)], n
-    return [max(0.0, min(duration * (i + 0.5) / n, max(0.0, duration - 0.05))) for i in range(n)], n
-
+    return [float(i) for i in range(n)], n
 
 def extract_frames(ff, src, out_dir, times, tag):
     """抽帧 → 返回 [jpg 路径]（失败/空则少几个）"""
@@ -166,7 +177,7 @@ def extract_audio_wav(ff, src, out_dir, tag):
     return wav, (len(raw) // 2) / float(TARGET_RATE)
 
 
-def probe(src, out_dir, frames=6, tag='video'):
+def probe(src, out_dir, frames=6, tag='video', fps=1.0):
     """主流程：抽帧 → 联系表 → 音轨 WAV。返回给桥的 dict。"""
     if not os.path.exists(src):
         raise RuntimeError('输入视频不存在：%s' % src)
@@ -175,16 +186,22 @@ def probe(src, out_dir, frames=6, tag='video'):
     os.makedirs(out_dir, exist_ok=True)
     ff = ffmpeg_exe()
     duration = probe_duration(ff, src)
-    times, n = pick_frame_times(duration, frames)
+    times, n = pick_frame_times(duration, frames, fps)
     print('视频: %s（%.1fMB）｜时长 %.2fs｜计划抽 %d 帧' % (os.path.basename(src), os.path.getsize(src) / 1048576, duration, n))
 
     frames_out = extract_frames(ff, src, out_dir, times, tag)
     print('抽帧: 成功 %d/%d' % (len(frames_out), n))
-    sheet = ''
+    sheets = []
     if frames_out:
-        sheet = build_contact_sheet(frames_out, os.path.join(out_dir, '%s-sheet.jpg' % tag)) or ''
-        if sheet:
-            print('联系表: %s（%d 帧拼成，%dKB）' % (sheet, len(frames_out), os.path.getsize(sheet) // 1024))
+        # ★ 每张联系表最多 PER_SHEET 格（用户要求：60 帧分成 2~3 张，每格更大更清楚）
+        for idx in range(0, len(frames_out), PER_SHEET):
+            chunk = frames_out[idx:idx + PER_SHEET]
+            name = ('%s-sheet.jpg' % tag) if len(frames_out) <= PER_SHEET else ('%s-sheet%d.jpg' % (tag, len(sheets) + 1))
+            p = build_contact_sheet(chunk, os.path.join(out_dir, name)) or ''
+            if p:
+                sheets.append(p)
+                print('联系表%d: %s（%d 帧，%dKB）' % (len(sheets), p, len(chunk), os.path.getsize(p) // 1024))
+    sheet = sheets[0] if sheets else ''
     # 抽帧的中间文件用完即删（只留联系表）
     for _t, p in frames_out:
         try:
@@ -199,6 +216,7 @@ def probe(src, out_dir, frames=6, tag='video'):
     return {
         'ok': bool(sheet or wav),
         'sheet': sheet,
+        'sheets': sheets,
         'wav': wav,
         'durationSec': round(duration, 3),
         'frames': len(frames_out),
@@ -283,6 +301,7 @@ def main():
     ap.add_argument('--in', dest='src', help='输入视频文件')
     ap.add_argument('--out-dir', dest='out_dir', help='输出目录（临时目录）')
     ap.add_argument('--frames', dest='frames', type=int, default=6, help='抽几帧（默认 6，上限 %d）' % MAX_FRAMES)
+    ap.add_argument('--fps', dest='fps', type=float, default=1.0, help='每秒抽几帧（默认 1，用户要求每秒 1 帧）')
     ap.add_argument('--tag', dest='tag', default='video', help='输出文件名前缀（带消息 id 防冲突）')
     ap.add_argument('--selftest', action='store_true', help='自己造测试视频跑通全链路')
     a = ap.parse_args()
@@ -294,7 +313,7 @@ def main():
         print('失败: 缺少 --in / --out-dir')
         return 2
     try:
-        r = probe(a.src, a.out_dir, frames=a.frames, tag=re.sub(r'[^\w.-]', '_', str(a.tag))[:40])
+        r = probe(a.src, a.out_dir, frames=a.frames, fps=a.fps, tag=re.sub(r'[^\w.-]', '_', str(a.tag))[:40])
     except Exception as e:
         print('失败: %s' % e)
         return 1

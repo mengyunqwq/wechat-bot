@@ -439,18 +439,30 @@ async function handle(op, a = {}) {
       return await bridge.voiceSendSwitch(a.on === undefined ? undefined : !!a.on)
     }
     case 'sendSticker': {
-      const item = a.stickerId ? stickers.get(a.stickerId) : stickers.pick({ text: a.text || '', roomId: a.roomId })
+      const allowedSend = (process.env.STICKER_SOURCES || 'gen,import,collected').split(',').map((s) => s.trim()).filter(Boolean)
+      const item = a.stickerId ? stickers.get(a.stickerId) : stickers.pick({ text: a.text || '', roomId: a.roomId, allowedSources: allowedSend })
       if (!item) return { rc: -1, error: '没有可用的表情包（库为空或不匹配）' }
       const rc = await bridge.sendEmotion(a.roomId, item.file, item.xml)
       stickers.markUsed(item.id)
       counters.msgsOut++
       return { rc, stickerId: item.id, file: item.file, viaXml: !!item.xml }
     }
+    case 'tagSticker': {
+      // 识图后回写标签：让新收藏的表情能被语境匹配到
+      let id = a.id || ''
+      if (!id && a.file) {
+        try { id = bridge._stickerByFile?.get(a.file) || '' } catch { /* ignore */ }
+      }
+      if (!id) return { ok: false, error: '找不到对应的表情条目（需先收藏）' }
+      const item = stickers.tag(id, String(a.text || ''))
+      if (!item) return { ok: false, error: '标签写入失败' }
+      return { ok: true, id: item.id, tags: item.tags, count: (item.tags || []).length }
+    }
     case 'pickSticker': {
       // 只挑"生成接口的 + 用户自己投递的"表情（默认），群里收藏的不参与挑选
       const allowed = Array.isArray(a.allowedSources) && a.allowedSources.length
         ? a.allowedSources
-        : (process.env.STICKER_SOURCES || 'gen,import').split(',').map((s) => s.trim()).filter(Boolean)
+        : (process.env.STICKER_SOURCES || 'gen,import,collected').split(',').map((s) => s.trim()).filter(Boolean)
       const item = stickers.pick({ text: a.text || '', roomId: a.roomId, minScore: a.minScore ?? 3, allowedSources: allowed })
       return item ? { id: item.id, file: item.file, tags: item.tags, source: item.source, uses: item.uses, seen: item.seenCount } : null
     }

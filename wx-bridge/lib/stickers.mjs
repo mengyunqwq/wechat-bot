@@ -181,6 +181,21 @@ export class StickerLibrary {
     return out
   }
 
+  /** 给已有条目补标签（识图得到的描述写回来，之后才能按语境挑到它）
+   *  @returns {object|null} 更新后的条目
+   */
+  tag(id, text) {
+    if (!id || !text) return null
+    const it = this.items.find((x) => x.id === id)
+    if (!it) return null
+    const tags = tokenize(text)
+    if (!tags.length) return it
+    it.tags = [...new Set([...(it.tags || []), ...tags])].slice(-60)
+    it.taggedAt = new Date().toISOString()
+    this.save()
+    return it
+  }
+
   get(id) { return this.items.find((it) => it.id === id) }
 
   /**

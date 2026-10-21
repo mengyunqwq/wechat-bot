@@ -662,8 +662,28 @@ const namesFile = join(dirname(memoryDir), 'members.json')
           : await client.call('fetchMedia', { xml: m.xml || '', type: m.type, roomId: m.roomId || '', ts: m.ts || 0 }, 90_000)
         if (media?.file) {
           const kind = !isVideo ? 'image' : (media.kind === 'video' ? 'videoSheet' : 'videoCover')
-          // 带缓存：同一张（联系表/封面/图片）只识别一次
-          const desc = await describeImageCached(media.file, kind)
+          // ★ 视频可能有多张联系表（每秒 1 帧，每 20 帧一张）→ 逐张识别后汇总
+          const sheets = isVideo && Array.isArray(media.sheets) ? media.sheets.filter(Boolean) : []
+          let desc = ''
+          if (sheets.length > 1) {
+            const parts = []
+            for (let si = 0; si < sheets.length; si++) {
+              const d = await describeImageCached(sheets[si], 'videoSheet')
+              if (d) parts.push('【第' + (si + 1) + '/' + sheets.length + '段】' + d)
+            }
+            desc = parts.join('\n')
+            log('视频分段识别：' + sheets.length + ' 张联系表，成功 ' + parts.length + ' 张')
+          } else {
+            // 带缓存：同一张（联系表/封面/图片）只识别一次
+            desc = await describeImageCached(media.file, kind)
+          }
+          // ★ 表情包收藏后，把识图得到的描述回写成标签 —— 以后才能按语境挑到它
+          if (m.typeName === 'emoticon' && desc) {
+            try {
+              const tg = await client.call('tagSticker', { file: media.file, text: desc }, 15_000)
+              if (tg?.ok) log(`表情包已打标签：${tg.id}（${tg.count} 个标签）`)
+            } catch { /* 打标签失败不影响主流程 */ }
+          }
           // 视频音轨：交给 DSH 的 speechToText 转写（复用语音那条链路，自带缓存与降级）
           let audioText = ''
           if (isVideo && media.wav) audioText = await transcribeVoice(media.wav, String(m.id || '') + ':va')
@@ -679,6 +699,7 @@ const namesFile = join(dirname(memoryDir), 'members.json')
           }
           // 识别完就删临时文件（都是副本，微信自己的原文件/封面不动）
           try {
+            for (const s of (isVideo && Array.isArray(media.sheets) ? media.sheets : [])) { try { unlinkSync(s) } catch { /* ignore */ } }
             unlinkSync(media.file)
             log(isVideo ? (media.kind === 'video' ? '已删除临时联系表' : '已删除临时封面副本') : '已删除解密临时图')
           } catch { /* ignore */ }
@@ -1149,6 +1170,16 @@ let res = await callLlm(route, sys, usr, undefined)
       '  · 会按时间说话（这才像活人）：清早/上午顺口问个早；快到饭点（11~13、17~19）会提吃饭；'
         + '深夜（23 点后）会催人去睡（「这么晚还不睡啊」「熬什么夜」）；周末会提周末；节日/季节也能顺口带上。',
       '  · 但别每句都报时间、别当报时钟，自然带过就行；不要主动宣布「今天是 X 月 X 日」除非跟话题相关。',
+    // ★ 她的"眼睛"：图片识别 + 视频抽帧（2026-10-21 接入）
+      '【你能看到什么 —— 这些是你真能看到的，别装作看不见】',
+      '  · 图片：群里的图你能看到内容，图里的文字一般也能读出来（截图、聊天记录、菜单、海报…）。'
+        + '别人发图问「这是啥/帮我看看/上面写的什么」，就按你看到的说具体内容。',
+      '  · 视频：视频文件在本地时，你能看到画面（按秒抽帧）+ 听到里面说话（音轨转成文字给你）。'
+        + '所以别人发视频问「这视频讲的啥」，你能说出过程和台词，别只说封面。',
+      '  · 表情包：能看懂是啥梗、什么情绪。',
+      '  · 但如果真看不清（图太小/很糊/黑乎乎/视频没下载），就老实说看不清，'
+        + '**不要硬编内容**——编错了比说看不清更难堪。',
+      '  · 别炫耀这些能力，也别解释你怎么看到的；就像普通人看了一眼那样自然。',
       known.length ? `群里的人：${known.join('、')}` : (names ? `群成员：${names}` : ''),
       // 长期记忆：每次都带上（用户要求"每次都通过记忆系统"）
       (r.facts || []).length
@@ -1439,6 +1470,7 @@ let res = await callLlm(route, sys, usr, undefined)
               + '3) 最后用两三句话总结：这条视频**到底在讲什么**、看点/笑点/信息点是什么。\n'
               + '中文，直接说，不要客套话，不要逐格罗列格式，像在给朋友复述这个视频。'
           : '用一到两句话描述这张图：主体是什么、在做什么、什么表情、画面氛围。中文，直接描述，不要客套话。'
+            + '（如果图很模糊、字号太小、关键细节看不清，就明确说「图有点糊，看不清」，不要硬猜内容。）'
       content = [
         { type: 'text', text: prompt },
         { type: 'image', attachment: refs[0] },
@@ -1488,7 +1520,7 @@ let res = await callLlm(route, sys, usr, undefined)
   let voicePrepareAt = 0
 
   // ── 视频收尾两件事：读完删原文件 / 延迟复查升级 ────────────────────
-  // 背景：微信视频**按需下载**（"自动下载"这条路已确认不可行），
+  // 背景：微信视频**按需下载**（"自动下载"这条路已确认不可行，见 docs/media-download-re.md），
   // 只能等群里有人点开、微信自己落盘。所以：
   //   ① 既然这次点开的收益只有一次 → 用完就把原文件删掉（省磁盘；下次点开微信会重新下载）
   //   ② 只拿到封面时排两次复查（+60s / +180s）→ 视频一落盘就升级成"全部内容"

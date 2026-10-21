@@ -17,9 +17,50 @@
  */
 import http from 'node:http'
 import { execFileSync, spawn } from 'node:child_process'
-import { copyFileSync, existsSync, mkdirSync, writeFileSync, readFileSync, readdirSync, renameSync, rmSync, unlinkSync } from 'node:fs'
+import { copyFileSync, existsSync, mkdirSync, writeFileSync, readFileSync, readdirSync, renameSync, rmSync, unlinkSync, statSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { tmpdir } from 'node:os'
+
+
+
+// ── 表情包图片收藏（2026-10-21）──────────────────────────────────────────────
+//   收到群友发来的表情包（type=47）时：
+//     ① 老逻辑：只存 XML（原生表情转发用，但本构建的 ForwardXMLMsg 会崩，所以发不出去）
+//     ② 新逻辑：顺手把 cdnurl 的图片本体下下来存进表情库 → 之后就能用 /SendImgMsg 发出去
+//   表情的 cdnurl 是明文（vweixinf.tc.qq.com），不需要解密、不需要 aeskey。
+async function collectStickerImage(xml, lib, meta) {
+  try {
+    const s = String(xml || '')
+    const m = s.match(/cdnurl="([^"]+)"/) || s.match(/cdnthumburl="([^"]+)"/)
+    if (!m) return
+    const url = m[1].replace(/&amp;/g, '&')
+    if (!/^https?:\/\//i.test(url)) return
+    const tmpDir = join(dirname(fileURLToPath(import.meta.url)), '..', 'data', 'wechat-image-tmp')
+    try { mkdirSync(tmpDir, { recursive: true }) } catch { /* ignore */ }
+    const res = await fetch(url, { signal: AbortSignal.timeout(15000) })
+    if (!res.ok) { meta.log(`表情包下载失败：HTTP ${res.status}`); return }
+    const buf = Buffer.from(await res.arrayBuffer())
+    if (!buf.length || buf.length > 8 * 1024 * 1024) return
+    // 按魔数定扩展名（表情常见 gif/png/jpg/webp）
+    let ext = '.gif'
+    if (buf[0] === 0xff && buf[1] === 0xd8) ext = '.jpg'
+    else if (buf[0] === 0x89 && buf[1] === 0x50) ext = '.png'
+    else if (buf.slice(0, 3).toString() === 'GIF') ext = '.gif'
+    else if (buf.length > 12 && buf.slice(8, 12).toString() === 'WEBP') ext = '.webp'
+    const tmp = join(tmpDir, `stk-${Date.now()}-${Math.random().toString(36).slice(2, 6)}${ext}`)
+    writeFileSync(tmp, buf)
+    const item = lib.add({
+      srcPath: tmp, xml, kind: 'emoticon', source: 'collected',
+      sender: meta.sender, senderName: meta.senderName, roomId: meta.roomId, context: meta.context,
+    })
+    if (item) {
+      meta.log(`表情包已收藏：${item.id}${item.file ? '（含图片，可发送）' : '（仅 XML）'} ${Math.round(buf.length / 1024)}KB`)
+    }
+    try { unlinkSync(tmp) } catch { /* ignore */ }
+  } catch (e) {
+    try { meta.log('表情包下载异常：' + String(e?.message || e).slice(0, 100)) } catch { /* ignore */ }
+  }
+}
 
 // ── 读图片实际分辨率（判断拿到的是不是缩略图）──
 //   JPEG 扫 SOF 段；PNG 读 IHDR；GIF 读逻辑屏；WebP 读 VP8X/VP8/VP8L。
@@ -62,7 +103,7 @@ function imageDims(buf) {
 }
 
 import { fileURLToPath } from 'node:url'
-import { resolveDataRoot, findLatestDat, decryptDat } from './wechat-image.mjs'
+import { resolveDataRoot, findLatestDat, findDatCandidates, decryptDat } from './wechat-image.mjs'
 import { xmlVideoMeta, findVideoCover, findVideoFile, probeVideo } from './wechat-video.mjs'
 import { DbPoller } from './db-poller.mjs'
 
@@ -440,6 +481,14 @@ export class WeChatHookBridge {
         context: (this._recentText.get(roomid) || []).slice(-3).join(' '), kind: 'emoticon',
       })
       if (st) this.emit('sticker', { id: st.id, roomId: m.roomId, sender, senderName: m.senderName, context: '' })
+        // ★ 顺手把表情图片本体也下下来收藏（XML 那条路在本构建会崩，所以靠图片发送）
+        void collectStickerImage(content, this.stickers, {
+          sender,
+          senderName: m.senderName,
+          roomId: m.roomId,
+          context: (this._recentText.get(roomid) || []).slice(-3).join(' '),
+          log: (s) => this.log(s),
+        })
     }
     return m
   }
@@ -991,7 +1040,7 @@ export class WeChatHookBridge {
   async fetchVideo(xml, roomId = '', nearTs = 0, frames = 6) {
     const log = (s) => this.log(s)
     let root = ''
-    try { root = await resolveDataRoot(this.api.bind(this)) } catch { /* ignore */ }
+    try { root = await resolveDataRoot(this.api.bind(this), this.selfWxid || '') } catch { /* ignore */ }
     const meta = xmlVideoMeta(xml)
     const tag = `video-${Number(nearTs) || Date.now()}-${Math.random().toString(36).slice(2, 6)}`
 
@@ -1001,7 +1050,7 @@ export class WeChatHookBridge {
         nearTs: Number(nearTs) || 0, declaredBytes: meta.length, log,
       })
       if (f) {
-        const r = probeVideo(f.path, { frames: Number(frames) || 6, tag, log })
+        const r = probeVideo(f.path, { frames: Number(frames) || 6, fps: 1, tag, log })
         if (r?.sheet) {
           this.log(`视频内容已抽取：${r.frames} 帧拼成联系表（${Math.round(r.sheetBytes / 1024)}KB）`
             + `｜时长 ${r.durationSec}s${r.wav ? `｜音轨 ${r.wavSeconds}s → ${r.wav}` : '｜无音轨'}`)
@@ -1038,6 +1087,7 @@ export class WeChatHookBridge {
   }
 
   async fetchMedia(xml, type, roomId = '', nearTs = 0) {
+    this.log(`fetchMedia 收到：type=${type} roomId=${roomId || "(空)"} ts=${nearTs}`)
     // ── 普通图片（type 3）：回调里没有下载地址，走"本地 .dat 解密"这条路 ──
     // 微信把收到的图片以 V2 加密存在
     //   <数据目录>\msg\attach\<md5(群id)>\<年-月>\Img\<md5>[_t|_h].dat
@@ -1045,31 +1095,73 @@ export class WeChatHookBridge {
     // 所以我们自己解密（lib/wechat-image.mjs）。
     if (type === 3 && roomId) {
       try {
-        const root = await resolveDataRoot(this.api.bind(this))
-        const f = findLatestDat(root, roomId, { nearTs: Number(nearTs) || 0, toleranceMs: 6 * 60_000 })
-        if (f) {
-          let out = decryptDat(f.path, { tag: 'chat' })
-          if (!out) {
-            // 密钥可能轮换了（换登录/重启后会变）→ 重扫一次内存再试
-            this.log('解密失败，尝试重新扫描图片密钥…')
-            try { execFileSync(process.env.PYTHON_EXE || 'D:\\Python311\\python.exe', [join(dirname(fileURLToPath(import.meta.url)), 'decode-wechat-image.py'), '--find-key'], { timeout: 300_000, stdio: 'ignore' }) } catch { /* ignore */ }
-            out = decryptDat(f.path, { tag: 'chat-retry' })
+        const root = await resolveDataRoot(this.api.bind(this), this.selfWxid || '')
+        // ★ 候选顺序：_h 高清预览 > _t 缩略图 > 原图(WXGF)
+        //   实测原图 .dat 常不完整（45~70KB），解出来是纯白/纯绿花屏；
+        //   而 _h/_t 是完整小 JPEG，反而看得清。所以按可靠性试，并校验亮度。
+        let cands = findDatCandidates(root, roomId, { nearTs: Number(nearTs) || 0, toleranceMs: 30 * 60_000 })
+        // ★ 微信的高清图（_h.dat）常常晚几秒才下完 → 如果这组还没有 _h，等一会儿再查两次
+        if (!cands.some((c) => c.label.includes('_h'))) {
+          for (let attempt = 1; attempt <= 3; attempt++) {
+            await new Promise((r) => setTimeout(r, 15000))
+            const again = findDatCandidates(root, roomId, { nearTs: Number(nearTs) || 0, toleranceMs: 30 * 60_000 })
+            if (again.some((c) => c.label.includes('_h'))) {
+              this.log('等了 ' + (attempt * 15) + ' 秒，高清图(_h)出现了 → 用高清的')
+              cands = again
+              break
+            }
           }
-          if (out) {
-            // ★ 记录真实分辨率；本地若只有缩略图（_t.dat），再去 CDN 试更大的
-            let dims = null
-            try { dims = imageDims(readFileSync(out)) } catch { /* ignore */ }
-            const longSide = dims ? Math.max(dims.w, dims.h) : 0
-            this.log(`本地解密图片成功：${f.name} → ${out}（${Math.round(f.size / 1024)}KB`
-              + `${dims ? `，${dims.w}x${dims.h}` : ''}）`)
-            if (longSide >= 700) return out
-            this.log(`本地解出的图偏小（${dims ? longSide + 'px' : '尺寸未知'}）→ 再去 CDN 找更大的原图`)
-            const bigger = await this.tryCdnImages(xml, type)
-            return bigger || out
-          }
-          this.log(`本地解密失败（密钥可能失效）：${f.name}`)
-        } else {
+        }
+        if (!cands.length) {
           this.log('本地没找到这张图对应的 .dat（可能未下载）')
+        } else {
+          let picked = null
+          for (const c of cands) {
+            let r = decryptDat(c.path, { tag: 'chat' })
+            if (!r) {
+              this.log(`解密失败（${c.label}），尝试重扫图片密钥…`)
+              try {
+                execFileSync(process.env.PYTHON_EXE || 'D:\\Python311\\python.exe',
+                  [join(dirname(fileURLToPath(import.meta.url)), 'decode-wechat-image.py'), '--find-key'],
+                  { timeout: 300_000, stdio: 'ignore' })
+              } catch { /* ignore */ }
+              r = decryptDat(c.path, { tag: 'chat-retry' })
+            }
+            if (!r) { this.log(`解密失败：${c.name}`); continue }
+            const bright = r.brightness
+            const neon = (r.neon === undefined) ? -1 : r.neon
+            // ★ 判据：纯白（亮度≥250）= 占位帧；霓虹占比≥30% = HEVC 截断导致的花屏
+            const unknown = (bright < 0 || neon < 0)   // 测不出指标（转换失败）= 不可用
+            const white = bright >= 250
+            const glitch = neon >= 30
+            const ok = !unknown && !white && !glitch
+            this.log(`解密 ${c.label} ${c.name}（${Math.round(c.size / 1024)}KB，亮度${bright}，霓虹${neon}%）`
+              + (ok ? ' ✓ 可用' : (unknown ? ' ✗ 转换失败/测不出，换下一个' : (white ? ' ✗ 纯白，换下一个' : ' ✗ 花屏，换下一个'))))
+            if (ok) { picked = r; break }
+            try { unlinkSync(r.path) } catch { /* ignore */ }
+          }
+          if (picked) {
+            // ★ 修好 XOR 密钥后，同一张图的多份副本都能解出来了 → 全部解一遍，挑【像素面积最大】的
+            //   实测：中图(无后缀)解出 1154x1964，而 Bubble 只有 293x500 —— 只取第一个会拿到小的
+            const valid = [{ ...picked }]
+            for (const c of cands) {
+              if (valid.length >= 4) break            // 最多再解 3 个，控制耗时
+              if (String(c.path) === String(picked.path)) continue
+              const r2 = decryptDat(c.path, { tag: "chat-more" })
+              if (!r2) continue
+              const bad2 = r2.brightness < 0 || r2.neon < 0 || r2.brightness >= 250 || r2.neon >= 30
+              if (bad2) { try { unlinkSync(r2.path) } catch { /* ignore */ } continue }
+              valid.push(r2)
+              this.log(`  备选 ${c.label}：${r2.dims ? r2.dims.w + "x" + r2.dims.h : "?"}`)
+            }
+            const area = (r) => (r.dims ? r.dims.w * r.dims.h : 0)
+            valid.sort((a, b) => area(b) - area(a))
+            const best = valid[0]
+            for (const r of valid) { if (r !== best) { try { unlinkSync(r.path) } catch { /* ignore */ } } }
+            this.log(`采用分辨率最高的那张：` + (best.dims ? `${best.dims.w}x${best.dims.h}` : "?") + ` → ${best.path}`)
+            return best.path
+          }
+          this.log('本地所有候选都不可用（白图/花屏）→ 试 CDN')
         }
       } catch (e) {
         this.log('本地解密路径异常：' + String(e?.message || e))
@@ -1085,6 +1177,22 @@ export class WeChatHookBridge {
    * 为什么：微信 CDN 对无鉴权请求经常只回缩略图，而且很多消息**只有** cdnthumburl。
    * 以前按「第一个存在的 URL 就拿」→ 常常拿到 8KB 缩略图 → 视觉模型看不清细节。
    */
+  /** GIF 表情 → 首帧 PNG（识图链路不吃 GIF；GIF 本体仍留给表情库） */
+  gifToPng(gifPath) {
+    try {
+      const ff = process.env.FFMPEG_EXE
+        || 'D:\\Python311\\Lib\\site-packages\\imageio_ffmpeg\\binaries\\ffmpeg-win-x86_64-v7.1.exe'
+      if (!existsSync(ff)) return ''
+      const out = gifPath.replace(/\.gif$/i, '') + '-frame0.png'
+      execFileSync(ff, ['-hide_banner', '-loglevel', 'error', '-y', '-i', gifPath,
+        '-frames:v', '1', out], { timeout: 20_000, stdio: 'ignore' })
+      return existsSync(out) ? out : ''
+    } catch (e) {
+      this.log('GIF 转 PNG 失败：' + String(e?.message || e).slice(0, 80))
+      return ''
+    }
+  }
+
   async tryCdnImages(xml, type) {
     const attr = (k) => {
       const m = new RegExp(`${k}="([^"]*)"`).exec(xml)
@@ -1098,7 +1206,13 @@ export class WeChatHookBridge {
       const u = attr(k)
       if (/^https?:\/\//i.test(u) && !cands.some((x) => x.url === u)) cands.push({ url: u, label })
     }
-    if (!cands.length) return null
+    if (!cands.length) {
+      const raw = ['cdnbigimgurl','cdnmidimgurl','cdnthumburl','cdnurl','encrypturl']
+        .map((k) => k + "=" + (attr(k) ? String(attr(k)).length + "字符" : "空"))
+        .filter((s) => !s.endsWith("空"))
+      this.log('CDN 候选：' + (raw.length ? raw.join(' ') : 'XML 里一个地址都没有'))
+      return null
+    }
     let best = null
     for (const c of cands) {
       try {
@@ -1106,6 +1220,12 @@ export class WeChatHookBridge {
         if (!r.ok) { this.log(`取图(${c.label}) HTTP ${r.status}`); continue }
         const buf = Buffer.from(await r.arrayBuffer())
         if (buf.length < 100) { this.log(`取图(${c.label}) 内容过小`); continue }
+        // ★ 魔数校验：加密封装（encrypturl 那条）头是随机的，会污染表情库和识图
+        const isImg = (buf[0] === 0xff && buf[1] === 0xd8)
+          || (buf[0] === 0x89 && buf[1] === 0x50)
+          || buf.slice(0, 3).toString('latin1') === 'GIF'
+          || (buf.length > 12 && buf.slice(8, 12).toString('latin1') === 'WEBP')
+        if (!isImg) { this.log(`取图(${c.label}) 不是图片（加密封装？）跳过`); continue }
         const d = imageDims(buf)
         const area = d ? d.w * d.h : buf.length
         this.log(`取图(${c.label}) ${Math.round(buf.length / 1024)}KB` + (d ? ` ${d.w}x${d.h}` : ''))
@@ -1126,6 +1246,23 @@ export class WeChatHookBridge {
     writeFileSync(file, best.buf)
     this.log(`取到媒体图(${best.label})：${file}（${Math.round(best.buf.length / 1024)}KB`
       + `${best.d ? `，${best.d.w}x${best.d.h}` : ''}）`)
+    // ★ 表情包（type=47）：顺手收藏进表情库 —— 插件每次都会为表情调 fetchMedia，
+    //   所以这里是最可靠的收藏点（比回调路径稳：数据库轮询来的表情不经过回调）。
+    if (type === 47 && this.stickers) {
+      try {
+        const st = this.stickers.add({
+          srcPath: file, xml, kind: 'emoticon', source: 'collected',
+            sender: '', senderName: '', roomId: '', context: '',
+        })
+        if (st) this.log(`表情包已收藏：${st.id}（含图片，可发送）${Math.round(best.buf.length / 1024)}KB`)
+          try { (this._stickerByFile ||= new Map()).set(file, st.id) } catch { /* ignore */ }
+      } catch (e) { this.log('表情包收藏失败：' + String(e?.message || e).slice(0, 80)) }
+    }
+      // ★ GIF 动图识图链路不支持 → 转首帧 PNG 返回；GIF 本体已存进表情库
+      if (type === 47 && String(file).toLowerCase().endsWith('.gif')) {
+        const png = this.gifToPng(file)
+        if (png) { this.log(`表情 GIF 转首帧 PNG：${png}`); return png }
+      }
     return file
   }
 
