@@ -35,6 +35,58 @@ import { fileURLToPath } from 'node:url'
 // ★★ 角色文字描述（图生图 i2i 换成了文生图 t2i，靠这段文字锁定角色形象）
 //   为什么换：Agnes 的 i2i 队列很小，高峰期一直 503（实测熬 3 分钟都不通）；
 //   而 t2i 队列空，11 秒就出图，只要描述够细，出来的还是同一只鲸鱼娘（已实测对比）。
+// ★★ 本地 ComfyUI 用的【英文 danbooru 标签】映射（三个底模都是标签流，中文几乎无效）
+export const EN_EMOTION = {
+  '大笑': 'huge smile, open mouth, closed eyes, laughing, happy',
+  '开心': 'smile, happy, closed mouth, blush',
+  '得意': 'smug, smirk, confident, one eye closed',
+  '无语': 'expressionless, half-closed eyes, annoyed, sigh',
+  '生气': 'angry, pout, puffed cheeks, blush',
+  '委屈': 'teary eyes, pout, sad, trembling',
+  '震惊': 'surprised, wide eyes, open mouth, exclamation',
+  '困': 'sleepy, yawning, half-closed eyes',
+  '馋': 'drooling, sparkling eyes, hungry, looking at food',
+  '害羞': 'blush, shy, looking away, embarrassed',
+  '认真': 'serious, focused, furrowed brow, determined',
+  '比心': 'heart hands, smile, love',
+  '点赞': 'thumbs up, smug, grin',
+  '疑惑': 'confused, head tilt, question mark, puzzled',
+  '晚安': 'sleeping, holding pillow, closed eyes',
+  '摸鱼': 'lying down, lazy, relaxed, slacking off',
+};
+export const EN_ACTIVITY = {
+  '吃饭': 'eating, holding bowl, rice, chopsticks, dining table',
+  '睡觉': 'sleeping in bed, blanket, closed eyes',
+  '打游戏': 'playing video game, holding gamepad, headphones',
+  '上班': 'office, desk, computer, tired, tie',
+  '加班': 'office at night, desk lamp, overtime, tired',
+  '写代码': 'coding, multiple monitors, keyboard, programmer',
+  '喝奶茶': 'holding bubble tea, drinking, straw',
+  '做饭': 'cooking, kitchen, apron, frying pan',
+  '洗澡': 'bubble bath, bathtub, towel on head',
+  '看书': 'reading book, cup of tea, sitting',
+  '发呆': 'spacing out, staring, window, clouds',
+  '健身': 'dumbbell, workout, sweating, gym',
+  '追剧': 'watching tv, sofa, popcorn, blanket',
+  '逛街': 'shopping bags, street, storefront',
+  '起床': 'just woke up, messy hair, rubbing eyes, blanket',
+  '下雨': 'umbrella, rain, puddle, wet',
+  '夏天': 'fan, watermelon, summer, hot',
+  '冬天': 'thick blanket, shivering, snow, breath vapor',
+  '被夸': 'flustered, blush, happy, hearts',
+  '被骂': 'sad, head down, drooping ears, dejected',
+  '等消息': 'looking at phone, waiting, anxious, ellipsis',
+};
+// 本地模型用的角色标签（配参考图 img2img 用，越短越稳）
+export const EN_CHARACTER =
+  'blue hair, long hair, gradient hair, blue eyes, maid outfit, white apron, ' +
+  'whale tail, fin ears, ahoge, chibi, cute, single character';
+// 本地模型的通用质量标签
+export const EN_QUALITY = 'masterpiece, best quality, great quality, absurdres, 1girl, solo, sticker';
+export const EN_NEGATIVE =
+  'lowres, bad anatomy, bad hands, extra digits, fewer digits, text, watermark, signature, ' +
+  'worst quality, low quality, blurry, multiple girls, 2girls, 3girls, nsfw';
+
 export const CHARACTER_DESC =
   '一个 Q 版可爱的鲸鱼娘角色：深蓝到浅蓝渐变的及腰长发，' +
   '白色蕾丝荷叶边头饰（像女仆帽），发间有两个小小的鲸鱼鳍状耳朵装饰，' +
@@ -65,6 +117,11 @@ export function loadImageConfig() {
     // i2i = 图生图（带参考图，角色最像，但 Agnes 的 i2i 队列很小容易 503）
     // t2i = 文生图（不带图，队列空、快，但角色只有约 95% 像）
     mode: String(process.env.IMAGE_MODE || fileCfg.mode || 'i2i'),
+    // backend: comfy = 用本机 ComfyUI（推荐，10 秒出图、不排队）；agnes = 用云端（会排队 503）
+    backend: String(process.env.IMAGE_BACKEND || fileCfg.backend || 'comfy'),
+    comfyUrl: String(process.env.COMFY_URL || fileCfg.comfyUrl || 'http://127.0.0.1:8188'),
+    comfyModel: String(process.env.COMFY_MODEL || fileCfg.comfyModel || 'animagineXL40_opt.safetensors'),
+    comfyDenoise: Number(process.env.COMFY_DENOISE || fileCfg.comfyDenoise || 0.55),
   }
 }
 
@@ -344,5 +401,124 @@ async function _generateStickerImageInner({
   }
 }
 
+// ★★ 本地 ComfyUI 后端（图生图）：上传参考图 → img2img → 拉回图片
+//   为什么用它：Agnes 的 i2i 队列太窄（高峰期一直 503，熬 3 分钟都不通），
+//   本机 ComfyUI 单卡单队列串行，实测 10 秒出图，且角色一致（参考图 + denoise 0.55）。
+async function generateViaComfy({ emotion, refImage, outDir, extra = '', size = 512, log = () => {} }, cfg) {
+  const BASE = String(cfg.comfyUrl || 'http://127.0.0.1:8188').replace(/\/+$/, '')
+  const fs = await import('node:fs')
+  const pathmod = await import('node:path')
+
+  // 0) 服务自检
+  try {
+    const r = await fetch(BASE + '/system_stats', { signal: AbortSignal.timeout(8000) })
+    if (!r.ok) throw new Error('HTTP ' + r.status)
+  } catch (e) {
+    throw new Error('本地生图服务没启动（' + BASE + '）：双击 D:\\本地部署生图模型\\启动ComfyUI.bat。原始错误：' + String(e?.message || e))
+  }
+
+  // 1) 上传参考图（ComfyUI input 目录，幂等覆盖）
+  const refName = 'dsh_ref.png'
+  const refBuf = fs.readFileSync(refImage)
+  const boundary = '----dsh' + Date.now()
+  const parts = []
+  for (const [k, v] of [['type', 'input'], ['overwrite', 'true']]) {
+    parts.push(Buffer.from('--' + boundary + '\r\nContent-Disposition: form-data; name="' + k + '"\r\n\r\n' + v + '\r\n'))
+  }
+  parts.push(Buffer.from('--' + boundary + '\r\nContent-Disposition: form-data; name="image"; filename="' + refName + '"\r\nContent-Type: image/png\r\n\r\n'))
+  parts.push(refBuf)
+  parts.push(Buffer.from('\r\n--' + boundary + '--\r\n'))
+  const upRes = await fetch(BASE + '/upload/image', {
+    method: 'POST', body: Buffer.concat(parts),
+    headers: { 'Content-Type': 'multipart/form-data; boundary=' + boundary },
+    signal: AbortSignal.timeout(60_000),
+  })
+  if (!upRes.ok) throw new Error('上传参考图失败 HTTP ' + upRes.status)
+  const upJson = await upRes.json()
+  const uploaded = upJson?.name || refName
+
+  // 2) 组装 img2img 工作流
+  const subj = EN_EMOTION[emotion] || EN_ACTIVITY[emotion] || String(emotion || 'smile')
+  const pos = [EN_QUALITY, EN_CHARACTER, subj, extra ? String(extra) : '', 'simple background, white background']
+    .filter(Boolean).join(', ')
+  const model = String(cfg.comfyModel || 'animagineXL40_opt.safetensors')
+  const isSd15 = /meinamix|sd15|v1-5/i.test(model)
+  const w = isSd15 ? 512 : 832
+  const h = isSd15 ? 768 : 1216
+  const wf = {
+    '4': { class_type: 'CheckpointLoaderSimple', inputs: { ckpt_name: model } },
+    '10': { class_type: 'LoadImage', inputs: { image: uploaded } },
+    '11': { class_type: 'VAEEncode', inputs: { pixels: ['10', 0], vae: ['4', 2] } },
+    '6': { class_type: 'CLIPTextEncode', inputs: { text: pos, clip: ['4', 1] } },
+    '7': { class_type: 'CLIPTextEncode', inputs: { text: EN_NEGATIVE, clip: ['4', 1] } },
+    '3': { class_type: 'KSampler', inputs: {
+      seed: Math.floor(Math.random() * 1e9), steps: isSd15 ? 26 : 28, cfg: isSd15 ? 7.0 : 5.0,
+      sampler_name: isSd15 ? 'dpmpp_2m' : 'euler_ancestral', scheduler: isSd15 ? 'karras' : 'normal',
+      denoise: Number(cfg.comfyDenoise || 0.55),
+      model: ['4', 0], positive: ['6', 0], negative: ['7', 0], latent_image: ['11', 0] } },
+    '8': { class_type: 'VAEDecode', inputs: { samples: ['3', 0], vae: ['4', 2] } },
+    '9': { class_type: 'SaveImage', inputs: { filename_prefix: 'dsh_sticker', images: ['8', 0] } },
+  }
+  log(`本地出图(comfy)：${emotion}｜model=${model}｜denoise=${wf['3'].inputs.denoise}｜${w}x${h}`)
+
+  // 3) 提交 + 轮询
+  const subRes = await fetch(BASE + '/prompt', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ prompt: wf }), signal: AbortSignal.timeout(30_000),
+  })
+  const subJson = await subRes.json()
+  if (!subRes.ok || !subJson?.prompt_id) {
+    throw new Error('提交失败：' + JSON.stringify(subJson?.node_errors || subJson).slice(0, 300))
+  }
+  const pid = subJson.prompt_id
+  let img = null
+  for (let i = 0; i < 150; i++) {
+    await new Promise((r) => setTimeout(r, 1500))
+    const hr = await fetch(BASE + '/history/' + pid, { signal: AbortSignal.timeout(20_000) })
+    const hj = await hr.json()
+    const ent = hj?.[pid]
+    if (!ent) continue
+    if (ent.status?.status_str === 'error') {
+      throw new Error('本地出图报错：' + JSON.stringify(ent.status?.messages || '').slice(0, 300))
+    }
+    for (const k of Object.keys(ent.outputs || {})) {
+      if (ent.outputs[k]?.images?.length) { img = ent.outputs[k].images[0]; break }
+    }
+    break
+  }
+  if (!img) throw new Error('本地出图超时（4 分钟内没出图）')
+
+  // 4) 拉图
+  const qs = new URLSearchParams({ filename: img.filename, subfolder: img.subfolder || '', type: 'output' })
+  const vRes = await fetch(BASE + '/view?' + qs, { signal: AbortSignal.timeout(120_000) })
+  if (!vRes.ok) throw new Error('取图失败 HTTP ' + vRes.status)
+  const buf = Buffer.from(await vRes.arrayBuffer())
+
+  fs.mkdirSync(outDir, { recursive: true })
+  const rawPath = pathmod.join(outDir, 'comfy-' + String(emotion).replace(/[\\/:*?"<>|]/g, '_') + '-' + Date.now() + '.png')
+  fs.writeFileSync(rawPath, buf)
+
+  // 5) 缩到表情包尺寸
+  try {
+    const { Jimp } = await import('jimp')
+    const im = await Jimp.read(rawPath)
+    im.resize({ w: size, h: size })
+    const out = rawPath.replace(/\.png$/, '.jpg')
+    fs.writeFileSync(out, await im.getBuffer('image/jpeg', { quality: 88 }))
+    try { fs.unlinkSync(rawPath) } catch { }
+    log('本地出图完成：' + out + '（' + Math.round(fs.statSync(out).size / 1024) + 'KB）')
+    return { file: out, raw: out, url: BASE + '/view?filename=' + encodeURIComponent(img.filename) }
+  } catch (e) {
+    log('缩图失败（直接用原图）：' + String(e?.message || e).slice(0, 80))
+    return { file: rawPath, raw: rawPath, url: '' }
+  }
+}
+
 // 导出包装：所有调用都串行化
-export function generateStickerImage(opts) { return withGenLock(() => _generateStickerImageInner(opts)) }
+export function generateStickerImage(opts) {
+  const cfg = loadImageConfig()
+  if (String(cfg.backend || '').toLowerCase() === 'comfy') {
+    return withGenLock(() => generateViaComfy(opts, cfg))
+  }
+  return withGenLock(() => _generateStickerImageInner(opts))
+}
