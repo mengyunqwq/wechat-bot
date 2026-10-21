@@ -431,33 +431,102 @@ async function generateViaComfy({ emotion, refImage, outDir, extra = '', size = 
     const r = await fetch(BASE + '/system_stats', { signal: AbortSignal.timeout(8000) })
     if (!r.ok) throw new Error('HTTP ' + r.status)
   } catch (e) {
-    throw new Error('本地生图服务没启动（' + BASE + '）：双击 D:\\本地部署生图模型\\启动ComfyUI.bat。原始错误：' + String(e?.message || e))
+    throw new Error('本地生图服务没启动（' + BASE + '）：双击 本地部署生图模型/启动ComfyUI.bat。原始错误：' + String(e?.message || e))
   }
 
-  // 1) 上传参考图（ComfyUI input 目录，幂等覆盖）
-  const refName = 'dsh_ref.png'
-  const refBuf = fs.readFileSync(refImage)
-  const boundary = '----dsh' + Date.now()
-  const parts = []
-  for (const [k, v] of [['type', 'input'], ['overwrite', 'true']]) {
-    parts.push(Buffer.from('--' + boundary + '\r\nContent-Disposition: form-data; name="' + k + '"\r\n\r\n' + v + '\r\n'))
+  // ── 工具：上传图片到 ComfyUI input ──
+  async function uploadImage(buf, name) {
+    const bd = '----dsh' + Date.now() + Math.floor(Math.random() * 1e6)
+    const ps = []
+    for (const [k, v] of [['type', 'input'], ['overwrite', 'true']]) {
+      ps.push(Buffer.from('--' + bd + '\r\nContent-Disposition: form-data; name="' + k + '"\r\n\r\n' + v + '\r\n'))
+    }
+    ps.push(Buffer.from('--' + bd + '\r\nContent-Disposition: form-data; name="image"; filename="' + name + '"\r\nContent-Type: image/png\r\n\r\n'))
+    ps.push(buf)
+    ps.push(Buffer.from('\r\n--' + bd + '--\r\n'))
+    const res = await fetch(BASE + '/upload/image', {
+      method: 'POST', body: Buffer.concat(ps),
+      headers: { 'Content-Type': 'multipart/form-data; boundary=' + bd },
+      signal: AbortSignal.timeout(60_000),
+    })
+    if (!res.ok) throw new Error('上传图片失败 HTTP ' + res.status)
+    const j = await res.json()
+    return j?.name || name
   }
-  parts.push(Buffer.from('--' + boundary + '\r\nContent-Disposition: form-data; name="image"; filename="' + refName + '"\r\nContent-Type: image/png\r\n\r\n'))
-  parts.push(refBuf)
-  parts.push(Buffer.from('\r\n--' + boundary + '--\r\n'))
-  const upRes = await fetch(BASE + '/upload/image', {
-    method: 'POST', body: Buffer.concat(parts),
-    headers: { 'Content-Type': 'multipart/form-data; boundary=' + boundary },
-    signal: AbortSignal.timeout(60_000),
-  })
-  if (!upRes.ok) throw new Error('上传参考图失败 HTTP ' + upRes.status)
-  const upJson = await upRes.json()
-  const uploaded = upJson?.name || refName
 
-  // 2) 组装 img2img 工作流
+  // ── 工具：提交工作流并等图，返回图片二进制 ──
+  async function runWorkflow(wf, tag = '') {
+    const sub = await fetch(BASE + '/prompt', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ prompt: wf }), signal: AbortSignal.timeout(30_000),
+    })
+    const sj = await sub.json()
+    if (!sub.ok || !sj?.prompt_id) {
+      throw new Error('提交失败' + (tag ? '(' + tag + ')' : '') + '：' + JSON.stringify(sj?.node_errors || sj).slice(0, 300))
+    }
+    const pid = sj.prompt_id
+    let img = null
+    for (let i = 0; i < 200; i++) {
+      await new Promise((r) => setTimeout(r, 1500))
+      const hr = await fetch(BASE + '/history/' + pid, { signal: AbortSignal.timeout(20_000) })
+      const hj = await hr.json()
+      const ent = hj?.[pid]
+      if (!ent) continue
+      if (ent.status?.status_str === 'error') {
+        throw new Error('出图报错' + (tag ? '(' + tag + ')' : '') + '：' + JSON.stringify(ent.status?.messages || '').slice(0, 300))
+      }
+      for (const k of Object.keys(ent.outputs || {})) {
+        if (ent.outputs[k]?.images?.length) { img = ent.outputs[k].images[0]; break }
+      }
+      break
+    }
+    if (!img) { await freeComfyVram(BASE, log); throw new Error('出图超时' + (tag ? '(' + tag + ')' : '') + '（5 分钟内没出图）') }
+    const qs = new URLSearchParams({ filename: img.filename, subfolder: img.subfolder || '', type: 'output' })
+    const vRes = await fetch(BASE + '/view?' + qs, { signal: AbortSignal.timeout(120_000) })
+    if (!vRes.ok) throw new Error('取图失败 HTTP ' + vRes.status)
+    return { buf: Buffer.from(await vRes.arrayBuffer()), filename: img.filename }
+  }
+
+  // ── 工具：从一张「角色 + 纯色背景」的图里算出背景蒙版（边缘 flood fill）──
+  //   只吃【与边框相连】的近白/近纯色区域 → 角色身上的白围裙、白蕾丝不会被误伤
+  async function bgMaskOf(pngBuf) {
+    const { Jimp } = await import('jimp')
+    const im = await Jimp.read(pngBuf)
+    const W = im.bitmap.width, H = im.bitmap.height
+    const data = im.bitmap.data
+    const isBg = (x, y) => {
+      const i = (y * W + x) * 4
+      const r = data[i], g = data[i + 1], b = data[i + 2]
+      const mx = Math.max(r, g, b), mn = Math.min(r, g, b)
+      return mx >= 225 && mx - mn <= 24
+    }
+    const seen = new Uint8Array(W * H)
+    const stack = []
+    for (let x = 0; x < W; x++) { for (const y of [0, H - 1]) { if (!seen[y * W + x] && isBg(x, y)) { seen[y * W + x] = 1; stack.push(y * W + x) } } }
+    for (let y = 0; y < H; y++) { for (const x of [0, W - 1]) { if (!seen[y * W + x] && isBg(x, y)) { seen[y * W + x] = 1; stack.push(y * W + x) } } }
+    while (stack.length) {
+      const idx = stack.pop()
+      const x = idx % W, y = (idx - x) / W
+      const nb = []
+      if (x > 0) nb.push(idx - 1)
+      if (x < W - 1) nb.push(idx + 1)
+      if (y > 0) nb.push(idx - W)
+      if (y < H - 1) nb.push(idx + W)
+      for (const n of nb) {
+        if (!seen[n] && isBg(n % W, (n - (n % W)) / W)) { seen[n] = 1; stack.push(n) }
+      }
+    }
+    const out = new Jimp({ width: W, height: H, color: 0x000000ff })
+    let bgCount = 0
+    for (let i = 0; i < W * H; i++) {
+      if (seen[i]) { out.bitmap.data[i * 4] = 255; out.bitmap.data[i * 4 + 1] = 255; out.bitmap.data[i * 4 + 2] = 255; bgCount++ }
+      out.bitmap.data[i * 4 + 3] = 255
+    }
+    return { buf: await out.getBuffer('image/png'), pct: (bgCount * 100) / (W * H) }
+  }
+
+  // ── 提示词 ──
   const subj = EN_EMOTION[emotion] || EN_ACTIVITY[emotion] || String(emotion || 'smile')
-  // ★ 背景/动作可以自由发挥，只锁角色（用户要求）。
-  //   注意：这里【绝不能】写 "white background / simple background" —— 那等于强制白底。
   const SCENES = [
     'outdoors, street, city lights', 'cafe, window seat, indoor',
     'night market, lanterns, food stalls', 'park, grass, sunny, cherry blossoms',
@@ -467,112 +536,138 @@ async function generateViaComfy({ emotion, refImage, outDir, extra = '', size = 
     'snow field, footprints', 'rooftop, city skyline',
     'cozy room, books piled up, warm lamp', 'market, vegetable stalls',
   ]
-  // extra 里如果已经描述了场景，就不再随机（以调用方为准）
   const sceneTag = extra ? '' : SCENES[Math.floor(Math.random() * SCENES.length)]
-  // ★ 场景放最前面（SD 里越靠前权重越高）→ 保证背景真的按场景画
-  //   角色细节靠 [参考图 img2img + 服装标签 maid outfit / white apron] 锁住
-  const pos = [extra ? String(extra) : '', sceneTag,
-    'detailed background, scenery, ' + subj,
-    EN_CHARACTER,
-    'masterpiece, best quality, very aesthetic, sticker']
+  // 第一段（改动作）用的提示词：动作在前，角色标签跟上（角色靠参考图 + 标签双重锚定）
+  const pos1 = [subj, extra ? String(extra) : '', sceneTag,
+    EN_CHARACTER, 'masterpiece, best quality, very aesthetic, detailed background']
     .filter(Boolean).join(', ')
-  // ★★ 三种模式：
-  //   ipadapter（推荐，默认）：t2i + IPAdapter 锁角色 —— 动作/背景随便变，角色细节由 IPAdapter 图"教"给模型。
-  //       8G 显存下必须用 SD1.5（SDXL + IPAdapter + CLIP-ViT-H 会 OOM，实测崩过一次）
-  //   i2i        ：img2img（参考图整图混合）—— 背景不太变得动，衣服容易漂
-  //   inpaint    ：只重画背景 —— 角色 100% 不变但动作也变不了
-  const MODE = String(cfg.comfyMode || 'ipadapter')
+  // 第二段（换背景）用的提示词：只描述场景，不给角色标签（免得往背景里画人）
+  const pos2 = [extra ? String(extra) : '', sceneTag,
+    'detailed background, scenery, interior, masterpiece, best quality, very aesthetic']
+    .filter(Boolean).join(', ')
+
+  const MODE = String(cfg.comfyMode || 'twopass')
   const model = String(cfg.comfyModel || 'animagineXL40_opt.safetensors')
   const isSd15 = /meinamix|sd15|v1-5/i.test(model)
-  // ★ SDXL 在 8G 上跑 IPAdapter：必须让 ComfyUI 带 --vram-headroom 2.5 启动（已写进 启动ComfyUI.bat）
-  //   且分辨率压到 768x1024（832x1216 会 OOM）。实测 768x1024 + headroom 2.5 = 74 秒稳定出图。
   const w = Number(cfg.comfyWidth || (isSd15 ? 512 : 768))
   const h = Number(cfg.comfyHeight || (isSd15 ? 768 : 1024))
-  let wf
-  if (MODE === 'ipadapter') {
-    wf = {
-      '4': { class_type: 'CheckpointLoaderSimple', inputs: { ckpt_name: model } },
-      // IPAdapter 三件套：模型 + CLIP Vision + 参考图
-      '20': { class_type: 'IPAdapterModelLoader', inputs: {
-        ipadapter_file: String(cfg.ipadapterFile || (isSd15
-          ? 'ip-adapter-plus_sd15.safetensors'
-          : 'ip-adapter-plus_sdxl_vit-h.safetensors')) } },
-      '21': { class_type: 'CLIPVisionLoader', inputs: {
-        clip_name: String(cfg.clipVision || 'CLIP-ViT-H-14-laion2B-s32B-b79K.safetensors') } },
-      '10': { class_type: 'LoadImage', inputs: { image: uploaded } },
-      '22': { class_type: 'IPAdapterAdvanced', inputs: {
-        model: ['4', 0], ipadapter: ['20', 0], image: ['10', 0], clip_vision: ['21', 0],
-        weight: Number(cfg.ipadapterWeight || 0.9), weight_type: 'linear',
-        combine_embeds: 'concat', start_at: 0.0, end_at: 1.0, embeds_scaling: 'V only' } },
-      '6': { class_type: 'CLIPTextEncode', inputs: { text: pos, clip: ['4', 1] } },
-      '7': { class_type: 'CLIPTextEncode', inputs: {
-        // ★ 负面里显式排除会改发色的颜色词（实测 IPAdapter 权重不够时头发会变银/金）
-        text: EN_NEGATIVE + ', silver hair, blonde hair, white hair, pink hair', clip: ['4', 1] } },
-      '5': { class_type: 'EmptyLatentImage', inputs: { width: w, height: h, batch_size: 1 } },
-      '3': { class_type: 'KSampler', inputs: {
-        seed: Math.floor(Math.random() * 1e9), steps: isSd15 ? 26 : 28, cfg: isSd15 ? 7.0 : 5.0,
-        sampler_name: isSd15 ? 'dpmpp_2m' : 'euler_ancestral', scheduler: isSd15 ? 'karras' : 'normal',
-        denoise: 1.0,
-        model: ['22', 0], positive: ['6', 0], negative: ['7', 0], latent_image: ['5', 0] } },
-      '8': { class_type: 'VAEDecode', inputs: { samples: ['3', 0], vae: ['4', 2] } },
-      '9': { class_type: 'SaveImage', inputs: { filename_prefix: 'dsh_sticker', images: ['8', 0] } },
-    }
-  } else {
-    wf = {
+
+  const refBuf = fs.readFileSync(refImage)
+  const uploaded = await uploadImage(refBuf, 'dsh_ref.png')
+
+  let finalBuf = null
+  let finalName = ''
+
+  if (MODE === 'twopass') {
+    // ★★ 两段式（默认）：既保角色又换背景
+    //   第一段 img2img denoise 0.55：角色几乎原样，动作/表情跟着提示词微调
+    //   第二段 inpaint 背景蒙版：角色像素一个不动，背景整个换成场景
+    const wf1 = {
       '4': { class_type: 'CheckpointLoaderSimple', inputs: { ckpt_name: model } },
       '10': { class_type: 'LoadImage', inputs: { image: uploaded } },
       '11': { class_type: 'VAEEncode', inputs: { pixels: ['10', 0], vae: ['4', 2] } },
-      '6': { class_type: 'CLIPTextEncode', inputs: { text: pos, clip: ['4', 1] } },
-      '7': { class_type: 'CLIPTextEncode', inputs: { text: EN_NEGATIVE, clip: ['4', 1] } },
+      '6': { class_type: 'CLIPTextEncode', inputs: { text: pos1, clip: ['4', 1] } },
+      '7': { class_type: 'CLIPTextEncode', inputs: {
+        text: EN_NEGATIVE + ', silver hair, blonde hair, white hair, pink hair, black hair, short hair', clip: ['4', 1] } },
       '3': { class_type: 'KSampler', inputs: {
         seed: Math.floor(Math.random() * 1e9), steps: isSd15 ? 26 : 28, cfg: isSd15 ? 7.0 : 5.0,
         sampler_name: isSd15 ? 'dpmpp_2m' : 'euler_ancestral', scheduler: isSd15 ? 'karras' : 'normal',
         denoise: Number(cfg.comfyDenoise || 0.55),
         model: ['4', 0], positive: ['6', 0], negative: ['7', 0], latent_image: ['11', 0] } },
       '8': { class_type: 'VAEDecode', inputs: { samples: ['3', 0], vae: ['4', 2] } },
-      '9': { class_type: 'SaveImage', inputs: { filename_prefix: 'dsh_sticker', images: ['8', 0] } },
+      '9': { class_type: 'SaveImage', inputs: { filename_prefix: 'dsh_pass1', images: ['8', 0] } },
     }
-  }
-  log(`本地出图(${MODE})：${emotion}｜model=${model}｜${w}x${h}｜IP权重=${cfg.ipadapterWeight || 0.9}`)
+    log(`第一段(img2img 改动作)：${emotion}｜model=${model}｜denoise=${cfg.comfyDenoise || 0.55}｜${w}x${h}`)
+    const p1 = await runWorkflow(wf1, 'pass1')
 
-  // 3) 提交 + 轮询
-  const subRes = await fetch(BASE + '/prompt', {
-    method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ prompt: wf }), signal: AbortSignal.timeout(30_000),
-  })
-  const subJson = await subRes.json()
-  if (!subRes.ok || !subJson?.prompt_id) {
-    throw new Error('提交失败：' + JSON.stringify(subJson?.node_errors || subJson).slice(0, 300))
-  }
-  const pid = subJson.prompt_id
-  let img = null
-  for (let i = 0; i < 150; i++) {
-    await new Promise((r) => setTimeout(r, 1500))
-    const hr = await fetch(BASE + '/history/' + pid, { signal: AbortSignal.timeout(20_000) })
-    const hj = await hr.json()
-    const ent = hj?.[pid]
-    if (!ent) continue
-    if (ent.status?.status_str === 'error') {
-      throw new Error('本地出图报错：' + JSON.stringify(ent.status?.messages || '').slice(0, 300))
+    // 从第一段结果算背景蒙版
+    const mk = await bgMaskOf(p1.buf)
+    log(`第二段准备：背景占 ${mk.pct.toFixed(1)}%（角色 ${(100 - mk.pct).toFixed(1)}% 像素原样保留）`)
+    if (mk.pct < 6) {
+      // 背景没识别出来（角色占满画面），直接用第一段结果，别硬抠
+      log('背景区域太小（<6%），跳过第二段')
+      finalBuf = p1.buf
+      finalName = p1.filename
+    } else {
+      const p1Name = await uploadImage(p1.buf, 'dsh_pass1.png')
+      const mkName = await uploadImage(mk.buf, 'dsh_pass1_mask.png')
+      const wf2 = {
+        '4': { class_type: 'CheckpointLoaderSimple', inputs: { ckpt_name: model } },
+        '10': { class_type: 'LoadImage', inputs: { image: p1Name } },
+        '11': { class_type: 'LoadImageMask', inputs: { image: mkName, channel: 'red' } },
+        '12': { class_type: 'VAEEncodeForInpaint', inputs: { pixels: ['10', 0], vae: ['4', 2], mask: ['11', 0], grow_mask_by: 12 } },
+        '6': { class_type: 'CLIPTextEncode', inputs: { text: pos2, clip: ['4', 1] } },
+        '7': { class_type: 'CLIPTextEncode', inputs: {
+          text: 'lowres, worst quality, low quality, blurry, text, watermark, people, person, girl, human, character, face, white background, plain background',
+          clip: ['4', 1] } },
+        '3': { class_type: 'KSampler', inputs: {
+          seed: Math.floor(Math.random() * 1e9), steps: isSd15 ? 26 : 28, cfg: isSd15 ? 7.0 : 5.5,
+          sampler_name: isSd15 ? 'dpmpp_2m' : 'euler_ancestral', scheduler: isSd15 ? 'karras' : 'normal',
+          denoise: 1.0,
+          model: ['4', 0], positive: ['6', 0], negative: ['7', 0], latent_image: ['12', 0] } },
+        '8': { class_type: 'VAEDecode', inputs: { samples: ['3', 0], vae: ['4', 2] } },
+        '9': { class_type: 'SaveImage', inputs: { filename_prefix: 'dsh_pass2', images: ['8', 0] } },
+      }
+      log(`第二段(inpaint 换背景)：${emotion}`)
+      const p2 = await runWorkflow(wf2, 'pass2')
+      finalBuf = p2.buf
+      finalName = p2.filename
     }
-    for (const k of Object.keys(ent.outputs || {})) {
-      if (ent.outputs[k]?.images?.length) { img = ent.outputs[k].images[0]; break }
+  } else {
+    // 单段模式：ipadapter（t2i + IPAdapter）或 i2i / inpaint（老路径，保留兼容）
+    let wf
+    if (MODE === 'ipadapter') {
+      wf = {
+        '4': { class_type: 'CheckpointLoaderSimple', inputs: { ckpt_name: model } },
+        '20': { class_type: 'IPAdapterModelLoader', inputs: {
+          ipadapter_file: String(cfg.ipadapterFile || (isSd15
+            ? 'ip-adapter-plus_sd15.safetensors'
+            : 'ip-adapter-plus_sdxl_vit-h.safetensors')) } },
+        '21': { class_type: 'CLIPVisionLoader', inputs: {
+          clip_name: String(cfg.clipVision || 'CLIP-ViT-H-14-laion2B-s32B-b79K.safetensors') } },
+        '10': { class_type: 'LoadImage', inputs: { image: uploaded } },
+        '22': { class_type: 'IPAdapterAdvanced', inputs: {
+          model: ['4', 0], ipadapter: ['20', 0], image: ['10', 0], clip_vision: ['21', 0],
+          weight: Number(cfg.ipadapterWeight || 0.9), weight_type: 'linear',
+          combine_embeds: 'concat', start_at: 0.0, end_at: 1.0, embeds_scaling: 'V only' } },
+        '6': { class_type: 'CLIPTextEncode', inputs: { text: pos1, clip: ['4', 1] } },
+        '7': { class_type: 'CLIPTextEncode', inputs: {
+          text: EN_NEGATIVE + ', silver hair, blonde hair, white hair, pink hair', clip: ['4', 1] } },
+        '5': { class_type: 'EmptyLatentImage', inputs: { width: w, height: h, batch_size: 1 } },
+        '3': { class_type: 'KSampler', inputs: {
+          seed: Math.floor(Math.random() * 1e9), steps: isSd15 ? 26 : 28, cfg: isSd15 ? 7.0 : 5.0,
+          sampler_name: isSd15 ? 'dpmpp_2m' : 'euler_ancestral', scheduler: isSd15 ? 'karras' : 'normal',
+          denoise: 1.0,
+          model: ['22', 0], positive: ['6', 0], negative: ['7', 0], latent_image: ['5', 0] } },
+        '8': { class_type: 'VAEDecode', inputs: { samples: ['3', 0], vae: ['4', 2] } },
+        '9': { class_type: 'SaveImage', inputs: { filename_prefix: 'dsh_sticker', images: ['8', 0] } },
+      }
+    } else {
+      wf = {
+        '4': { class_type: 'CheckpointLoaderSimple', inputs: { ckpt_name: model } },
+        '10': { class_type: 'LoadImage', inputs: { image: uploaded } },
+        '11': { class_type: 'VAEEncode', inputs: { pixels: ['10', 0], vae: ['4', 2] } },
+        '6': { class_type: 'CLIPTextEncode', inputs: { text: pos1, clip: ['4', 1] } },
+        '7': { class_type: 'CLIPTextEncode', inputs: { text: EN_NEGATIVE, clip: ['4', 1] } },
+        '3': { class_type: 'KSampler', inputs: {
+          seed: Math.floor(Math.random() * 1e9), steps: isSd15 ? 26 : 28, cfg: isSd15 ? 7.0 : 5.0,
+          sampler_name: isSd15 ? 'dpmpp_2m' : 'euler_ancestral', scheduler: isSd15 ? 'karras' : 'normal',
+          denoise: Number(cfg.comfyDenoise || 0.55),
+          model: ['4', 0], positive: ['6', 0], negative: ['7', 0], latent_image: ['11', 0] } },
+        '8': { class_type: 'VAEDecode', inputs: { samples: ['3', 0], vae: ['4', 2] } },
+        '9': { class_type: 'SaveImage', inputs: { filename_prefix: 'dsh_sticker', images: ['8', 0] } },
+      }
     }
-    break
+    log(`本地出图(${MODE})：${emotion}｜model=${model}｜${w}x${h}`)
+    const r = await runWorkflow(wf, MODE)
+    finalBuf = r.buf
+    finalName = r.filename
   }
-  if (!img) { await freeComfyVram(BASE, log); throw new Error('本地出图超时（4 分钟内没出图）') }
 
-  // 4) 拉图
-  const qs = new URLSearchParams({ filename: img.filename, subfolder: img.subfolder || '', type: 'output' })
-  const vRes = await fetch(BASE + '/view?' + qs, { signal: AbortSignal.timeout(120_000) })
-  if (!vRes.ok) throw new Error('取图失败 HTTP ' + vRes.status)
-  const buf = Buffer.from(await vRes.arrayBuffer())
-
+  // 落盘 + 缩到表情包尺寸
   fs.mkdirSync(outDir, { recursive: true })
   const rawPath = pathmod.join(outDir, 'comfy-' + String(emotion).replace(/[\\/:*?"<>|]/g, '_') + '-' + Date.now() + '.png')
-  fs.writeFileSync(rawPath, buf)
-
-  // 5) 缩到表情包尺寸
+  fs.writeFileSync(rawPath, finalBuf)
   try {
     const { Jimp } = await import('jimp')
     const im = await Jimp.read(rawPath)
@@ -581,11 +676,11 @@ async function generateViaComfy({ emotion, refImage, outDir, extra = '', size = 
     fs.writeFileSync(out, await im.getBuffer('image/jpeg', { quality: 88 }))
     try { fs.unlinkSync(rawPath) } catch { }
     log('本地出图完成：' + out + '（' + Math.round(fs.statSync(out).size / 1024) + 'KB）')
-    // ★ 用完立刻释放显存（用户要求：不想让大模型常驻占着 3~4G）
     await freeComfyVram(BASE, log)
-    return { file: out, raw: out, url: BASE + '/view?filename=' + encodeURIComponent(img.filename) }
+    return { file: out, raw: out, url: BASE + '/view?filename=' + encodeURIComponent(finalName) }
   } catch (e) {
     log('缩图失败（直接用原图）：' + String(e?.message || e).slice(0, 80))
+    await freeComfyVram(BASE, log)
     return { file: rawPath, raw: rawPath, url: '' }
   }
 }
