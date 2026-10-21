@@ -255,6 +255,16 @@ const DEFAULT_CONFIG = {
   douyinShare: true,                  // 总开关（关掉就完全不刷）
   douyinShareIntervalMs: 7_200_000,   // 至少隔多久刷一次（默认 2 小时）
   douyinBrushCount: 3,                // 每次刷几条候选（3 条挑 1 条，够快也不至于没得选）
+  // ── 受限自愈（默认关闭）───────────────────────────────────────
+  //   仅针对「hook 死锁」这一个特征：status 正常、execute 永远超时、桥和客户端都活着。
+  //   满足全部条件才执行：连续 3 次检查失败 + 08:00-23:00 + 每天最多 1 次 + 用安全脚本
+  //   （备份 → CloseMainWindow/WM_CLOSE 正常关 → 重启 → 自动点「进入微信」）。
+  //   ★ 永远不会强杀进程（规则 R1）。
+  selfHeal: false,                       // 总开关（改成 true 才启用）
+  selfHealScript: '',                    // safe-restart-client.ps1 的绝对路径
+  selfHealBridgeDir: '',                 // wx-bridge 目录（给脚本用）
+  selfHealWeChatDir: 'D:\\wxhook\\wx4110',  // 客户端目录
+  selfHealMaxPerDay: 1,                  // 每天最多自动重启几次
   douyinShareMaxPerDay: 3,            // 每天最多分享几条（防刷屏）
 
   // ── 语音气泡（发真·微信语音 type 34，不是"音频文件"）────────────────
@@ -379,6 +389,15 @@ function applyInner(ctx, rawConfig) {
   const SHORT = 'dsh-wechat-bot'
 const BUILD_VER = '2026-10-16.3'   // 抬版本：让新实例压过热重载残留的旧实例   // 带版本号的实例才允许踢掉旧连接（旧代码没这个字段）
   const dshHome = process.env.DSH_HOME || join(homedir(), '.dsh')
+  // ★ 持久化：把 wechat_bot_config 改过的值存到文件，重载插件后自动读回来。
+  //   （以前纯内存，重载/重启 DSH 就全部回落默认，每次都要重设一遍。）
+  const CONFIG_FILE = join(dshHome, 'wechat-bot', 'config.json')
+  try {
+    if (existsSync(CONFIG_FILE)) {
+      const saved = JSON.parse(readFileSync(CONFIG_FILE, 'utf8')) || {}
+      for (const [k, v] of Object.entries(saved)) { if (k in DEFAULT_CONFIG) config[k] = v }
+    }
+  } catch { /* 文件坏了用默认 */ }
   const logFile = config.logFile || join(dshHome, 'super-injector', SHORT + '.log')
   const memoryDir = config.memoryDir || join(dshHome, 'wechat-bot', 'memory')
 // 群成员名字映射（wxid → 昵称）：hook 拿不到联系人库，靠自动学习 + 手动设置
@@ -394,6 +413,10 @@ const namesFile = join(dirname(memoryDir), 'members.json')
   const rooms = new Map()
   const timers = new Set()
   let lastRoute = null
+    // ★ 只记「非视觉模型」的那次调用 —— 识图/读视频帧会走 visionModel，
+    //   不能让它污染文本路由（否则挑视频/写评论会拿到视觉模型，
+    //   报 UNSUPPORTED_REASONING_EFFORT 直接空回复，实测 2026-10-20 13:06）。
+    let lastTextRoute = null
   let stopped = false
 
   function log(...args) {
@@ -410,7 +433,12 @@ const namesFile = join(dirname(memoryDir), 'members.json')
 
   // 观察主模型路由（waterfall 必须 next() 委托，否则会掐断主流程）
   ctx.on('llm/stream', (options, next) => {
-    if (options?.provider && options?.model) lastRoute = { provider: options.provider, model: options.model }
+    if (options?.provider && options?.model) {
+        lastRoute = { provider: options.provider, model: options.model }
+        if (!config.visionModel || options.model !== config.visionModel) {
+          lastTextRoute = { provider: options.provider, model: options.model }
+        }
+      }
     return next()
   })
 
@@ -1074,7 +1102,8 @@ let res = await callLlm(route, sys, usr, undefined)
       const sel = ctx.agentDefaultModel?.currentSelection?.()
       if (sel?.provider && sel?.model) return { provider: sel.provider, model: sel.model }
     } catch { /* ignore */ }
-    if (lastRoute) return lastRoute
+    if (lastTextRoute) return lastTextRoute
+      if (lastRoute && (!config.visionModel || lastRoute.model !== config.visionModel)) return lastRoute
     throw new Error('无法确定 LLM 路由（可在插件配置里显式指定 provider/model）')
   }
 
@@ -2682,6 +2711,13 @@ let res = await callLlm(route, sys, usr, undefined)
       // ★★ 让她【自己看完所有候选】再挑 —— 不是按点赞数，也不是只看标题。
       //   每条候选桥侧都生成了 9 帧网格（sheet），逐条交给视觉模型"看"一遍，
       //   拿到真实内容后，再按她自己的兴趣挑一条。
+      // ★★ 关键：resolveRoute() 会返回「上一次用过的模型」——
+      //   下面这一串识图调用会把 lastRoute 改成视觉模型（opencodego-extra/…-vision-exp），
+      //   如果挑视频/写评论时才去 resolveRoute()，拿到的就是视觉模型：
+      //   它不支持 reasoningEffort，且本来也不该用来做文本挑选（实测 2026-10-20 13:06 报错）。
+      //   所以【在识图之前】先把文本路由记下来，后面一直用它。
+      const TEXT_ROUTE = resolveRoute()
+      log(`抖音：本次用文本模型 ${TEXT_ROUTE.provider}/${TEXT_ROUTE.model}（识图另用视觉模型）`)
       log(`抖音：开始逐条看这 ${res.items.length} 条（画面 + 声音）…`)
       const watched = []
       // ★ 去重：已经分享过的（同一条链接 / 同一个标题）不再分享
@@ -2721,14 +2757,17 @@ let res = await callLlm(route, sys, usr, undefined)
       let picked = null
       try {
         // ★ callLlm 返回的是对象 { text, diag }，不是字符串！（踩了一整轮）
-        const r1 = await callLlm(resolveRoute(), sys, list, 'low')
+        // ★ 不要传 'low'：resolveRoute() 可能返回「上次用过的模型」（比如刚做完识图的
+        //   视觉模型 deepseek-v4-flash-vision-exp），它不支持 reasoningEffort='low'，
+        //   直接报 UNSUPPORTED_REASONING_EFFORT → 空回复（实测 2026-10-20 13:06）。
+        const r1 = await callLlm(TEXT_ROUTE, sys, list, undefined)
         let out = (r1 && typeof r1 === 'object') ? String(r1.text || '') : String(r1 || '')
         if (!out.trim()) {
           // 空回复 → 把诊断打出来（chunks/finish/failure/err），再用短提示词重试一次
           try { log('抖音：挑视频 LLM 空回复，诊断=' + JSON.stringify(r1 && r1.diag || {}).slice(0, 320)) } catch { }
           const shortSys = '从下面几条抖音里挑一条最好玩的，只回一行 JSON：{"i":编号,"why":"10字内","comment":"20字内"}'
           const shortList = fresh.map((x) => `#${x.i} ${String(x.desc || '').split('\n')[0].slice(0, 30)}`).join('\n')
-          const r1b = await callLlm(resolveRoute(), shortSys, shortList, undefined)
+          const r1b = await callLlm(TEXT_ROUTE, shortSys, shortList, undefined)
           out = (r1b && typeof r1b === 'object') ? String(r1b.text || '') : String(r1b || '')
           if (out.trim()) log('抖音：短提示词重试成功 → ' + out.slice(0, 80))
           else { try { log('抖音：短提示词也空，诊断=' + JSON.stringify(r1b && r1b.diag || {}).slice(0, 320)) } catch { } }
@@ -2777,7 +2816,7 @@ let res = await callLlm(route, sys, usr, undefined)
           + (heard ? '【你听到的台词】\n' + heard + '\n\n' : '')
           + (caption ? '【你第一眼的感觉】' + caption + '\n\n' : '')
           + '现在用你自己的话，说出你觉得最好玩/最戳你的那个点。'
-        const r2 = await callLlm(resolveRoute(), sys2, user2, 'low')
+        const r2 = await callLlm(TEXT_ROUTE, sys2, user2, undefined)
         const out2 = (r2 && typeof r2 === 'object') ? String(r2.text || '') : String(r2 || '')
         if (!String(out2).trim()) {
           try { log('抖音：写评论 LLM 空回复，诊断=' + JSON.stringify(r2 && r2.diag || {}).slice(0, 320)) } catch { }
@@ -3067,6 +3106,47 @@ let res = await callLlm(route, sys, usr, undefined)
   }
 
   /** 心跳：只查关键项；连续 2 次异常才告警；恢复时配对告警 */
+  // ── 受限自愈（默认关闭）─────────────────────────────────────
+  //   只针对「hook 死锁」这一个特征：status 正常、execute 永远超时、桥和客户端都活着。
+  //   满足全部条件才执行：连续 3 次检查 + 08:00-23:00 + 每天最多 1 次
+  //   + 用 safe-restart 脚本（备份 → 正常关 → 重启 → 自动点「进入微信」）。
+  //   ★ 永远不会强杀进程（规则 R1）。
+  let selfHealDay = ''
+  let selfHealCount = 0
+  let selfHealBusy = false
+  async function trySelfHeal(reason) {
+    if (!config.selfHeal || selfHealBusy) return
+    const hour = new Date().getHours()
+    if (hour < 8 || hour >= 23) { log(`自愈：不在允许时段 08:00-23:00（现在 ${hour} 点）→ 跳过`); return }
+    const dstr = new Date().toISOString().slice(0, 10)
+    if (dstr !== selfHealDay) { selfHealDay = dstr; selfHealCount = 0 }
+    if (selfHealCount >= (Number(config.selfHealMaxPerDay) || 1)) { log('自愈：今天已自动重启过 → 跳过'); return }
+    const script = String(config.selfHealScript || '')
+    try {
+      const fs = await import('node:fs')
+      if (!script || !fs.existsSync(script)) { log('自愈：没配置 selfHealScript 或文件不存在 → 跳过'); return }
+    } catch { }
+    selfHealBusy = true
+    selfHealCount++
+    log(`自愈：检测到「${reason}」→ 执行安全重启（备份 → 正常关 → 重启 → 自动点进入微信）`)
+    try { await alertHealth([{ name: '自动重启', text: `检测到${reason}，正在自动重启微信（会先备份数据库）` }], { mins: 0 }) } catch { }
+    try {
+      const { execFile } = await import('node:child_process')
+      const args = ['-NoProfile', '-File', script]
+      if (config.selfHealWeChatDir) args.push('-WeChatDir', String(config.selfHealWeChatDir))
+      if (config.selfHealBridgeDir) args.push('-BridgeDir', String(config.selfHealBridgeDir))
+      const r = await new Promise((resolve) => {
+        execFile('pwsh', args, { timeout: 10 * 60_000, maxBuffer: 4 * 1024 * 1024, encoding: 'utf8' },
+          (err, stdout, stderr) => resolve({ err, stdout, stderr }))
+      })
+      log('自愈：脚本返回 ' + (r.err ? ('失败：' + String(r.err.message).slice(0, 120)) : '成功'))
+      log('自愈：' + String(r.stdout || '').split('\n').slice(-4).join(' / ').slice(0, 300))
+    } catch (e) {
+      log('自愈：执行失败 ' + String(e?.message || e).slice(0, 140))
+    } finally { selfHealBusy = false }
+  }
+
+
   async function healthTick() {
     if (stopped) return
     try {
@@ -3077,7 +3157,13 @@ let res = await callLlm(route, sys, usr, undefined)
         const badItems = h.items.filter((i) => i.level === 'bad')
         log(`健康检查：${h.bad.length} 项异常（连续第 ${healthStreak} 次）｜`
           + badItems.map((i) => `${i.name}=${i.text}`).join('；'))
-        if (healthStreak >= 2) {
+        // ★ 死锁特征：hook 存活 + 数据库可读 同时异常（status 正常但 execute 超时）
+    if (healthStreak >= 3) {
+      const hookBad = badItems.some((i) => i.name === 'hook 存活')
+      const dbBad = badItems.some((i) => i.name === '数据库可读')
+      if (hookBad && dbBad) void trySelfHeal('数据库死锁（hook 存活/数据库可读 同时异常）')
+    }
+    if (healthStreak >= 2) {
           const mins = Math.round((healthStreak * (Number(config.healthCheckMs) || 300_000)) / 60000)
           await alertHealth(badItems, { mins })
           healthAlerted = true
@@ -3261,6 +3347,14 @@ let res = await callLlm(route, sys, usr, undefined)
       else if (Array.isArray(cur)) v = v.split(',').map((s) => s.trim()).filter(Boolean)
       if (typeof cur === 'number' && !Number.isFinite(v)) return `值不合法：${args.value}`
       config[key] = v
+      // 持久化到文件（重载/重启后不丢）
+      try {
+        const fs2 = await import('node:fs')
+        fs2.mkdirSync(dirname(CONFIG_FILE), { recursive: true })
+        const dump = {}
+        for (const k of Object.keys(DEFAULT_CONFIG)) dump[k] = config[k]
+        fs2.writeFileSync(CONFIG_FILE, JSON.stringify(dump, null, 1), 'utf8')
+      } catch (e) { log('配置持久化失败：' + String(e?.message || e).slice(0, 80)) }
       if (key === 'quietHours') {
         quietWindows.length = 0
         quietWindows.push(...parseQuietWindows(config.quietHours))
