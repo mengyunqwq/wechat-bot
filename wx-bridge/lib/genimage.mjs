@@ -476,25 +476,65 @@ async function generateViaComfy({ emotion, refImage, outDir, extra = '', size = 
     EN_CHARACTER,
     'masterpiece, best quality, very aesthetic, sticker']
     .filter(Boolean).join(', ')
-  const model = String(cfg.comfyModel || 'animagineXL40_opt.safetensors')
+  // ★★ 三种模式：
+  //   ipadapter（推荐，默认）：t2i + IPAdapter 锁角色 —— 动作/背景随便变，角色细节由 IPAdapter 图"教"给模型。
+  //       8G 显存下必须用 SD1.5（SDXL + IPAdapter + CLIP-ViT-H 会 OOM，实测崩过一次）
+  //   i2i        ：img2img（参考图整图混合）—— 背景不太变得动，衣服容易漂
+  //   inpaint    ：只重画背景 —— 角色 100% 不变但动作也变不了
+  const MODE = String(cfg.comfyMode || 'ipadapter')
+  let model = String(cfg.comfyModel || 'animagineXL40_opt.safetensors')
+  if (MODE === 'ipadapter' && !/meinamix|sd15|v1-5/i.test(model)) {
+    // 自动降级到 SD1.5，避免 8G 显存 OOM
+    log(`IPAdapter 模式下 8G 显存用 SDXL 会 OOM → 改用 SD1.5（${model} → meinamix_v11）`)
+    model = 'meinamix_v11.safetensors'
+  }
   const isSd15 = /meinamix|sd15|v1-5/i.test(model)
   const w = isSd15 ? 512 : 832
   const h = isSd15 ? 768 : 1216
-  const wf = {
-    '4': { class_type: 'CheckpointLoaderSimple', inputs: { ckpt_name: model } },
-    '10': { class_type: 'LoadImage', inputs: { image: uploaded } },
-    '11': { class_type: 'VAEEncode', inputs: { pixels: ['10', 0], vae: ['4', 2] } },
-    '6': { class_type: 'CLIPTextEncode', inputs: { text: pos, clip: ['4', 1] } },
-    '7': { class_type: 'CLIPTextEncode', inputs: { text: EN_NEGATIVE, clip: ['4', 1] } },
-    '3': { class_type: 'KSampler', inputs: {
-      seed: Math.floor(Math.random() * 1e9), steps: isSd15 ? 26 : 28, cfg: isSd15 ? 7.0 : 5.0,
-      sampler_name: isSd15 ? 'dpmpp_2m' : 'euler_ancestral', scheduler: isSd15 ? 'karras' : 'normal',
-      denoise: Number(cfg.comfyDenoise || 0.55),
-      model: ['4', 0], positive: ['6', 0], negative: ['7', 0], latent_image: ['11', 0] } },
-    '8': { class_type: 'VAEDecode', inputs: { samples: ['3', 0], vae: ['4', 2] } },
-    '9': { class_type: 'SaveImage', inputs: { filename_prefix: 'dsh_sticker', images: ['8', 0] } },
+  let wf
+  if (MODE === 'ipadapter') {
+    wf = {
+      '4': { class_type: 'CheckpointLoaderSimple', inputs: { ckpt_name: model } },
+      // IPAdapter 三件套：模型 + CLIP Vision + 参考图
+      '20': { class_type: 'IPAdapterModelLoader', inputs: {
+        ipadapter_file: String(cfg.ipadapterFile || 'ip-adapter-plus_sd15.safetensors') } },
+      '21': { class_type: 'CLIPVisionLoader', inputs: {
+        clip_name: String(cfg.clipVision || 'CLIP-ViT-H-14-laion2B-s32B-b79K.safetensors') } },
+      '10': { class_type: 'LoadImage', inputs: { image: uploaded } },
+      '22': { class_type: 'IPAdapterAdvanced', inputs: {
+        model: ['4', 0], ipadapter: ['20', 0], image: ['10', 0], clip_vision: ['21', 0],
+        weight: Number(cfg.ipadapterWeight || 0.9), weight_type: 'linear',
+        combine_embeds: 'concat', start_at: 0.0, end_at: 1.0, embeds_scaling: 'V only' } },
+      '6': { class_type: 'CLIPTextEncode', inputs: { text: pos, clip: ['4', 1] } },
+      '7': { class_type: 'CLIPTextEncode', inputs: {
+        // ★ 负面里显式排除会改发色的颜色词（实测 IPAdapter 权重不够时头发会变银/金）
+        text: EN_NEGATIVE + ', silver hair, blonde hair, white hair, pink hair', clip: ['4', 1] } },
+      '5': { class_type: 'EmptyLatentImage', inputs: { width: w, height: h, batch_size: 1 } },
+      '3': { class_type: 'KSampler', inputs: {
+        seed: Math.floor(Math.random() * 1e9), steps: isSd15 ? 26 : 28, cfg: isSd15 ? 7.0 : 5.0,
+        sampler_name: isSd15 ? 'dpmpp_2m' : 'euler_ancestral', scheduler: isSd15 ? 'karras' : 'normal',
+        denoise: 1.0,
+        model: ['22', 0], positive: ['6', 0], negative: ['7', 0], latent_image: ['5', 0] } },
+      '8': { class_type: 'VAEDecode', inputs: { samples: ['3', 0], vae: ['4', 2] } },
+      '9': { class_type: 'SaveImage', inputs: { filename_prefix: 'dsh_sticker', images: ['8', 0] } },
+    }
+  } else {
+    wf = {
+      '4': { class_type: 'CheckpointLoaderSimple', inputs: { ckpt_name: model } },
+      '10': { class_type: 'LoadImage', inputs: { image: uploaded } },
+      '11': { class_type: 'VAEEncode', inputs: { pixels: ['10', 0], vae: ['4', 2] } },
+      '6': { class_type: 'CLIPTextEncode', inputs: { text: pos, clip: ['4', 1] } },
+      '7': { class_type: 'CLIPTextEncode', inputs: { text: EN_NEGATIVE, clip: ['4', 1] } },
+      '3': { class_type: 'KSampler', inputs: {
+        seed: Math.floor(Math.random() * 1e9), steps: isSd15 ? 26 : 28, cfg: isSd15 ? 7.0 : 5.0,
+        sampler_name: isSd15 ? 'dpmpp_2m' : 'euler_ancestral', scheduler: isSd15 ? 'karras' : 'normal',
+        denoise: Number(cfg.comfyDenoise || 0.55),
+        model: ['4', 0], positive: ['6', 0], negative: ['7', 0], latent_image: ['11', 0] } },
+      '8': { class_type: 'VAEDecode', inputs: { samples: ['3', 0], vae: ['4', 2] } },
+      '9': { class_type: 'SaveImage', inputs: { filename_prefix: 'dsh_sticker', images: ['8', 0] } },
+    }
   }
-  log(`本地出图(comfy)：${emotion}｜model=${model}｜denoise=${wf['3'].inputs.denoise}｜${w}x${h}`)
+  log(`本地出图(${MODE})：${emotion}｜model=${model}｜${w}x${h}｜IP权重=${cfg.ipadapterWeight || 0.9}`)
 
   // 3) 提交 + 轮询
   const subRes = await fetch(BASE + '/prompt', {
