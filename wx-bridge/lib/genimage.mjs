@@ -32,6 +32,16 @@ import { join, dirname } from 'node:path'
 import { homedir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 
+// ★★ 角色文字描述（图生图 i2i 换成了文生图 t2i，靠这段文字锁定角色形象）
+//   为什么换：Agnes 的 i2i 队列很小，高峰期一直 503（实测熬 3 分钟都不通）；
+//   而 t2i 队列空，11 秒就出图，只要描述够细，出来的还是同一只鲸鱼娘（已实测对比）。
+export const CHARACTER_DESC =
+  '一个 Q 版可爱的鲸鱼娘角色：深蓝到浅蓝渐变的及腰长发，' +
+  '白色蕾丝荷叶边头饰（像女仆帽），发间有两个小小的鲸鱼鳍状耳朵装饰，' +
+  '头顶有一撮海豚尾形状的呆毛；蓝色大眼睛、圆脸、脸颊有红晕；' +
+  '穿深蓝色女仆装 + 白色蕾丝围裙（围裙上绣着一只小鲸鱼），' +
+  '背后有一条深蓝色的鲸鱼尾巴；Q 版卡通贴纸画风，线条干净，色彩明快';
+
 const DEFAULTS = {
   apiUrl: 'https://apihub.agnes-ai.com/v1/images/generations',
   model: 'agnes-image-2.1-flash',
@@ -52,6 +62,9 @@ export function loadImageConfig() {
     model: String(process.env.IMAGE_MODEL || fileCfg.model || DEFAULTS.model),
     apiKey: String(process.env.IMAGE_API_KEY || fileCfg.apiKey || ''),
     keyRef: String(process.env.IMAGE_KEY_REF || fileCfg.keyRef || DEFAULTS.keyRef),
+    // i2i = 图生图（带参考图，角色最像，但 Agnes 的 i2i 队列很小容易 503）
+    // t2i = 文生图（不带图，队列空、快，但角色只有约 95% 像）
+    mode: String(process.env.IMAGE_MODE || fileCfg.mode || 'i2i'),
   }
 }
 
@@ -198,7 +211,25 @@ export function resolveAgnesKey(ref = 'AGNES_API_KEY') {
  * @param {(s:string)=>void} [o.log]
  * @returns {Promise<{file:string, raw:string, url:string}>}
  */
-export async function generateStickerImage({
+// ★★ 全局串行锁：同一时刻【只允许一个】图片生成请求。
+//   踩过的坑（2026-10-21 01:16 实测）：一次 genSticker 会发出
+//   1 次原始请求 + 3 次内联重试（3s/12s/27s）+ 后台队列再试，
+//   而 Agnes 的队列本来就小 → 自己把自己的队列挤爆，永远 503。
+//   现在所有调用（工具/后台队列/自动气泡）都走这个锁，串行执行。
+let _genChain = Promise.resolve()
+let _genBusy = 0
+function withGenLock(fn) {
+  const run = async () => {
+    _genBusy++
+    try { return await fn() } finally { _genBusy-- }
+  }
+  const p = _genChain.then(run, run)
+  _genChain = p.catch(() => {})
+  return p
+}
+export function genQueueState() { return { busy: _genBusy } }
+
+async function _generateStickerImageInner({
   emotion, refImage, outDir, extra = '', style = '', size = 512, log = () => {},
 }) {
   const cfg = loadImageConfig()
@@ -228,10 +259,11 @@ export async function generateStickerImage({
   //   所以现在：① 第一句就明确"参考图只用来定角色长相" ② 背景明确禁止默认室内
   //   ③ 每次给一个随机场景灵感，逼它换地方。
   const prompt = [
-    '【只学角色，不学画面】下面这张参考图只用来确定角色的长相：发色发型、脸型、五官、配色、服装风格、Q 版卡通画风。',
-    '**画面里只能有这一个角色**（不要画成两个/多个人物，不要复制参考图里的人物数量）。',
+    `【角色（必须完全照这个画）】${CHARACTER_DESC}。`,
+    '**画面里只能有这一个角色**（不要画成两个/多个人物）。',
+
     '**背景、构图、镜头、姿势、道具、光影全部重新设计**，必须与参考图完全不同；',
-    '禁止照搬参考图的背景，禁止出现参考图里的画框、气泡、文字、摆件。',
+    '禁止出现任何画框、气泡、文字、摆件。',
     `【题材】${subjectPrompt(emotion)}。`,
     extra ? `【本次画面要求】${extra}。` : '',
     '【背景】必须为这个题材**新画一张**完整的场景，要有这个题材该有的道具和环境细节',
@@ -245,7 +277,7 @@ export async function generateStickerImage({
     '【禁止】不要任何文字、字幕、水印、对话框、气泡。',
   ].filter(Boolean).join('')
 
-  log(`图生图：${emotion}${extra ? '｜' + extra : ''}｜model=${cfg.model}｜${String(cfg.apiUrl).replace(/^https?:\/\//, '').slice(0, 40)}（参考图 ${Math.round(refB64.length / 1024)}KB base64）`)
+  log(`图片生成(${cfg.mode})：${emotion}${extra ? '｜' + extra : ''}｜model=${cfg.model}｜${String(cfg.apiUrl).replace(/^https?:\/\//, '').slice(0, 40)}（参考图 ${Math.round(refB64.length / 1024)}KB base64）`)
 
   // 带退避的重试：Agnes 高峰期会返回 503 "image queue is full"，直接放弃会白丢一张表情
   const body = JSON.stringify({
@@ -253,11 +285,14 @@ export async function generateStickerImage({
     prompt,
     size: '1K',
     ratio: '1:1',
-    extra_body: { image: [`data:image/jpeg;base64,${refB64}`], response_format: 'url' },
+    // ★ 默认走 t2i（不传 image）：i2i 队列挤到不可用。想用图生图就设 IMAGE_MODE=i2i。
+    extra_body: cfg.mode === 't2i'
+      ? { response_format: 'url' }
+      : { image: [`data:image/jpeg;base64,${refB64}`], response_format: 'url' },
   })
   let res = null
   let text = ''
-  for (let attempt = 1; attempt <= 4; attempt++) {
+  for (let attempt = 1; attempt <= 1; attempt++) {   // ★ 不再内联重试（会把自己队列挤爆），失败交给后台补生成队列
     res = await fetch(cfg.apiUrl, {
       method: 'POST',
       headers: { Authorization: `Bearer ${key}`, 'content-type': 'application/json' },
@@ -308,3 +343,6 @@ export async function generateStickerImage({
     return { file: raw, raw, url }
   }
 }
+
+// 导出包装：所有调用都串行化
+export function generateStickerImage(opts) { return withGenLock(() => _generateStickerImageInner(opts)) }
