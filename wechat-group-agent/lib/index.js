@@ -1341,7 +1341,7 @@ let res = await callLlm(route, sys, usr, undefined)
         ? '接着他的话回一句（像聊天一样自然接住，别重复你刚说过的）：'
         : priority === 'image'
           ? ((trigger.videoCover || trigger.videoSeconds || trigger.videoAudio)
-            ? `就这条${trigger.linkVideoSite ? trigger.linkVideoSite + '视频（群里分享的链接）' : '视频'}接一句（可以吐槽、可以问一句、可以夸；你看到的是从视频里抽的几帧画面${trigger.videoAudio ? '和音轨转写' : ''}${trigger.videoCover ? '（只有封面帧）' : ''}，**别声称你看完了整段视频**）：`
+            ? `就这条${trigger.linkVideoSite ? trigger.linkVideoSite + '视频（群里分享的链接）' : '视频'}接一句（可以吐槽、可以问一句、可以夸；你看到的是从视频里抽的几帧画面${trigger.videoAudio ? '和音轨转写' : ''}${trigger.videoCover ? '（只有封面帧）' : ''}，**别声称你看完了完整视频**）：`
             : '就这张图接一句（可以吐槽、可以问一句、可以夸，别像在写图片说明）：')
           : '写你要发的那一条消息（只输出这句话）：',
     ].join('\n')
@@ -1488,7 +1488,7 @@ let res = await callLlm(route, sys, usr, undefined)
   let voicePrepareAt = 0
 
   // ── 视频收尾两件事：读完删原文件 / 延迟复查升级 ────────────────────
-  // 背景：微信视频**按需下载**（"自动下载"这条路已确认不可行，见 docs/media-download-re.md），
+  // 背景：微信视频**按需下载**（"自动下载"这条路已确认不可行），
   // 只能等群里有人点开、微信自己落盘。所以：
   //   ① 既然这次点开的收益只有一次 → 用完就把原文件删掉（省磁盘；下次点开微信会重新下载）
   //   ② 只拿到封面时排两次复查（+60s / +180s）→ 视频一落盘就升级成"全部内容"
