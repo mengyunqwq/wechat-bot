@@ -469,8 +469,12 @@ async function generateViaComfy({ emotion, refImage, outDir, extra = '', size = 
   ]
   // extra 里如果已经描述了场景，就不再随机（以调用方为准）
   const sceneTag = extra ? '' : SCENES[Math.floor(Math.random() * SCENES.length)]
-  const pos = [EN_QUALITY, EN_CHARACTER, subj, extra ? String(extra) : '', sceneTag,
-    'detailed background, scenery']
+  // ★ 场景放最前面（SD 里越靠前权重越高）→ 保证背景真的按场景画
+  //   角色细节靠 [参考图 img2img + 服装标签 maid outfit / white apron] 锁住
+  const pos = [extra ? String(extra) : '', sceneTag,
+    'detailed background, scenery, ' + subj,
+    EN_CHARACTER,
+    'masterpiece, best quality, very aesthetic, sticker']
     .filter(Boolean).join(', ')
   const model = String(cfg.comfyModel || 'animagineXL40_opt.safetensors')
   const isSd15 = /meinamix|sd15|v1-5/i.test(model)
