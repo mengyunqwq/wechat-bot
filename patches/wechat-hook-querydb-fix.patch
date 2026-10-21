@@ -805,7 +805,7 @@ new file mode 100644
 index 0000000..a7196be
 --- /dev/null
 +++ b/src/VoiceUploadProbe.cpp
-@@ -0,0 +1,590 @@
+@@ -0,0 +1,593 @@
 +// ─────────────────────────────────────────────────────────────────────────────
 +// VoiceUploadProbe.cpp — READ-ONLY probes on the WeChat 4.1.10.27 voice upload
 +//                        candidate call sites (found by static analysis).
@@ -818,14 +818,14 @@ index 0000000..a7196be
 +//   * no message is sent, no client state is written.
 +//
 +// Hooked RVAs (4.1.10.27, Weixin.dll):
-+//   0x0D84530  mars::cdn::CdnManager::StartC2CUpload            (this, param)
-+//   0x52F4990  CoCgiSendRequest  /cgi-bin/micromsg-bin/uploadvoice
-+//   0x52F3420  caller of the above (fills UploadVoiceRequest)
-+//   0x52F73B0  caller of the above (2nd site)
-+//   0x52DD5C0  CoCgiSendRequest  /cgi-bin/micromsg-bin/uploadvoicefortrans
-+//   0x619A190  voice message factory  (new 0x778, outer vt 0x8DCFF98)
-+//   0x619B3B0  voice message inner ctor (inner vt 0x8DD0028)
-+//   0x54B02A0  voice send path that calls the factory
++//   0x???????  mars::cdn::CdnManager::StartC2CUpload            (this, param)
++//   0x???????  CoCgiSendRequest  /cgi-bin/micromsg-bin/uploadvoice
++//   0x???????  caller of the above (fills UploadVoiceRequest)
++//   0x???????  caller of the above (2nd site)
++//   0x???????  CoCgiSendRequest  /cgi-bin/micromsg-bin/uploadvoicefortrans
++//   0x???????  voice message factory  (new 0x778, outer vt 0x????????)
++//   0x???????  voice message inner ctor (inner vt 0x????????)
++//   0x???????  voice send path that calls the factory
 +// ─────────────────────────────────────────────────────────────────────────────
 +#include "VoiceUploadProbe.h"
 +
@@ -1272,15 +1272,18 @@ index 0000000..a7196be
 +    VU_DEF_HOOK(7, "VoiceSendPath",        true,  false)
 +
 +    struct HookDef { int idx; const char* name; uint64_t rva; void* detour; };
++    // 注意：这里的 RVA 是【按微信 4.1.10.27 实测得到】的值，属于使用者需要自己解析的部分。
++    // 本补丁不提供这些地址（避免绑定特定版本）；填 0 表示"该 hook 不安装"，
++    // 探针会打印 FAILED 但不影响任何功能。/Debug/VuProbe 属于调试探针，可整体忽略。
 +    static const HookDef kHooks[] = {
-+        { 0, "StartC2CUpload",        0x0D84530ULL, (void*)&detour_0 },
-+        { 1, "CgiUploadVoice",        0x52F4990ULL, (void*)&detour_1 },
-+        { 2, "CgiUploadVoicePrep",    0x52F3420ULL, (void*)&detour_2 },
-+        { 3, "CgiUploadVoicePrep2",   0x52F73B0ULL, (void*)&detour_3 },
-+        { 4, "CgiUploadVoiceForTrans",0x52DD5C0ULL, (void*)&detour_4 },
-+        { 5, "VoiceMsgFactory",       0x619A190ULL, (void*)&detour_5 },
-+        { 6, "VoiceInnerCtor",        0x619B3B0ULL, (void*)&detour_6 },
-+        { 7, "VoiceSendPath",         0x54B02A0ULL, (void*)&detour_7 },
++        { 0, "StartC2CUpload",        0ULL, (void*)&detour_0 },
++        { 1, "CgiUploadVoice",        0ULL, (void*)&detour_1 },
++        { 2, "CgiUploadVoicePrep",    0ULL, (void*)&detour_2 },
++        { 3, "CgiUploadVoicePrep2",   0ULL, (void*)&detour_3 },
++        { 4, "CgiUploadVoiceForTrans",0ULL, (void*)&detour_4 },
++        { 5, "VoiceMsgFactory",       0ULL, (void*)&detour_5 },
++        { 6, "VoiceInnerCtor",        0ULL, (void*)&detour_6 },
++        { 7, "VoiceSendPath",         0ULL, (void*)&detour_7 },
 +    };
 +
 +    static void installHooks()

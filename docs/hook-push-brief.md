@@ -196,7 +196,7 @@ D:\rea\rea.cmd --help
 | 写语句入口 | 全部 `via=prepare_v3` | **入口是 `sqlite3_prepare_v3`，不是 `prepare_v2`**（第一轮零命中的原因） |
 | `[PROBE-STEP]` | 60 条，全部 `from=wx` | step 钩子工作正常，能看到微信的执行流 |
 | 消息相关写入 | `INSERT INTO 'main'.'message_fts_v4_0_content'`（`message_fts.db`，`via=prepare_v3`） | **消息确实走这台实例**（FTS 索引与 Msg_ 行同事务） |
-| 微信调用点 RVA | DB 层 `wx+0x3329DD8`；FTS 写 `0x5099932` / `0x5084F39` / `0x509A319` / `0x509B697`；exec `0x506DE31` | 路线 B 若需要，入口已现成 |
+| 微信调用点 RVA | 已实测得到（具体地址见本地私密笔记，不进公库） | 路线 B 若需要，入口已现成 |
 | 副作用 | CPU 0%（基线 0%）、客户端不崩、轮询在消息到达后恢复正常（6 会话） | 探针安全 |
 
 **实现要点（下一轮照这个做）**：

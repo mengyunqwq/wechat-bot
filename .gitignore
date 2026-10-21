@@ -19,3 +19,7 @@ docs/cdn-download-re.md
 docs/*-re.md
 bin/
 provider/
+
+# patch 备份（含未打码的原始地址，绝不进仓库）
+patches/*.bak*
+*.bak-before-scrub
