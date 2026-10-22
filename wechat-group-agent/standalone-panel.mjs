@@ -98,6 +98,9 @@ const PORT = Number(arg('port', process.env.PANEL_PORT || 8741))
 const HOST = arg('host', process.env.PANEL_HOST || '127.0.0.1')
 const BRIDGE_URL = arg('bridge', process.env.BRIDGE_URL || 'ws://127.0.0.1:17300')
 const LOOPBACK = HOST === '127.0.0.1' || HOST === 'localhost' || HOST === '::1'
+// 桥连上微信后自动弹浏览器（用户要求：桥一连上就把面板打开）。
+// 只在「从未登录变成已登录」时弹一次，同一次运行里不重复弹。--no-open 可关。
+const AUTO_OPEN = !process.argv.includes('--no-open')
 
 // 暴露到局域网却没有 token → 等于把微信控制权交出去，直接拒绝启动
 let TOKEN = arg('token', process.env.PANEL_TOKEN || '')
@@ -127,6 +130,48 @@ async function newSocket(url) {
   if (typeof globalThis.WebSocket === 'function') return new globalThis.WebSocket(url)
   const { WebSocket: WS } = await import(join(ROOT, 'wx-bridge', 'node_modules', 'ws', 'index.js')).catch(() => import('ws'))
   return new WS(url)
+}
+
+// 用系统默认浏览器打开面板。Windows 的 start 要把 URL 当第二个参数传
+// （第一个空字符串是"窗口标题"，不传会被当成标题）。
+function openBrowser(url) {
+  try {
+    if (process.platform === 'win32') {
+      spawn('cmd', ['/c', 'start', '', url], { detached: true, stdio: 'ignore', windowsHide: true }).unref()
+    } else if (process.platform === 'darwin') {
+      spawn('open', [url], { detached: true, stdio: 'ignore' }).unref()
+    } else {
+      spawn('xdg-open', [url], { detached: true, stdio: 'ignore' }).unref()
+    }
+    return true
+  } catch (e) { log('打开浏览器失败：' + String(e?.message || e)); return false }
+}
+
+// 盯「桥有没有连上微信」这件事：
+//   面板服务本身一直可用（桥没连也能看状态），
+//   但用户要的是「桥一连上就把面板打开」，所以这里轮询 status.loggedIn，
+//   第一次看到已登录就弹浏览器（每次运行只弹一次）。
+let lastLoggedIn = null
+let autoOpened = false
+async function watchLogin() {
+  if (!connected) return
+  try {
+    const st = await callBridge('status', {}, 6000)
+    const li = !!st.loggedIn
+    if (li && lastLoggedIn !== true && !autoOpened) {
+      autoOpened = true
+      const url = 'http://' + (HOST === '0.0.0.0' ? '127.0.0.1' : HOST) + ':' + PORT + '/'
+      log('')
+      log('  ================================================')
+      log('   微信已登录 → 控制面板就绪')
+      log('   ' + url)
+      log('  ================================================')
+      log('')
+      if (AUTO_OPEN) openBrowser(url)
+      else log('（--no-open，没自动弹浏览器）')
+    }
+    lastLoggedIn = li
+  } catch { /* 桥暂时不通，下个周期再看 */ }
 }
 
 async function connectBridge() {
@@ -1155,6 +1200,10 @@ server.listen(PORT, HOST, () => {
     log('')
   }
   connectBridge()
+  // 盯登录状态：桥连上微信就弹浏览器（用户要求「桥一连上就自动打开面板」）
+  setTimeout(watchLogin, 1500)
+  const loginWatcher = setInterval(watchLogin, 10000)
+  loginWatcher.unref?.()
 })
 
 process.on('SIGINT', () => { log('退出'); try { ws?.close() } catch {}; server.close(() => process.exit(0)); setTimeout(() => process.exit(0), 1500) })
