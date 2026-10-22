@@ -14,7 +14,7 @@
  *
  * 纯 ESM，无编译步骤（本环境没有可用的 tsc），改完 dev_reload_package 即生效。
  */
-import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, unlinkSync, writeFileSync, copyFileSync, rmdirSync } from 'node:fs'
+import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, unlinkSync, writeFileSync, copyFileSync, rmSync } from 'node:fs'
 import { execFileSync } from 'node:child_process'
 import { request as httpsRequest } from 'node:https'
 import { join, dirname } from 'node:path'
@@ -4107,7 +4107,7 @@ let res = await callLlm(route, sys, usr, undefined)
         if (f.isDirectory()) rmRecursive(fp)
         else unlinkSync(fp)
       }
-      rmdirSync(p)
+      rmSync(p)
     } catch { /* ignore */ }
   }
   /** 运行时目录 ↔ 仓库目录 的映射（白名单：只覆盖这些） */
