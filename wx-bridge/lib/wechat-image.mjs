@@ -232,7 +232,7 @@ export function decryptDat(srcPath, { tag = 'img' } = {}) {
   const dst = join(TMP_DIR, `${tag}-${Date.now()}.jpg`)
   let stdout = ''
   try {
-    stdout = execFileSync(PY, [SCRIPT, srcPath, dst], { timeout: 90_000, encoding: 'utf8' }) || ''
+    stdout = execFileSync(PY, [SCRIPT, srcPath, dst], { windowsHide: true, timeout: 90_000, encoding: 'utf8' }) || ''
   } catch (e) {
     stdout = String(e?.stdout || '')
   }
@@ -261,7 +261,7 @@ export function hasKey() {
 /** 主动扫一次内存找密钥（需要客户端最近解密过图片） */
 export function scanKey() {
   try {
-    const out = execFileSync(PY, [SCRIPT, '--find-key'], { timeout: 300_000, encoding: 'utf8' })
+    const out = execFileSync(PY, [SCRIPT, '--find-key'], { windowsHide: true, timeout: 300_000, encoding: 'utf8' })
     return /结果:\s*([0-9a-zA-Z]{16})/.test(out) || /★ 找到 AES 密钥/.test(out)
   } catch {
     return false

@@ -26,7 +26,20 @@ import { tmpdir } from 'node:os'
 //   会把全尺寸的图（明文 JPEG）写到这个目录。
 //   实测 1260x2800 / 1.46MB —— 不用解密、不用 HEVC 解码，直接就是能识别的原图。
 //   文件名约定 = <roomId>_<unix秒>_<localId>_<序号>_<任意标记>.dat
-const HIRES_DIR = process.env.WECHAT_HIRES_DIR || 'D:\\cdndl-replay'
+// ── 眼睛（hires provider）目录：**动态解析**，面板改了就生效 ──────
+//  优先级：① 环境变量 WECHAT_HIRES_DIR  ② DLL 写的 hook-cdn-replay.dir  ③ 默认 D:\cdndl-replay
+//  为什么不缓存成常量：面板里"选个文件夹就想立马能用"，缓存了就得重启桥。
+const REPLAY_DIR_FILE = process.env.WECHAT_REPLAY_DIR_FILE || 'D:\\wxhook\\wx4110\\hook-cdn-replay.dir'
+const REPLAY_SWITCH_FILE = process.env.WECHAT_REPLAY_SWITCH_FILE || 'D:\\wxhook\\wx4110\\hook-cdn-replay.on'
+function hiresDir() {
+  const env = process.env.WECHAT_HIRES_DIR
+  if (env) return env
+  try {
+    const s = readFileSync(REPLAY_DIR_FILE, 'utf8').trim()
+    if (s) return s
+  } catch { /* 文件不存在就回退 */ }
+  return 'D:\\cdndl-replay'
+}
 
 async function waitHiresImage(roomId, tsIn, timeoutMs = 8000) {
   if (!roomId || !tsIn) return null
@@ -39,14 +52,14 @@ async function waitHiresImage(roomId, tsIn, timeoutMs = 8000) {
   while (Date.now() - t0 < timeoutMs) {
     try {
       let best = null
-      for (const f of readdirSync(HIRES_DIR)) {
+      for (const f of readdirSync(hiresDir())) {
         // 契约：<roomId>_<unix秒>_<localId>_<序号>_<任意标记>.dat（内容必须是明文 JPEG）
         const m = f.match(/^(.+)_(\d{10})_(\d+)_(\d+)_.*\.dat$/)
         if (f.includes('hdvideo')) continue          // 视频文件别当图片
         if (!m) continue
         if (m[1] !== roomId) continue
         if (Math.abs(Number(m[2]) - ts) > 5) continue     // 允许 5 秒偏差
-        const p = join(HIRES_DIR, f)
+        const p = join(hiresDir(), f)
         let sz = 0
         try { sz = statSync(p).size } catch { continue }
         if (sz < 3000) continue
@@ -80,17 +93,17 @@ function pruneHiresDir(maxAgeMs = 2 * 3600_000, keepLatest = 60) {
   if (now - g_lastPrune < 60_000) return
   g_lastPrune = now
   let files = []
-  try { files = readdirSync(HIRES_DIR) } catch { return }
+  try { files = readdirSync(hiresDir()) } catch { return }
   let removed = 0
   const stat = []
   for (const f of files) {
-    try { stat.push({ f, t: statSync(join(HIRES_DIR, f)).mtimeMs }) } catch { /* ignore */ }
+    try { stat.push({ f, t: statSync(join(hiresDir(), f)).mtimeMs }) } catch { /* ignore */ }
   }
   stat.sort((a, b) => b.t - a.t)
   stat.forEach((x, idx) => {
     if (idx < keepLatest) return
     if (now - x.t < maxAgeMs) return
-    try { unlinkSync(join(HIRES_DIR, x.f)); removed++ } catch { /* ignore */ }
+    try { unlinkSync(join(hiresDir(), x.f)); removed++ } catch { /* ignore */ }
   })
   return removed
 }
@@ -148,13 +161,13 @@ async function waitHiresVideo(roomId, tsIn, timeoutMs = 20000, declaredBytes = 0
     let best = null
     let bestDelta = Infinity
     try {
-      for (const f of readdirSync(HIRES_DIR)) {
+      for (const f of readdirSync(hiresDir())) {
         if (!f.includes('hdvideo')) continue
         const m = f.match(/^(.+)_(\d{10})_(\d+)_(\d+)_/)
         if (!m || m[1] !== roomId) continue
         const delta = Math.abs(Number(m[2]) - ts)
         if (delta > 5) continue
-        const p = join(HIRES_DIR, f)
+        const p = join(hiresDir(), f)
         let sz = 0
         try { sz = statSync(p).size } catch { continue }
         if (sz < 50_000) continue
@@ -1278,7 +1291,7 @@ export class WeChatHookBridge {
               try {
                 execFileSync(process.env.PYTHON_EXE || 'D:\\Python311\\python.exe',
                   [join(dirname(fileURLToPath(import.meta.url)), 'decode-wechat-image.py'), '--find-key'],
-                  { timeout: 300_000, stdio: 'ignore' })
+                  { windowsHide: true, timeout: 300_000, stdio: 'ignore' })
               } catch { /* ignore */ }
               r = decryptDat(c.path, { tag: 'chat-retry' })
             }

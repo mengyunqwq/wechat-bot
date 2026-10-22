@@ -270,7 +270,7 @@ async function processGenRetry() {
         const out = r.file.replace(/\.(jpg|jpeg|png)$/i, '') + '-bubble.png'
         try {
           execFileSync(process.env.PYTHON_EXE || 'D:\\Python311\\python.exe',
-            [join(ROOT_DIR, 'add-bubble.py'), r.file, out, bubble, '--pos', 'top'], { stdio: 'ignore', timeout: 30_000 })
+            [join(ROOT_DIR, 'add-bubble.py'), r.file, out, bubble, '--pos', 'top'], { windowsHide: true, stdio: 'ignore', timeout: 30_000 })
           file = out
         } catch { /* 气泡失败就用原图 */ }
       }
@@ -538,7 +538,7 @@ async function handle(op, a = {}) {
         //   （实测：WS 客户端直接超时、插件收不到消息）。
         await new Promise((resolve, reject) => {
           execFile(py, [script, '--count', String(count), '--out', outDir], {
-            cwd: here,
+            windowsHide: true, cwd: here,
             env: { ...process.env, PYTHONIOENCODING: 'utf-8' },
             timeout: 10 * 60_000,
             maxBuffer: 8 * 1024 * 1024,
@@ -569,7 +569,7 @@ async function handle(op, a = {}) {
       const out = src.replace(/\.(jpg|jpeg|png)$/i, '') + '-bubble.png'
       const py = process.env.PYTHON_EXE || 'D:\\Python311\\python.exe'
       try {
-        execFileSync(py, [join(ROOT_DIR, 'add-bubble.py'), src, out, text, '--pos', String(a.pos || 'top')], { stdio: 'ignore', timeout: 30_000 })
+        execFileSync(py, [join(ROOT_DIR, 'add-bubble.py'), src, out, text, '--pos', String(a.pos || 'top')], { windowsHide: true, stdio: 'ignore', timeout: 30_000 })
         const item = stickers.add({ srcPath: out, context: '气泡 ' + text, kind: 'image', source: 'gen', senderName: 'AI 生成' })
         log('加气泡成功「' + text + '」→ ' + out)
         return { ok: true, file: out, stickerId: item?.id }
@@ -612,7 +612,7 @@ async function handle(op, a = {}) {
         const py = process.env.PYTHON_EXE || 'D:\\Python311\\python.exe'
         const script = join(ROOT_DIR, 'add-bubble.py')
         try {
-          execFileSync(py, [script, r.file, out, bubble, '--pos', String(a.bubblePos || 'top')], { stdio: 'ignore', timeout: 30_000 })
+          execFileSync(py, [script, r.file, out, bubble, '--pos', String(a.bubblePos || 'top')], { windowsHide: true, stdio: 'ignore', timeout: 30_000 })
           file = out
           log(`已加文字气泡「${bubble}」→ ${out}`)
         } catch (e) {

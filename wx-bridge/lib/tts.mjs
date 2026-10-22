@@ -167,7 +167,7 @@ export function synthesizeVoice(text, { emotion = 'main', voice, rate, pitch, ve
   inFlight++
   const t0 = Date.now()
   try {
-    const stdout = execFileSync(py, args, { timeout: TIMEOUT_MS, encoding: 'utf8', env: PY_ENV, maxBuffer: 8 * 1024 * 1024 })
+    const stdout = execFileSync(py, args, { windowsHide: true, timeout: TIMEOUT_MS, encoding: 'utf8', env: PY_ENV, maxBuffer: 8 * 1024 * 1024 })
     const r = parseJsonLine(stdout)
     if (!r || !r.ok) {
       log('TTS：脚本没给出成功 JSON（输出：' + String(stdout || '').replace(/\s+/g, ' ').slice(0, 200) + '）')

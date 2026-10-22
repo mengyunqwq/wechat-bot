@@ -4135,6 +4135,83 @@ let res = await callLlm(route, sys, usr, undefined)
     switch (op) {
       case 'status':
         return await client.call('status', {}, 8000)
+      case 'eyesInfo': {
+        // 眼睛（hires provider）状态：DLL 能力 / 目录 / 开关 / 文件情况
+        const dllPath = process.env.WECHAT_DLL || 'D:\\wxhook\\wx4110\\version.dll'
+        const dirFile = process.env.WECHAT_REPLAY_DIR_FILE || 'D:\\wxhook\\wx4110\\hook-cdn-replay.dir'
+        const switchFile = process.env.WECHAT_REPLAY_SWITCH_FILE || 'D:\\wxhook\\wx4110\\hook-cdn-replay.on'
+        const out = { dllPath, dirFile, switchFile }
+        // ① DLL 是否含 CDN 重放（眼睛的硬件前提）
+        try {
+          const buf = readFileSync(dllPath)
+          out.dllSizeKB = Math.round(buf.length / 1024)
+          out.dllHasReplay = buf.includes(Buffer.from('StartC2CDownload'))
+          out.dllHasVideo = buf.includes(Buffer.from('hdvideo'))
+          out.dllHasEyes = out.dllHasReplay && out.dllHasVideo
+        } catch (e) {
+          out.dllError = String(e?.message || e).slice(0, 120)
+          out.dllHasEyes = false
+        }
+        // ② 当前目录（DLL 读的那个文件）
+        try {
+          out.dir = readFileSync(dirFile, 'utf8').trim() || 'D:\\cdndl-replay'
+        } catch { out.dir = 'D:\\cdndl-replay'; out.dirFileMissing = true }
+        // ③ 开关
+        out.enabled = existsSync(switchFile)
+        // ④ 目录状态
+        try {
+          const files = existsSync(out.dir) ? readdirSync(out.dir) : []
+          let bytes = 0; let newest = 0
+          for (const f of files) {
+            try { const s = statSync(join(out.dir, f)); bytes += s.size; if (s.mtimeMs > newest) newest = s.mtimeMs } catch { /* ignore */ }
+          }
+          out.dirExists = existsSync(out.dir)
+          out.fileCount = files.length
+          out.mb = +(bytes / 1048576).toFixed(1)
+          out.newestAt = newest
+        } catch (e) {
+          out.dirError = String(e?.message || e).slice(0, 120)
+        }
+        return out
+      }
+      case 'eyesSetDir': {
+        // 改重放目录：写 hook-cdn-replay.dir（DLL + 桥都动态读它 → 立即生效，不用重启）
+        const dir = String(a.dir || '').trim()
+        if (!dir) return { ok: false, error: '目录不能为空' }
+        if (!/^[a-zA-Z]:[\\/]/.test(dir)) return { ok: false, error: '请填绝对路径（如 D:\\cdndl-replay）' }
+        const dirFile = process.env.WECHAT_REPLAY_DIR_FILE || 'D:\\wxhook\\wx4110\\hook-cdn-replay.dir'
+        try {
+          mkdirSync(dir, { recursive: true })
+          writeFileSync(dirFile, dir, 'utf8')
+          log('[eyes] 重放目录改为 ' + dir)
+          return { ok: true, dir, dirFile }
+        } catch (e) {
+          return { ok: false, error: String(e?.message || e).slice(0, 160) }
+        }
+      }
+      case 'eyesToggle': {
+        // 开/关重放：写/删 hook-cdn-replay.on（DLL 读它决定要不要抓）
+        const on = !!a.on
+        const switchFile = process.env.WECHAT_REPLAY_SWITCH_FILE || 'D:\\wxhook\\wx4110\\hook-cdn-replay.on'
+        try {
+          if (on) writeFileSync(switchFile, '', 'utf8')
+          else if (existsSync(switchFile)) unlinkSync(switchFile)
+          log('[eyes] 重放开关 → ' + (on ? '开' : '关'))
+          return { ok: true, enabled: on }
+        } catch (e) {
+          return { ok: false, error: String(e?.message || e).slice(0, 160) }
+        }
+      }
+      case 'eyesClean': {
+        const dirFile = process.env.WECHAT_REPLAY_DIR_FILE || 'D:\\wxhook\\wx4110\\hook-cdn-replay.dir'
+        let dir = 'D:\\cdndl-replay'
+        try { dir = readFileSync(dirFile, 'utf8').trim() || dir } catch { /* 用默认 */ }
+        let removed = 0
+        try {
+          for (const f of readdirSync(dir)) { try { unlinkSync(join(dir, f)); removed++ } catch { /* ignore */ } }
+        } catch (e) { return { ok: false, error: String(e?.message || e).slice(0, 120), dir } }
+        return { ok: true, removed, dir }
+      }
       case 'usage': {
         const today = new Date().toISOString().slice(0, 10)
         return {

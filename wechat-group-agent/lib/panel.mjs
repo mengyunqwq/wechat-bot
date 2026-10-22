@@ -26,6 +26,7 @@ const ALLOWED_OPS = new Set([
   'names.set', 'names.add', 'names.refresh',
   // 2026-10-22 新增：用量统计 / 环境诊断 / 自动更新
   'usage', 'diag', 'diagCleanHires',
+  'eyesInfo', 'eyesSetDir', 'eyesToggle', 'eyesClean',
   'checkUpdate', 'updateInfo', 'applyUpdate',
 ])
 

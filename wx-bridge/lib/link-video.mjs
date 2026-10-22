@@ -173,7 +173,7 @@ export function ffmpegExe() {
   }
   try {
     const out = execFileSync(PY, ['-c', 'import imageio_ffmpeg;print(imageio_ffmpeg.get_ffmpeg_exe())'],
-      { encoding: 'utf8', timeout: 30_000, env: PY_ENV })
+      { windowsHide: true, encoding: 'utf8', timeout: 30_000, env: PY_ENV })
     const p = String(out || '').trim().split(/\r?\n/).filter(Boolean).pop() || ''
     if (p && existsSync(p)) ffmpegPath = p
   } catch { /* 拿不到就不传，交给 yt-dlp 自己找 */ }

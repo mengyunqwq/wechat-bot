@@ -301,7 +301,7 @@ export function probeVideo(videoPath, { frames = 6, tag = 'video', log = () => {
   try {
     const out = execFileSync(PY, [SCRIPT, '--in', videoPath, '--out-dir', VIDEO_TMP,
       '--frames', String(Number(frames) || 6), '--tag', safe],
-    { timeout: 300_000, encoding: 'utf8', env: PY_ENV })
+    { windowsHide: true, timeout: 300_000, encoding: 'utf8', env: PY_ENV })
     for (const line of String(out || '').split(/\r?\n/)) {
       if (line.startsWith('JSON: ')) {
         const r = JSON.parse(line.slice(6))

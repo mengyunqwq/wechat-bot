@@ -269,7 +269,7 @@ export function findVoiceFile(root, roomId, { nearTs = 0, toleranceMs = 30 * 60_
 function runDecoder(src, dst, extraArgs = []) {
   try {
     const out = execFileSync(PY, [SCRIPT, '--in', src, '--out', dst, ...extraArgs],
-      { timeout: 120_000, encoding: 'utf8', env: PY_ENV })
+      { windowsHide: true, timeout: 120_000, encoding: 'utf8', env: PY_ENV })
     return { ok: existsSync(dst) && statSync(dst).size > 44, wav: dst, out: String(out || '').trim() }
   } catch (e) {
     const out = String(e?.stdout || '') + String(e?.stderr || '')
@@ -317,7 +317,7 @@ export function decodeVoice(srcPath, { tag = 'voice', log = () => {} } = {}) {
     log(`语音解码：源文件是 V2 加密容器（${srcPath.split(/[\\/]/).pop()}），先用图片链路剥壳…`)
     const bare = join(TMP_DIR, `${safe}.bare.bin`)
     try {
-      execFileSync(PY, [IMAGE_SCRIPT, srcPath, bare], { timeout: 120_000, encoding: 'utf8', env: PY_ENV })
+      execFileSync(PY, [IMAGE_SCRIPT, srcPath, bare], { windowsHide: true, timeout: 120_000, encoding: 'utf8', env: PY_ENV })
       if (existsSync(bare) && statSync(bare).size > 256) { feed = bare; note = 'V2剥壳后' }
       else { log('语音解码：V2 剥壳没产出内容（密钥可能失效）') }
     } catch (e) {
