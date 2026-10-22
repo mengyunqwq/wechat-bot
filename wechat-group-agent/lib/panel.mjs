@@ -24,6 +24,9 @@ const ALLOWED_OPS = new Set([
   'stickers', 'genSticker', 'genEmotions',
   'memory.list', 'memory.add', 'memory.clear', 'memory.extract',
   'names.set', 'names.add', 'names.refresh',
+  // 2026-10-22 新增：用量统计 / 环境诊断 / 自动更新
+  'usage', 'diag', 'diagCleanHires',
+  'checkUpdate', 'updateInfo', 'applyUpdate',
 ])
 
 // 不做模块级缓存：热重载后 panel/index.html 的改动必须立刻可见

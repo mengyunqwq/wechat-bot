@@ -258,6 +258,7 @@ export function splitMessage(text, {
   if (!t) return [];
   const len = [...t].length;
 
+  // 短文本：只按概率拆（且至少要有可断句的标点）
   if (len < minLen) {
     if (rand >= chance) return [t];
     // 单句短文本只有句末标点，切不出 2 段 → 退到逗号顿号，否则概率拆永远不生效
@@ -267,11 +268,11 @@ export function splitMessage(text, {
     return capParts(sp, maxParts);
   }
 
+  // 长文本：必定拆
   let parts = cutBy(t, SENTENCE_END);
   if (parts.length < 2) parts = cutBy(t, SOFT_END);
   if (parts.length < 2) {
     // 连标点都没有：按"长度的一半"硬切，保证长文本至少拆成 2 条
-    // （原来直接用 hardMax 切，40 字刚好不超上限 → 仍然一整条发出去）
     parts = splitOversize([t], Math.max(1, Math.min(hardMax, Math.ceil(len / 2))));
   }
   parts = mergeTiny(parts, hardMax);
@@ -353,7 +354,7 @@ export class RoomPolicy {
       if (rand > p) return { reply: false, reason: `对话延续未命中（p=${p}）`, priority }
       const gap = now - this.lastReplyAt
       if (gap < 2000) return { reply: false, reason: `接话太快（${Math.round(gap)}ms<2000ms）`, priority }
-      return { reply: true, reason: `对话延续（第 ${(this.turnStreak ?? 0) + 1} 轮）`, priority }
+      return { reply: true, reason: `对话延续（第 ${this.turnStreak + 1} 轮）`, priority }
     }
 
     const gap = now - this.lastReplyAt
@@ -417,7 +418,7 @@ export function cleanReply(raw, { maxLen = 60, maxLines = 1 } = {}) {
   if (!t) return ''
   t = t.replace(/^```[\s\S]*?\n/, '').replace(/```$/, '').trim()
   const lines = t.split(/\r?\n/).map((s) => s.trim()).filter(Boolean)
-  const kept = maxLines > 0 ? lines.slice(0, Math.max(1, maxLines)) : lines   // maxLines<=0 = 不丢行
+  const kept = lines.slice(0, Math.max(1, maxLines))
   const out = []
   for (const line of kept) {
     out.push(cleanOneLine(line, maxLen))
@@ -435,7 +436,7 @@ function cleanOneLine(raw, maxLen) {
   t = t.replace(/^["'“”‘’]+|["'“”‘’]+$/g, '').trim()
   // 去括号舞台提示（整句都是括号时保留内容）
   t = t.replace(/^[（(](.{0,20})[)）]$/, '$1').trim()
-  if (maxLen > 0 && [...t].length > maxLen) {   // maxLen<=0 = 不截断（不限制输出字数）
+  if ([...t].length > maxLen) {
     const chars = [...t]
     const cut = chars.slice(0, maxLen).join('')
     // 在限长内找**最后一个**句末标点收尾（取第一个会把长回复砍得过短）
@@ -443,23 +444,4 @@ function cleanOneLine(raw, maxLen) {
     t = (marks.length ? cut.slice(0, marks[marks.length - 1].index + 1) : cut).trim()
   }
   return t
-}
-
-/**
- * 解析 [稍后:N] —— 模型说「等下我再想想」时，要求 N 分钟后真的回来补一条。
- * 与 [表情:] 同风格：单独占一行，从正文里抠掉，不发给群。
- * @returns {{minutes: number, text: string}}
- */
-export function parseLaterDirective(raw) {
-  let t = String(raw ?? '')
-  let minutes = 0
-  const m = t.match(/\[\s*稍后\s*[:：]?\s*(\d{1,3})\s*(?:分钟|min)?\s*\]/)
-  if (m) {
-    minutes = Math.max(1, Math.min(30, Number(m[1]) || 0))
-    t = t.replace(m[0], '')
-  } else if (/\[\s*稍后\s*\]/.test(t)) {
-    minutes = 3
-    t = t.replace(/\[\s*稍后\s*\]/, '')
-  }
-  return { minutes, text: t.replace(/\n{3,}/g, '\n\n').trim() }
 }

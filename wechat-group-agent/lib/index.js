@@ -14,7 +14,8 @@
  *
  * 纯 ESM，无编译步骤（本环境没有可用的 tsc），改完 dev_reload_package 即生效。
  */
-import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
+import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, unlinkSync, writeFileSync, copyFileSync, rmdirSync } from 'node:fs'
+import { execFileSync } from 'node:child_process'
 import { join, dirname } from 'node:path'
 import { homedir } from 'node:os'
 import { createHash, randomUUID } from 'node:crypto'
@@ -2993,6 +2994,15 @@ let res = await callLlm(route, sys, usr, undefined)
     return () => clearInterval(iv)
   }, SHORT + ': health heartbeat')
 
+  // 自动更新：启动 40 秒后查一次（避开插件初始化高峰），之后每 24 小时一次。
+  // 只检查、不自动装 —— 面板会弹提示，用户点「立即更新」才动文件。
+  ctx.effect(() => {
+    let first = setTimeout(() => { void checkUpdate().catch((e) => log('检查更新失败：' + String(e?.message || e))) }, 40_000)
+    const daily = setInterval(() => { void checkUpdate().catch((e) => log('检查更新失败：' + String(e?.message || e))) }, 24 * 3600 * 1000)
+    return () => { clearTimeout(first); clearInterval(daily) }
+  }, SHORT + ': auto update check')
+
+
   // ── 抖音自动刷（只读）→ 她挑一条 → 发到群里 ───────────────────────
   // 链路：桥 op `douyinBrush`（Playwright + 独立已登录 profile，真实鼠标点「推荐」+
   //      ArrowDown 翻页，见 wx-bridge/douyin-brush.py）→ 拿回 {desc, like, shot}
@@ -3816,6 +3826,193 @@ let res = await callLlm(route, sys, usr, undefined)
     return { ok: true, config: readImageConfig() }
   }
 
+  // ── 自动更新（2026-10-22）────────────────────────────────────────
+  //   机制：以 GitHub main 分支的 commit sha 作为版本号
+  //     · 检查：GET api.github.com/repos/<owner>/<repo>/commits/main
+  //     · 公告：最近 N 个 commit message
+  //     · 下载：codeload.github.com 的 zip（实测可用；raw.githubusercontent 被墙，别用）
+  //     · 覆盖：白名单（只动代码，绝不碰 config.json / data / facts / memory）
+  //     · 备份：更新前把当前代码打包到 backups/，失败自动回滚
+  //   为什么用 main 分支而不是 Release：用户要求"新功能都要更新"，
+  //   走 main 就不用每次手动发 Release。
+  const UPDATE_REPO = process.env.WECHAT_UPDATE_REPO || 'mengyunqwq/wechat-bot'
+  const UPDATE_STATE_FILE = join(dirname(memoryDir), 'update-state.json')
+  const UPDATE_BACKUP_DIR = join(dirname(memoryDir), 'backups')
+  const updateState = { commit: '', checkedAt: 0, latest: null, history: [] }
+  try {
+    const u = JSON.parse(readFileSync(UPDATE_STATE_FILE, 'utf8')) || {}
+    updateState.commit = String(u.commit || '')
+    updateState.checkedAt = Number(u.checkedAt) || 0
+    updateState.latest = u.latest || null
+    updateState.history = Array.isArray(u.history) ? u.history.slice(0, 20) : []
+  } catch { /* 首次 */ }
+  function saveUpdateState() {
+    try { writeFileSync(UPDATE_STATE_FILE, JSON.stringify(updateState, null, 1), 'utf8') } catch { /* ignore */ }
+  }
+  // 为什么不用 fetch：本机网络经过代理/防火墙（中间人解密），Node 的 fetch 报
+  //   UNABLE_TO_VERIFY_LEAF_SIGNATURE（证书链不完整）；而 PowerShell 走 Windows
+  //   证书存储，能正常访问 GitHub。所以统一用 PowerShell 做 HTTP。
+  const psJson = (url, ms = 20000) => {
+    const cmd = `[Console]::OutputEncoding=[Text.Encoding]::UTF8; try { (Invoke-RestMethod -Uri '${url}' -Headers @{'User-Agent'='dsh-wechat-bot'; 'Accept'='application/vnd.github+json'} -TimeoutSec ${Math.round(ms / 1000)}) | ConvertTo-Json -Depth 6 -Compress } catch { Write-Output ('ERR:' + $_.Exception.Message) }`
+    const out = execFileSync('powershell', ['-NoProfile', '-NonInteractive', '-Command', cmd], {
+      encoding: 'utf8', timeout: ms + 5000, windowsHide: true,
+    })
+    const s = String(out || '')
+    if (s.startsWith('ERR:')) throw new Error(s.slice(4, 160))
+    return JSON.parse(s)
+  }
+  const ghJson = async (path, ms = 20000) => psJson('https://api.github.com' + path, ms)
+  /** 检查更新：返回 { available, local, remote, behind, commits[] } */
+  async function checkUpdate() {
+    const head = await ghJson(`/repos/${UPDATE_REPO}/commits/main`)
+    const remoteSha = String(head.sha || '')
+    const remoteShort = remoteSha.slice(0, 7)
+    const remoteMsg = String(head.commit?.message || '').split('\n')[0]
+    const remoteDate = head.commit?.author?.date || ''
+    let local = updateState.commit
+    // 首次运行：以当前远程为基线，不提示更新（否则第一次打开就弹窗）
+    if (!local) {
+      updateState.commit = remoteSha
+      updateState.checkedAt = Date.now()
+      updateState.latest = { sha: remoteSha, short: remoteShort, msg: remoteMsg, date: remoteDate }
+      saveUpdateState()
+      return { available: false, firstRun: true, local: remoteSha, remote: remoteSha, behind: 0, commits: [] }
+    }
+    updateState.checkedAt = Date.now()
+    updateState.latest = { sha: remoteSha, short: remoteShort, msg: remoteMsg, date: remoteDate }
+    saveUpdateState()
+    const available = local !== remoteSha
+    log('[update] 本地=' + local.slice(0, 7) + ' 远程=' + remoteShort + ' → ' + (available ? '有更新' : '最新'))
+    let commits = []
+    if (available) {
+      try {
+        const list = await ghJson(`/repos/${UPDATE_REPO}/commits?per_page=15`)
+        commits = (Array.isArray(list) ? list : []).map((c) => ({
+          sha: String(c.sha || '').slice(0, 7),
+          msg: String(c.commit?.message || '').split('\n')[0],
+          date: c.commit?.author?.date || '',
+        }))
+        // 只保留"本地之后"的提交（到遇到本地 sha 为止）
+        const idx = commits.findIndex((c) => local.startsWith(c.sha) || c.sha === local.slice(0, 7))
+        if (idx >= 0) commits = commits.slice(0, idx)
+      } catch { /* 公告拿不到不影响更新 */ }
+    }
+    return {
+      available, local, remote: remoteSha, remoteShort, remoteMsg, remoteDate,
+      behind: commits.length, commits,
+    }
+  }
+  /** 下载 zip 并解压到临时目录。返回解压后的根目录 */
+  async function downloadAndExtract(sha) {
+    const tmp = join((process.env.TEMP || process.env.TMP || 'C:\\Windows\\Temp'), 'dsh-wb-update-' + Date.now())
+    mkdirSync(tmp, { recursive: true })
+    const zipPath = join(tmp, 'src.zip')
+    const url = `https://codeload.github.com/${UPDATE_REPO}/zip/${sha}`
+    // 同样走 PowerShell（Node fetch 在这台机器上证书验证失败：UNABLE_TO_VERIFY_LEAF_SIGNATURE）
+    const zipEsc = zipPath.replace(/'/g, "''")
+    const psCmd = `[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; Invoke-WebRequest -Uri '${url}' -OutFile '${zipEsc}' -Headers @{'User-Agent'='dsh-wechat-bot'} -TimeoutSec 180`
+    execFileSync('powershell', ['-NoProfile', '-NonInteractive', '-Command', psCmd], { stdio: 'pipe', timeout: 200000, windowsHide: true })
+    const bytes = existsSync(zipPath) ? statSync(zipPath).size : 0
+    if (!bytes) throw new Error('下载后文件为空')
+    // 解压（Node 无内置 zip，用 PowerShell；Windows 环境固定）
+    const ps = `Expand-Archive -LiteralPath '${zipPath.replace(/'/g, "''")}' -DestinationPath '${tmp.replace(/'/g, "''")}' -Force`
+    execFileSync('powershell', ['-NoProfile', '-NonInteractive', '-Command', ps], { stdio: 'pipe', timeout: 120000 })
+    // 找解压出来的顶层目录（GitHub zip 会有一层 <repo>-<sha>/）
+    const dirs = readdirSync(tmp).filter((f) => {
+      try { return statSync(join(tmp, f)).isDirectory() } catch { return false }
+    })
+    if (!dirs.length) throw new Error('解压后没找到目录')
+    return { root: join(tmp, dirs[0]), tmp, bytes }
+  }
+  /** 备份当前代码目录到 backups/（2026-10-22 修：逐目录打包，避免同名目录被合并） */
+  function backupCode() {
+    mkdirSync(UPDATE_BACKUP_DIR, { recursive: true })
+    const stamp = new Date().toISOString().replace(/[:T]/g, '-').slice(0, 19)
+    const out = join(UPDATE_BACKUP_DIR, `code-${stamp}.zip`)
+    const rt = runtimeDirs().filter((d) => existsSync(d.dir))
+    if (!rt.length) return ''
+    // 先把各目录复制到临时区的子结构里，再整体打包 —— 这样解压后能按原结构还原
+    const stage = join(process.env.TEMP || 'C:\\Windows\\Temp', 'wb-bk-' + Date.now())
+    try {
+      for (const d of rt) {
+        const dest = join(stage, d.repo)   // 例如 stage/wechat-group-agent/lib
+        mkdirSync(dest, { recursive: true })
+        for (const f of readdirSync(d.dir, { withFileTypes: true })) {
+          const sp = join(d.dir, f.name); const dp = join(dest, f.name)
+          if (f.isDirectory()) copyRecursive(sp, dp)
+          else copyFileSync(sp, dp)
+        }
+      }
+      const ps = `Compress-Archive -Path '${(stage + '\\*').replace(/'/g, "''")}' -DestinationPath '${out.replace(/'/g, "''")}' -Force`
+      execFileSync('powershell', ['-NoProfile', '-NonInteractive', '-Command', ps], { stdio: 'pipe', timeout: 180000, windowsHide: true })
+    } finally {
+      try { rmRecursive(stage) } catch { /* ignore */ }
+    }
+    return out
+  }
+  function copyRecursive(s, d) {
+    mkdirSync(d, { recursive: true })
+    for (const f of readdirSync(s, { withFileTypes: true })) {
+      const sp = join(s, f.name); const dp = join(d, f.name)
+      if (f.isDirectory()) copyRecursive(sp, dp)
+      else copyFileSync(sp, dp)
+    }
+  }
+  function rmRecursive(p) {
+    try {
+      for (const f of readdirSync(p, { withFileTypes: true })) {
+        const fp = join(p, f.name)
+        if (f.isDirectory()) rmRecursive(fp)
+        else unlinkSync(fp)
+      }
+      rmdirSync(p)
+    } catch { /* ignore */ }
+  }
+  /** 运行时目录 ↔ 仓库目录 的映射（白名单：只覆盖这些） */
+  function runtimeDirs() {
+    const home = process.env.USERPROFILE || homedir()
+    const base = process.env.WECHAT_BOT_HOME || 'D:\\微信deepseek'
+    return [
+      { repo: 'wechat-group-agent/lib',    dir: join(base, 'wechat-group-agent', 'lib'),    label: '插件代码' },
+      { repo: 'wechat-group-agent/panel',  dir: join(base, 'wechat-group-agent', 'panel'),  label: '控制面板' },
+      { repo: 'wx-bridge/lib',             dir: join(base, 'wx-bridge', 'lib'),             label: '桥代码' },
+      { repo: 'scripts',                   dir: join(base, 'scripts'),                      label: '脚本' },
+    ]
+  }
+  /** 把解压出来的代码覆盖到运行时（按白名单） */
+  function applyFiles(srcRoot) {
+    const report = []
+    for (const rt of runtimeDirs()) {
+      const src = join(srcRoot, rt.repo)
+      if (!existsSync(src)) { report.push({ label: rt.label, skipped: '仓库里没有' }); continue }
+      mkdirSync(rt.dir, { recursive: true })
+      let n = 0
+      const walk = (s, d) => {
+        mkdirSync(d, { recursive: true })
+        for (const f of readdirSync(s, { withFileTypes: true })) {
+          const sp = join(s, f.name); const dp = join(d, f.name)
+          if (f.isDirectory()) walk(sp, dp)
+          else { copyFileSync(sp, dp); n++ }
+        }
+      }
+      walk(src, rt.dir)
+      // wx-bridge 根目录的 *.mjs（server.mjs 等）单独处理
+      report.push({ label: rt.label, files: n, dir: rt.dir })
+    }
+    // 桥根目录的 .mjs 文件（server.mjs / 其他）
+    const bridgeRoot = join(process.env.WECHAT_BOT_HOME || 'D:\\微信deepseek', 'wx-bridge')
+    const srcBridge = join(srcRoot, 'wx-bridge')
+    if (existsSync(srcBridge)) {
+      let n = 0
+      for (const f of readdirSync(srcBridge, { withFileTypes: true })) {
+        if (f.isFile() && f.name.endsWith('.mjs')) {
+          copyFileSync(join(srcBridge, f.name), join(bridgeRoot, f.name)); n++
+        }
+      }
+      if (n) report.push({ label: '桥入口文件', files: n, dir: bridgeRoot })
+    }
+    return report
+  }
   // ── 环境诊断（2026-10-22）────────────────────────────────────────
   //   面板的「诊断」页用。为什么要有：崩溃 / 库读不到 / 不回话这几种故障，
   //   在面板上原来只能靠"消息收不到"间接猜，看不出根因。
@@ -3945,6 +4142,137 @@ let res = await callLlm(route, sys, usr, undefined)
           return { ok: false, error: String(e?.message || e).slice(0, 120), dir }
         }
         return { ok: true, removed, dir }
+      }
+      case 'checkUpdate': {
+        try {
+          return await checkUpdate()
+        } catch (e) {
+          return { available: false, error: String(e?.message || e).slice(0, 160) }
+        }
+      }
+      case 'updateInfo': {
+        return {
+          repo: UPDATE_REPO,
+          local: updateState.commit,
+          checkedAt: updateState.checkedAt,
+          latest: updateState.latest,
+          history: updateState.history,
+        }
+      }
+      case 'applyUpdate': {
+        // 目标 sha：默认用「检查到的最新」；也允许显式指定
+        const target = String(a.sha || updateState.latest?.sha || '').trim()
+        if (!/^[0-9a-f]{7,40}$/i.test(target)) return { ok: false, error: '目标版本无效（先检查更新）' }
+        const steps = []
+        let backupPath = ''
+        let tmpRoot = ''
+        try {
+          steps.push({ step: '下载源码包', ok: true, detail: target.slice(0, 7) })
+          const dl = await downloadAndExtract(target)
+          tmpRoot = dl.root
+          steps.push({ step: '解压', ok: true, detail: Math.round(dl.bytes / 1024) + 'KB' })
+          backupPath = backupCode()
+          steps.push({ step: '备份当前代码', ok: !!backupPath, detail: backupPath || '（跳过）' })
+          const report = applyFiles(tmpRoot)
+          steps.push({ step: '覆盖代码', ok: true, detail: report.map((r) => `${r.label}:${r.files ?? r.skipped}`).join(' / ') })
+          // 记录新版本
+          const oldCommit = updateState.commit
+          updateState.commit = target
+          updateState.history.unshift({ at: Date.now(), from: oldCommit.slice(0, 7), to: target.slice(0, 7) })
+          updateState.history = updateState.history.slice(0, 20)
+          updateState.latest = null
+          saveUpdateState()
+          steps.push({ step: '记录版本', ok: true, detail: oldCommit.slice(0, 7) + ' → ' + target.slice(0, 7) })
+          // 桥需要重启才生效：先记下旧桥的启动参数，杀掉，再按原参数拉起
+          try {
+            const psFind = "[Console]::OutputEncoding=[Text.Encoding]::UTF8; $c = Get-NetTCPConnection -LocalPort 17300 -State Listen -EA SilentlyContinue | Select-Object -First 1; if ($c) { $c.OwningProcess } else { 0 }"
+            const out = execFileSync('powershell', ['-NoProfile', '-NonInteractive', '-Command', psFind], { encoding: 'utf8', timeout: 15000, windowsHide: true })
+            const pid = parseInt(String(out).trim(), 10)
+            if (pid > 0) {
+              // 取旧桥的命令行，重启时沿用（这样自定义参数不会丢）
+              let oldCmd = ''
+              try {
+                const psCmd = `(Get-CimInstance Win32_Process -Filter "ProcessId=${pid}").CommandLine`
+                oldCmd = String(execFileSync('powershell', ['-NoProfile', '-NonInteractive', '-Command', psCmd], { encoding: 'utf8', timeout: 15000, windowsHide: true })).trim()
+              } catch { /* 拿不到就用手册参数 */ }
+              try { process.kill(pid) } catch { /* ignore */ }
+              steps.push({ step: '停止旧桥', ok: true, detail: 'pid=' + pid })
+              // 等端口释放
+              const t0 = Date.now()
+              while (Date.now() - t0 < 8000) {
+                try {
+                  const still = execFileSync('powershell', ['-NoProfile', '-NonInteractive', '-Command',
+                    "if (Get-NetTCPConnection -LocalPort 17300 -State Listen -EA SilentlyContinue) { '1' } else { '0' }"], { encoding: 'utf8', timeout: 8000, windowsHide: true }).trim()
+                  if (still === '0') break
+                } catch { break }
+                await new Promise((r) => setTimeout(r, 500))
+              }
+              // 拉起新桥
+              const base = process.env.WECHAT_BOT_HOME || 'D:\\微信deepseek'
+              const bridgeDir = join(base, 'wx-bridge')
+              let nodeArgs
+              if (oldCmd && /server\.mjs/.test(oldCmd)) {
+                // 从旧命令行里剥掉 "node" 前缀，保留参数
+                nodeArgs = oldCmd.replace(/^"[^"]*node\.exe"\s*/i, '').replace(/^\S*node\.exe\s*/i, '').replace(/^node\s*/i, '').trim()
+              }
+              const argv = nodeArgs
+                ? nodeArgs.match(/"[^"]*"|\S+/g).map((x) => x.replace(/^"|"$/g, ''))
+                : ['server.mjs', '--transport=wechat-hook', '--api-port=30001', '--cb-port=18998',
+                   '--data-dir=' + join(base, 'data'), '--wechat=' + (process.env.WECHAT_EXE || 'D:\\wxhook\\wx4110\\Weixin.exe')]
+              const { spawn } = await import('node:child_process')
+              const child = spawn(process.execPath, argv, { cwd: bridgeDir, detached: true, stdio: 'ignore', windowsHide: true })
+              child.unref()
+              // 等它真的监听上
+              let up = false
+              const t1 = Date.now()
+              while (Date.now() - t1 < 25000) {
+                try {
+                  const ok = execFileSync('powershell', ['-NoProfile', '-NonInteractive', '-Command',
+                    "if (Get-NetTCPConnection -LocalPort 17300 -State Listen -EA SilentlyContinue) { '1' } else { '0' }"], { encoding: 'utf8', timeout: 8000, windowsHide: true }).trim()
+                  if (ok === '1') { up = true; break }
+                } catch { /* ignore */ }
+                await new Promise((r) => setTimeout(r, 1000))
+              }
+              bridgeRestarted = up
+              steps.push({ step: up ? '重启桥' : '重启桥（超时未监听）', ok: up, detail: up ? '已监听 17300' : '请手动启动' })
+            } else {
+              steps.push({ step: '桥重启', ok: true, detail: '没找到运行中的桥，跳过' })
+            }
+          } catch (e) {
+            steps.push({ step: '重启桥', ok: false, detail: String(e?.message || e).slice(0, 100) })
+          }
+          return {
+            ok: true, target, backup: backupPath, steps,
+            needRestart: { bridge: true, plugin: true, panel: false },
+            hint: '面板刷新即生效；桥会自动重启；插件代码需要重启 DSH 才加载',
+          }
+        } catch (e) {
+          // 失败 → 尝试回滚
+          let rolledBack = false
+          if (backupPath && existsSync(backupPath)) {
+            try {
+              const tmp2 = join(process.env.TEMP || 'C:\\Windows\\Temp', 'dsh-wb-rollback-' + Date.now())
+              mkdirSync(tmp2, { recursive: true })
+              execFileSync('powershell', ['-NoProfile', '-NonInteractive', '-Command',
+                `Expand-Archive -LiteralPath '${backupPath.replace(/'/g, "''")}' -DestinationPath '${tmp2.replace(/'/g, "''")}' -Force`],
+                { stdio: 'pipe', timeout: 120000 })
+              applyFiles(tmp2)
+              rolledBack = true
+            } catch { /* ignore */ }
+          }
+          return {
+            ok: false, error: String(e?.message || e).slice(0, 200),
+            steps, backup: backupPath, rolledBack,
+          }
+        } finally {
+          // 清理临时目录
+          if (tmpRoot) {
+            try {
+              const { rmSync } = await import('node:fs')
+              rmSync(tmpRoot.replace(/[\\/][^\\/]+$/, ''), { recursive: true, force: true })
+            } catch { /* ignore */ }
+          }
+        }
       }
       case 'selfcheck': {
         const h = await healthCheck({ deep: true })

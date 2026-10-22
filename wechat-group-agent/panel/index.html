@@ -175,6 +175,7 @@ const NAV = [
   {id:'providers', title:'模型接口', icon:'🧩'},
   {id:'model', title:'人设模型', icon:'🐟', groups:['model']},
   {id:'diag', title:'诊断', icon:'🔬', special:'diag'},
+  {id:'update', title:'更新', icon:'📦', special:'update'},
   {id:'ops', title:'运维日志', icon:'🩺', groups:['health','selfheal','advanced'], special:'ops'},
   {id:'manual', title:'手动操作', icon:'🕹'},
 ];
@@ -273,6 +274,15 @@ function renderHeader() {
   if (!S.config.enabled) { b.className = 'banner bad show'; b.textContent = '⛔ 机器人已停用：仍会收消息、记上下文/记忆，但不回复、不主动发言。'; }
   else if (S.config.dryRun) { b.className = 'banner warn show'; b.textContent = '🧪 演练模式：完整走决策，但不调 LLM、不发送任何消息。'; }
   else { b.className = 'banner'; b.textContent = ''; }
+  // 🆕 有新版：顶部追加提示（不覆盖上面的停用/演练提示，用独立提示条）
+  let ub = document.getElementById('update-banner')
+  if (!ub) { ub = document.createElement('div'); ub.id = 'update-banner'; ub.className = 'banner warn'; document.body.insertBefore(ub, document.body.firstChild.nextSibling) }
+  const up = App.upd
+  if (up && up.available) {
+    ub.className = 'banner warn show'
+    ub.innerHTML = '🆕 有新版本 <b>' + esc(up.remoteShort || '') + '</b>（' + (up.behind || 0) + ' 个提交） · <a href="#" id="upd-link">查看并更新</a>'
+    setTimeout(() => { const l = document.getElementById('upd-link'); if (l) l.onclick = (ev) => { ev.preventDefault(); App.tab = 'update'; localStorage.setItem('wb:tab', 'update'); renderNav(); renderActive({}) } }, 0)
+  } else { ub.className = 'banner' }
 }
 
 /* ── 导航 ─────────────────────────────────────────────── */
@@ -298,6 +308,7 @@ function renderActive(opts) {
   if (nav.id === 'providers') return renderProviders();
   if (nav.id === 'manual') return renderManual();
   if (nav.id === 'diag') return renderDiag();
+  if (nav.id === 'update') return renderUpdate();
   if (nav.groups) {
     renderParams(nav);
     if (nav.special === 'stickers') renderStickerExtra();
@@ -1245,6 +1256,98 @@ async function loadLogs() {
     box.scrollTop = box.scrollHeight;
     const lf = $('#log-file'); if (lf) lf.textContent = j.file || '';
   } catch (e) { box.textContent = '读取失败：' + e.message; }
+}
+
+/* ── 更新（自动检查 GitHub main 分支）────────────────────── */
+function renderUpdate() {
+  if (!App.updInfo) {
+    api('/action', { method: 'POST', body: JSON.stringify({ op: 'updateInfo' }) })
+      .then(j => { App.updInfo = (j && j.result) || {}; if (App.tab === 'update') renderActive({}); })
+      .catch(() => { App.updInfo = {} })
+  }
+  if (!App.upd) {
+    api('/action', { method: 'POST', body: JSON.stringify({ op: 'checkUpdate' }) })
+      .then(j => { App.upd = (j && j.result) || null; if (App.tab === 'update') renderActive({}); })
+      .catch(() => {})
+  }
+  const u = App.upd || null;
+  const info = App.updInfo || {};
+  const has = u && u.available;
+  view.innerHTML = `<h2>更新 <span class="muted small">从 GitHub 拉最新代码</span></h2>
+
+    <div class="section"><div class="hd">📦 当前版本</div>
+      <table class="table"><tbody>
+        <tr><td class="muted">本地</td><td class="mono">${esc((u && u.local) || info.local || '未知')}</td></tr>
+        <tr><td class="muted">远程最新</td><td class="mono">${esc((u && u.remote) || (info.latest && info.latest.sha) || '未知')}</td></tr>
+        <tr><td class="muted">远程提交</td><td>${esc((u && u.remoteMsg) || (info.latest && info.latest.msg) || '')}</td></tr>
+        <tr><td class="muted">仓库</td><td class="mono">${esc(info.repo || '')}</td></tr>
+        <tr><td class="muted">上次检查</td><td>${(u && u.checkedAt) || info.checkedAt ? esc(ago((u && u.checkedAt) || info.checkedAt)) : '从未'}</td></tr>
+      </tbody></table>
+      <div class="row" style="margin-top:10px">
+        <button class="btn primary" id="upd-check">检查更新</button>
+        <span id="upd-msg" class="small"></span>
+      </div>
+    </div>
+
+    ${has ? `<div class="section" style="border:1px solid var(--warn)"><div class="hd">🆕 发现新版本
+        <span class="muted">${esc((u.remoteShort || '') + ' · ' + (u.behind || 0) + ' 个提交')}</span></div>
+      <div class="small" style="max-height:240px;overflow:auto;margin:6px 0">
+        ${(u.commits && u.commits.length) ? u.commits.map(c => `<div style="padding:4px 0;border-bottom:1px dashed var(--line)">
+          <span class="mono muted">${esc(c.sha)}</span> ${esc(c.msg)}</div>`).join('') : '<div class="empty">（没拿到提交列表）</div>'}
+      </div>
+      <div class="row">
+        <button class="btn primary" id="upd-apply">立即更新</button>
+        <span class="muted small">会先备份当前代码到 backups/；失败自动回滚</span>
+      </div>
+      <div id="upd-steps" class="small mono" style="margin-top:8px;white-space:pre-wrap"></div>
+    </div>` : `<div class="section"><div class="hd">✅ 已是最新</div>
+      <div class="small muted">${u ? '远程与本地一致。' : '还没检查过，点上面的「检查更新」。'}</div>
+    </div>`}
+
+    <div class="section"><div class="hd">🕘 更新历史</div>
+      ${(info.history && info.history.length) ? info.history.map(h => `<div style="padding:3px 0" class="small">
+        <span class="muted">${esc(fmtTime(h.at))}</span> <span class="mono">${esc(h.from)}</span> → <span class="mono">${esc(h.to)}</span></div>`).join('') : '<div class="empty">还没有更新记录</div>'}
+    </div>
+
+    <div class="section"><div class="hd">ℹ️ 说明</div>
+      <div class="small muted">
+        · 每天自动检查一次（插件启动 40 秒后先查一次）<br>
+        · 只覆盖代码：插件 lib/、面板 panel/、桥 lib/、桥入口 *.mjs、scripts/<br>
+        · <b>绝不碰</b> config.json / data/ / facts/ / memory/ / node_modules/<br>
+        · 更新后：面板刷新即生效；桥会自动重启；<b>插件代码需要重启 DSH</b> 才加载
+      </div>
+    </div>`;
+
+  $('#upd-check').onclick = async () => {
+    const btn = $('#upd-check'); btn.disabled = true; btn.textContent = '检查中…';
+    try {
+      const j = await api('/action', { method: 'POST', body: JSON.stringify({ op: 'checkUpdate' }) });
+      App.upd = j.result || {};
+      toast(App.upd.available ? '发现新版本' : '已是最新', 'ok');
+      renderUpdate();
+    } catch (e) { toast('检查失败：' + e.message, 'err'); $('#upd-msg').textContent = e.message; }
+    finally { if (btn) { btn.disabled = false; btn.textContent = '检查更新'; } }
+  };
+  const apply = $('#upd-apply');
+  if (apply) apply.onclick = async () => {
+    if (!confirm('更新会覆盖插件/面板/桥的代码（config/data 不受影响），继续？')) return;
+    const btn = apply; btn.disabled = true; btn.textContent = '更新中…';
+    const out = $('#upd-steps');
+    try {
+      const j = await api('/action', { method: 'POST', body: JSON.stringify({ op: 'applyUpdate' }) });
+      const r = j.result || {};
+      out.textContent = (r.steps || []).map(s => (s.ok ? '✓ ' : '✗ ') + s.step + (s.detail ? '  ' + s.detail : '')).join('\n');
+      if (r.ok) {
+        toast('更新完成！' + (r.hint || ''), 'ok');
+        out.textContent += '\n\n' + (r.hint || '') + '\n建议刷新页面。';
+        App.upd = null;
+      } else {
+        toast('更新失败：' + (r.error || '?') + (r.rolledBack ? '（已回滚）' : ''), 'err');
+        out.textContent += '\n\n✗ ' + (r.error || '') + (r.rolledBack ? '\n（已自动回滚到备份）' : '\n⚠ 未能自动回滚，备份在 ' + (r.backup || ''));
+      }
+    } catch (e) { toast('更新失败：' + e.message, 'err'); out.textContent = e.message; }
+    finally { if (btn) { btn.disabled = false; btn.textContent = '立即更新'; } }
+  };
 }
 
 /* ── 诊断（崩溃 / 数据库 / 眼睛 / 磁盘 / 路由）────────────── */
