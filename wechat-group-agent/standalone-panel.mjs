@@ -69,6 +69,18 @@ const NAMES_FILE = join(AGENT_DATA_DIR, 'members.json')
 const UPDATE_STATE_FILE = join(AGENT_DATA_DIR, 'update-state.json')
 const BACKUP_DIR = join(AGENT_DATA_DIR, 'backups')
 
+// 生图配置：桥每次生成都重新读这个文件（wx-bridge/lib/genimage.mjs 的 loadImageConfig）
+// 优先级：环境变量 IMAGE_* > 这个文件 > 内置默认
+const IMAGE_CFG_FILE = join(ROOT, 'data', 'image-gen.json')
+const IMAGE_DEFAULTS = {
+  apiUrl: 'https://apihub.agnes-ai.com/v1/images/generations',
+  model: 'agnes-image-2.5-flash',
+  keyRef: 'AGNES_API_KEY',
+  mode: 'i2i',
+  backend: 'agnes',
+  style: 'agnes',
+}
+
 // 版本号从仓库 version.json 读（面板顶栏会显示）
 let VERSION = ''
 try { VERSION = String(JSON.parse(readFileSync(join(ROOT, 'version.json'), 'utf8')).version || '') } catch {}
@@ -395,6 +407,57 @@ function httpsGet(url, timeoutMs = 20000) {
 
 const UPDATE_REPO = process.env.WECHAT_UPDATE_REPO || 'mengyunqwq/wechat-bot'
 
+// 生图配置（读/写 data/image-gen.json）。key 支持两种：
+//   · keyRef：引用环境变量名（和桥/插件一致的做法）
+//   · apiKey：明文写进文件（独立模式下用户直接填，桥也认）
+function readImageConfig() {
+  let cfg = {}
+  try { cfg = JSON.parse(readFileSync(IMAGE_CFG_FILE, 'utf8')) || {} } catch {}
+  return {
+    apiUrl: String(cfg.apiUrl || IMAGE_DEFAULTS.apiUrl),
+    model: String(cfg.model || IMAGE_DEFAULTS.model),
+    keyRef: String(cfg.keyRef || IMAGE_DEFAULTS.keyRef),
+    mode: ['i2i', 't2i'].includes(String(cfg.mode)) ? String(cfg.mode) : IMAGE_DEFAULTS.mode,
+    backend: ['agnes', 'comfy'].includes(String(cfg.backend)) ? String(cfg.backend) : IMAGE_DEFAULTS.backend,
+    style: ['agnes', 'openai'].includes(String(cfg.style)) ? String(cfg.style) : IMAGE_DEFAULTS.style,
+    comfyUrl: String(cfg.comfyUrl || 'http://127.0.0.1:8188'),
+    hasApiKey: !!(cfg.apiKey && String(cfg.apiKey).trim()),
+    hasKeyRef: !!String(cfg.keyRef || '').trim(),
+    file: IMAGE_CFG_FILE,
+  }
+}
+
+function saveImageConfig(body) {
+  let cur = {}
+  try { cur = JSON.parse(readFileSync(IMAGE_CFG_FILE, 'utf8')) || {} } catch {}
+  const next = { ...cur }
+  if (body.apiUrl !== undefined) {
+    const v = String(body.apiUrl).trim()
+    if (!/^https?:\/\//i.test(v)) throw new Error('接口地址必须是 http(s) URL')
+    next.apiUrl = v
+  }
+  if (body.model !== undefined) next.model = String(body.model).trim()
+  if (body.keyRef !== undefined) {
+    const v = String(body.keyRef).trim()
+    if (v && !/^[A-Za-z_][A-Za-z0-9_]*$/.test(v)) throw new Error('凭据引用必须是合法变量名（如 AGNES_API_KEY）')
+    next.keyRef = v
+  }
+  if (body.mode !== undefined) next.mode = ['i2i', 't2i'].includes(String(body.mode)) ? String(body.mode) : next.mode
+  if (body.backend !== undefined) next.backend = ['agnes', 'comfy'].includes(String(body.backend)) ? String(body.backend) : next.backend
+  if (body.style !== undefined) next.style = ['agnes', 'openai'].includes(String(body.style)) ? String(body.style) : next.style
+  if (body.comfyUrl !== undefined) next.comfyUrl = String(body.comfyUrl).trim()
+  // 明文 key：给了就写，给空字符串表示清除
+  if (body.apiKey !== undefined) {
+    const k = String(body.apiKey).trim()
+    if (k) next.apiKey = k
+    else delete next.apiKey
+  }
+  mkdirSync(dirname(IMAGE_CFG_FILE), { recursive: true })
+  try { if (existsSync(IMAGE_CFG_FILE)) writeFileSync(IMAGE_CFG_FILE + '.bak', readFileSync(IMAGE_CFG_FILE)) } catch {}
+  writeFileSync(IMAGE_CFG_FILE, JSON.stringify(next, null, 2), 'utf8')
+  return readImageConfig()
+}
+
 // 面板的本地 op 表
 const LOCAL_OPS = {
   // ── 配置元数据（面板所有页面靠它渲染）──
@@ -676,6 +739,10 @@ const LOCAL_OPS = {
       hint: 'DLL 已装好，重放已开启。现在启动微信（登录窗口按回车）即可。',
     }
   },
+
+  // ── 生图接口（独立模式下用户自己接入：地址 + 模型 + key）──
+  imageInfo: () => readImageConfig(),
+  imageSave: (a) => saveImageConfig(a || {}),
 
   // ── 更新检查（能查；覆盖代码需要 DSH）──
   checkUpdate: async () => {
@@ -965,6 +1032,36 @@ async function handle(req, res) {
     if (sub === '/ping') return json(res, 200, { ok: true, mode: 'standalone', at: Date.now(), bridge: connected })
 
     if (sub === '/state') return json(res, 200, await buildState())
+
+    if (sub === '/image') {
+      if (req.method === 'GET') return json(res, 200, { ok: true, config: readImageConfig() })
+      const body = await readJson(req)
+      return json(res, 200, { ok: true, config: saveImageConfig(body) })
+    }
+
+    if (sub === '/export') {
+      // 导出配置（不含任何 key）
+      const cfg = readConfig()
+      return json(res, 200, { ok: true, config: cfg, image: readImageConfig(), exportedAt: new Date().toISOString() })
+    }
+
+    if (sub === '/import') {
+      // 导入配置：只接受白名单字段，写前自动备份
+      const body = await readJson(req)
+      const src = body.config || body
+      if (!src || typeof src !== 'object') throw new Error('需要 config 对象')
+      const ALLOW = new Set([
+        'botName', 'persona', 'replyProbability', 'minReplyGapMs', 'maxRepliesPer10Min',
+        'quietHours', 'quietAllow', 'temperature', 'stickerChance', 'visionOnImage',
+        'voiceSay', 'voiceSayProbability', 'dryRun', 'enabled', 'rooms', 'aliases',
+        'provider', 'model', 'visionProvider', 'visionModel', 'useDbMembers',
+      ])
+      const patch = {}
+      for (const [k, v] of Object.entries(src)) if (ALLOW.has(k)) patch[k] = v
+      if (!Object.keys(patch).length) throw new Error('没有可导入的字段（白名单之外）')
+      const next = writeConfig(patch)
+      return json(res, 200, { ok: true, imported: Object.keys(patch), config: next })
+    }
 
     if (sub === '/logs') {
       const lines = Number(urlObj.searchParams.get('lines') || 300)

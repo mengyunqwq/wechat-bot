@@ -277,7 +277,7 @@ const NAV = [
   {id:'voice', title:'语音', icon:'🎙', groups:['voiceIn','voiceOut'], special:'voice'},
   {id:'memory', title:'记忆', icon:'🧠', groups:['memory'], special:'memory'},
   {id:'identity', title:'群与人', icon:'👥', groups:['identity'], special:'members'},
-  {id:'providers', title:'模型接口', icon:'🧩'},
+  {id:'providers', title:'模型接口', icon:'🧩', dshOnly:true},
   {id:'model', title:'人设模型', icon:'🐟', groups:['model']},
   {id:'eyes', title:'眼睛', icon:'👁', special:'eyes'},
   {id:'diag', title:'诊断', icon:'🔬', special:'diag'},
@@ -305,6 +305,9 @@ const App = {
 // API 前缀：DSH 插件模式是 /wechat-bot/api；
 // 独立服务（standalone-panel.mjs）会注入 window.__PANEL_API__ = '/api'
 const API_BASE = (typeof window !== 'undefined' && window.__PANEL_API__) || '/wechat-bot/api';
+// 独立模式：API 前缀是 /api（由 standalone-panel.mjs 注入）。
+// 独立模式下「模型接口」页没有意义（provider 路由归 DSH），要隐藏。
+const IS_STANDALONE = API_BASE === '/api';
 async function api(path, opts) {
   const r = await fetch(API_BASE + path, Object.assign({ credentials:'same-origin' }, opts, {
     headers: Object.assign({ 'content-type':'application/json' }, (opts && opts.headers) || {}),
@@ -396,7 +399,7 @@ function renderHeader() {
 
 /* ── 导航 ─────────────────────────────────────────────── */
 function renderNav() {
-  $('#nav').innerHTML = NAV.map(n =>
+  $('#nav').innerHTML = NAV.filter(n => !(n.dshOnly && IS_STANDALONE)).map(n =>
     '<a href="#' + n.id + '" data-tab="' + n.id + '" class="' + (App.tab === n.id ? 'on' : '') + '">' + n.icon + ' ' + esc(n.title) + '</a>'
   ).join('');
   $$('#nav a').forEach(a => a.onclick = (e) => {
@@ -483,6 +486,40 @@ async function loadProviderData() {
   const p = await api('/providers')
   App.providers = p
   try { App.image = (await api('/image')).config } catch { App.image = null }
+}
+
+/**
+ * 生图接口配置表单（单独抽出来，两处共用）：
+ *   · DSH 模式：显示在「模型接口」页底部（和 provider 管理放一起）
+ *   · 独立模式：「模型接口」页被隐藏，它显示在「表情包」页里
+ *     （用户自己接入生图 API：地址 / 模型 / key）
+ */
+function imageConfigHTML(img) {
+  img = img || {}
+  return `<div class="section"><div class="hd">🖼 表情包 / 生图端点 <span class="muted">data/image-gen.json，每次生成都重新读</span></div>
+      <div class="row" style="margin-bottom:8px">
+        <button class="btn" data-image-preset="agnes">Agnes</button>
+        <button class="btn" data-image-preset="openai">OpenAI</button>
+        <button class="btn" data-image-preset="xai">xAI Grok</button>
+        <button class="btn" data-image-preset="glm">智谱 GLM</button>
+        <span class="muted small">预设只改地址/模型；key 仍需在下面填</span>
+      </div>
+      <div class="field"><div class="lab">接口地址</div><div class="ctl"><input id="img-url" type="text" style="flex:1;min-width:300px" value="${'$'}{esc(img.apiUrl || '')}"></div></div>
+      <div class="field"><div class="lab">模型</div><div class="ctl"><input id="img-model" type="text" style="flex:1;min-width:220px" value="${'$'}{esc(img.model || '')}"></div></div>
+      <div class="field"><div class="lab">凭据引用</div><div class="ctl"><input id="img-keyref" type="text" style="flex:1;min-width:220px" value="${'$'}{esc(img.keyRef || '')}"></div></div>
+      <div class="field"><div class="lab">API Key</div><div class="ctl"><input id="img-key" type="password" placeholder="${'$'}{img.hasApiKey ? '文件里已有 key；留空=不改' : '只写不读'}" style="flex:1;min-width:260px"></div></div>
+      <div class="field"><div class="lab">模式</div><div class="ctl"><select id="img-mode">
+        <option value="i2i" ${'$'}{img.mode === 'i2i' ? 'selected' : ''}>i2i 图生图（角色最像；Agnes）</option>
+        <option value="t2i" ${'$'}{img.mode === 't2i' ? 'selected' : ''}>t2i 文生图（OpenAI/xAI/GLM）</option>
+      </select></div></div>
+      <div class="field"><div class="lab">请求格式</div><div class="ctl"><select id="img-style">
+        <option value="agnes" ${'$'}{img.style === 'agnes' ? 'selected' : ''}>Agnes 自定义字段</option>
+        <option value="openai" ${'$'}{img.style === 'openai' ? 'selected' : ''}>OpenAI 兼容（images/generations）</option>
+      </select></div></div>
+      <div class="row"><button class="btn primary" id="img-save">保存图像接口</button>
+        <button class="btn" id="img-test">生成一张测试图</button><span id="img-msg" class="small"></span></div>
+      <div class="small muted" style="margin-top:8px">说明：图生图靠参考图锁角色，Agnes 兼容最好；OpenAI/xAI/GLM 走文生图，角色一致性会下降。只换地址/模型即时生效；<b>改「请求格式」或让桥读取新凭据，需要重启 wx-bridge</b>。测试图会真实调用并入库。</div>
+    </div>`
 }
 
 async function renderProviders() {
@@ -573,32 +610,59 @@ async function renderProviders() {
     </div>
 
     <h3>图像生成接口</h3>
-    <div class="section"><div class="hd">🖼 表情包 / 生图端点 <span class="muted">桥侧 data/image-gen.json，每次生成都重新读</span></div>
-      <div class="row" style="margin-bottom:8px">
-        <button class="btn" data-image-preset="agnes">Agnes</button>
-        <button class="btn" data-image-preset="openai">OpenAI</button>
-        <button class="btn" data-image-preset="xai">xAI Grok</button>
-        <button class="btn" data-image-preset="glm">智谱 GLM</button>
-        <span class="muted small">预设只改地址/模型；key 仍需在下面填</span>
-      </div>
-      <div class="field"><div class="lab">接口地址</div><div class="ctl"><input id="img-url" type="text" style="flex:1;min-width:300px" value="${esc(img.apiUrl || '')}"></div></div>
-      <div class="field"><div class="lab">模型</div><div class="ctl"><input id="img-model" type="text" style="flex:1;min-width:220px" value="${esc(img.model || '')}"></div></div>
-      <div class="field"><div class="lab">凭据引用</div><div class="ctl"><input id="img-keyref" type="text" style="flex:1;min-width:220px" value="${esc(img.keyRef || '')}"></div></div>
-      <div class="field"><div class="lab">API Key</div><div class="ctl"><input id="img-key" type="password" placeholder="${img.hasApiKey ? '文件里已有 key；留空=不改' : '只写不读'}" style="flex:1;min-width:260px"></div></div>
-      <div class="field"><div class="lab">模式</div><div class="ctl"><select id="img-mode">
-        <option value="i2i" ${img.mode === 'i2i' ? 'selected' : ''}>i2i 图生图（角色最像；Agnes）</option>
-        <option value="t2i" ${img.mode === 't2i' ? 'selected' : ''}>t2i 文生图（OpenAI/xAI/GLM）</option>
-      </select></div></div>
-      <div class="field"><div class="lab">请求格式</div><div class="ctl"><select id="img-style">
-        <option value="agnes" ${img.style === 'agnes' ? 'selected' : ''}>Agnes 自定义字段</option>
-        <option value="openai" ${img.style === 'openai' ? 'selected' : ''}>OpenAI 兼容（images/generations）</option>
-      </select></div></div>
-      <div class="row"><button class="btn primary" id="img-save">保存图像接口</button>
-        <button class="btn" id="img-test">生成一张测试图</button><span id="img-msg" class="small"></span></div>
-      <div class="small muted" style="margin-top:8px">说明：图生图靠参考图锁角色，目前 Agnes 兼容最好；OpenAI/xAI/GLM 走文生图，角色一致性会下降。只换地址/模型即时生效；<b>改「请求格式」或让桥读取新凭据，需要重启 wx-bridge</b>。测试图会真实调用并入库。</div>
-    </div>`
+    ${imageConfigHTML(img)}`
 
   bindProviderEvents()
+}
+
+/**
+ * 绑定生图接口表单的事件（预设 / 保存 / 测试）。
+ * 抽出来是因为这张表单在两处出现：
+ *   · DSH 模式：「模型接口」页底部
+ *   · 独立模式：「表情包」页（「模型接口」页被隐藏了）
+ * afterSave：保存成功后要刷新哪个页面。
+ */
+function bindImageEvents(afterSave) {
+  $$('[data-image-preset]').forEach(b => b.onclick = () => {
+    const p = IMAGE_PRESETS[b.dataset.imagePreset]
+    if (!p) return
+    $('#img-url').value = p.apiUrl
+    $('#img-model').value = p.model
+    $('#img-keyref').value = p.keyRef
+    $('#img-mode').value = p.mode
+    $('#img-style').value = p.style
+  })
+
+  $('#img-save').onclick = async () => {
+    const body = {
+      apiUrl: $('#img-url').value.trim(),
+      model: $('#img-model').value.trim(),
+      keyRef: $('#img-keyref').value.trim(),
+      mode: $('#img-mode').value,
+      style: $('#img-style').value,
+    }
+    const key = $('#img-key').value.trim()
+    if (key) body.apiKey = key
+    try {
+      const j = await api('/image', { method: 'POST', body: JSON.stringify(body) })
+      App.image = j.config
+      $('#img-key').value = ''
+      toast('图像接口已保存', 'ok')
+      afterSave?.()
+    } catch (e) { toast('保存失败：' + e.message, 'err') }
+  }
+
+  $('#img-test').onclick = async () => {
+    if (!confirm('真实生成一张测试表情包？会调用生图接口并入库（有成本）。')) return
+    const btn = $('#img-test'); btn.disabled = true; btn.textContent = '生成中…'
+    $('#img-msg').textContent = ''
+    try {
+      const j = await api('/action', { method: 'POST', body: JSON.stringify({ op: 'genSticker', args: { emotion: '开心' }, confirm: 'genSticker' }) })
+      const r = j.result || {}
+      $('#img-msg').textContent = r.cached ? '命中缓存：' + r.stickerId : '已生成：' + (r.stickerId || '完成') + (r.file ? ' · ' + r.file : '')
+      toast('测试图生成完成', 'ok')
+    } catch (e) { $('#img-msg').textContent = '失败：' + e.message; toast('生成失败：' + e.message, 'err') }
+    finally { btn.disabled = false; btn.textContent = '生成一张测试图' }
 }
 
 function bindProviderEvents() {
@@ -664,46 +728,7 @@ function bindProviderEvents() {
     } finally { btn.disabled = false; btn.textContent = '测试' }
   }
 
-  $$('[data-image-preset]').forEach(b => b.onclick = () => {
-    const p = IMAGE_PRESETS[b.dataset.imagePreset]
-    if (!p) return
-    $('#img-url').value = p.apiUrl
-    $('#img-model').value = p.model
-    $('#img-keyref').value = p.keyRef
-    $('#img-mode').value = p.mode
-    $('#img-style').value = p.style
-  })
-
-  $('#img-save').onclick = async () => {
-    const body = {
-      apiUrl: $('#img-url').value.trim(),
-      model: $('#img-model').value.trim(),
-      keyRef: $('#img-keyref').value.trim(),
-      mode: $('#img-mode').value,
-      style: $('#img-style').value,
-    }
-    const key = $('#img-key').value.trim()
-    if (key) body.apiKey = key
-    try {
-      const j = await api('/image', { method: 'POST', body: JSON.stringify(body) })
-      App.image = j.config
-      $('#img-key').value = ''
-      toast('图像接口已保存', 'ok')
-      renderProviders()
-    } catch (e) { toast('保存失败：' + e.message, 'err') }
-  }
-
-  $('#img-test').onclick = async () => {
-    if (!confirm('真实生成一张测试表情包？会调用生图接口并入库（有成本）。')) return
-    const btn = $('#img-test'); btn.disabled = true; btn.textContent = '生成中…'
-    $('#img-msg').textContent = ''
-    try {
-      const j = await api('/action', { method: 'POST', body: JSON.stringify({ op: 'genSticker', args: { emotion: '开心' }, confirm: 'genSticker' }) })
-      const r = j.result || {}
-      $('#img-msg').textContent = r.cached ? '命中缓存：' + r.stickerId : '已生成：' + (r.stickerId || '完成') + (r.file ? ' · ' + r.file : '')
-      toast('测试图生成完成', 'ok')
-    } catch (e) { $('#img-msg').textContent = '失败：' + e.message; toast('生成失败：' + e.message, 'err') }
-    finally { btn.disabled = false; btn.textContent = '生成一张测试图' }
+  bindImageEvents(() => renderProviders())
   }
 }
 
@@ -1046,6 +1071,10 @@ async function saveField(k, v) {
 /* ── 表情包 ───────────────────────────────────────────── */
 async function renderStickerExtra() {
   const box = $('#sticker-extra'); if (!box) return;
+  // 独立模式：「模型接口」页被隐藏了（provider 路由归 DSH），
+  // 所以把「生图接口」的配置挪到这个页面 —— 用户自己接入生图 API。
+  let imgCfg = null
+  if (IS_STANDALONE) { try { imgCfg = (await api('/image')).config } catch { imgCfg = null } }
   box.innerHTML = `<div class="section"><div class="hd">🖼 图库</div>
     <div class="row"><button class="btn" id="btn-stickers">加载图库</button>
       <input id="pick-text" type="text" placeholder="试挑：一句语境" style="flex:1;min-width:180px">
@@ -1060,7 +1089,7 @@ async function renderStickerExtra() {
         <button class="btn primary" id="btn-gen">生成</button>
       </div>
       <div class="small muted" style="margin-top:8px">生成会调用图生图，可能排队。发送需要选一个群。</div>
-      <div id="gen-result" class="small mono" style="margin-top:8px"></div></div>`;
+      <div id="gen-result" class="small mono" style="margin-top:8px"></div></div>${imgCfg ? '<h3>生图接口</h3>' + imageConfigHTML(imgCfg) : ''}`;
   fillRoomSelect($('#gen-room'), true);
   ensureBridgeRooms().then(() => fillRoomSelect($('#gen-room'), true));
   $('#btn-stickers').onclick = loadStickers;
@@ -1089,6 +1118,8 @@ async function renderStickerExtra() {
     } catch (e) { toast('生成失败：' + e.message, 'err'); }
     finally { btn.disabled = false; btn.textContent = '生成'; }
   };
+  // 独立模式：生图接口表单的事件（保存后刷新本页）
+  if (imgCfg) bindImageEvents(() => renderStickerExtra());
 }
 
 async function loadStickers() {
