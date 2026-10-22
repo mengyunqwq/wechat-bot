@@ -776,7 +776,38 @@ const namesFile = join(dirname(memoryDir), 'members.json')
     if (!m.isSelf) r.proactiveStreak = 0
     // 带上 msgid：视频"延迟复查"升级内容时要能找回**这一条**的上下文副本（r.msgs 里是拷贝）
     const senderName = m.isSelf ? (m.senderName || '我') : nameOf(m.sender, m.senderName)
-    r.msgs.push({ id: m.id || '', ts: m.ts || Date.now(), isSelf: !!m.isSelf, sender: m.sender, senderName, text: m.text })
+    const text = String(m.text || '')
+    const ts = m.ts || Date.now()
+
+    // ★ 2026-10-22 修：自己发的消息会被**记两次**，面板因此显示两遍。
+    //   ① 发送成功后本地 push（isSelf:true，id 为空，ts=Date.now()）
+    //   ② 桥轮询从数据库把同一条读回来（isSelf:true，带真实 msgid，ts 差 1~3 秒）
+    //   两条都进 r.msgs → 上下文里"我说了两遍"、面板也显示两遍。
+    //
+    //   去重分两层：
+    //     a) 有 msgid → 按 msgid 精确去重（最可靠）
+    //     b) 没 msgid 是自己发的 → 找"最近 8 条里、id 为空、文本相同、时间差 ≤15 秒"的那条，
+    //        把 msgid 和更准的时间补进去，**不重复入账**
+    if (m.id) {
+      const lo = Math.max(0, r.msgs.length - 10)
+      for (let i = r.msgs.length - 1; i >= lo; i--) {
+        if (r.msgs[i].id === m.id) return       // 这条已经记过了
+      }
+    }
+    if (m.isSelf && text) {
+      const lo = Math.max(0, r.msgs.length - 8)
+      for (let i = r.msgs.length - 1; i >= lo; i--) {
+        const p = r.msgs[i]
+        if (!p.isSelf || p.id) continue         // 只合并"本地那条还没 id"的记录
+        if (String(p.text || '') !== text) continue
+        if (Math.abs((p.ts || 0) - ts) > 15000) continue
+        p.id = m.id || ''                       // 补上真实 msgid（视频复查要用）
+        p.ts = ts                               // 用数据库的时间（更准）
+        return                                  // 合并完成，不重复入账
+      }
+    }
+
+    r.msgs.push({ id: m.id || '', ts, isSelf: !!m.isSelf, sender: m.sender, senderName, text: m.text })
     if (r.msgs.length > 300) r.msgs = r.msgs.slice(-300)
     if (++r.dirty >= 20) saveMemory(r)
   }
