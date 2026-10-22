@@ -15,7 +15,7 @@
  */
 import http from 'node:http'
 import { execFileSync, execFile } from 'node:child_process'
-import { mkdirSync, appendFileSync, writeFileSync, readFileSync, existsSync } from 'node:fs'
+import { mkdirSync, appendFileSync, writeFileSync, readFileSync, existsSync, readdirSync, statSync, unlinkSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { WebSocketServer } from 'ws'
@@ -50,6 +50,38 @@ const LOG_DIR = join(DATA_DIR, 'logs')
 
 mkdirSync(STICKER_DIR, { recursive: true })
 mkdirSync(LOG_DIR, { recursive: true })
+
+/**
+ * 清理旧日志：只留最近 N 天（默认 14，环境变量 WECHAT_LOG_KEEP_DAYS 可调）。
+ *
+ * 为什么必须做：日志按天分文件（bridge-YYYY-MM-DD.log / messages-*.jsonl），
+ * 但代码里从来没有删除逻辑 —— 实测攒出过 370MB 的单日日志，磁盘迟早被吃光。
+ *
+ * 只删「按日期命名的」和「启动脚本重定向产生的 .out.log/.err.log」，
+ * 不碰用户自己放进 logs 目录的其它文件。
+ */
+const LOG_KEEP_DAYS = Number(process.env.WECHAT_LOG_KEEP_DAYS || 14)
+function pruneOldLogs() {
+  try {
+    const cutoff = Date.now() - LOG_KEEP_DAYS * 86400000
+    let removed = 0
+    let bytes = 0
+    for (const f of readdirSync(LOG_DIR)) {
+      if (!/^(bridge-\d{4}-\d{2}-\d{2}\.log|messages-\d{4}-\d{2}-\d{2}\.jsonl|.*\.(out|err)\.log)$/.test(f)) continue
+      const p = join(LOG_DIR, f)
+      try {
+        const st = statSync(p)
+        if (st.mtimeMs >= cutoff) continue
+        bytes += st.size
+        unlinkSync(p)
+        removed++
+      } catch { /* 单个失败不影响其它 */ }
+    }
+    if (removed) console.log('[log] 清理 ' + removed + ' 个超过 ' + LOG_KEEP_DAYS + ' 天的日志（' + Math.round(bytes / 1048576) + 'MB）')
+  } catch { /* ignore */ }
+}
+pruneOldLogs()
+setInterval(pruneOldLogs, 6 * 3600 * 1000).unref?.()   // 每 6 小时再清一次（长时间不重启也管）
 
 const startedAt = Date.now()
 const stickers = new StickerLibrary(STICKER_DIR)
