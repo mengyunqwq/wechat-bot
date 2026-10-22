@@ -25,7 +25,13 @@ export class BridgeClient {
   get status() { return this._status }
 
   connect() {
-    if (this.closed) return
+    // ★ 2026-10-22：以前 here 是 if (this.closed) return —— 一旦被 close()（比如热重载时
+    //   新实例执行 prev.close() 关掉旧实例），这个对象就永久连不上了。而热重载过程中
+    //   ctx.effect 的清理函数可能在新实例 connect() 之后才跑（DSH 的卸载顺序），
+    //   结果新实例刚拿到连接就被自己的清理函数掐掉 → 插件启动成功但桥连接始终是 0。
+    //   修法：显式 connect() 视为"要恢复"，把 closed 清掉（真正的关闭用 close()）。
+    this.closed = false
+    this.log('connect() 被调用 url=' + this.url)
     try {
       const ws = new WebSocket(this.url)
       this.ws = ws
