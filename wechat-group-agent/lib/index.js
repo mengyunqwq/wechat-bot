@@ -4811,7 +4811,38 @@ let res = await callLlm(route, sys, usr, undefined)
     }
   }
 
-  ctx.effect(() => ctx.tools.register({
+  /**
+   * 注册工具的安全包装。
+   *
+   * 为什么需要它：DSH 的 ctx.tools.register() 内部是
+   *   return this.layers.effect(this.ctx, (layer) => layer.tools.insert(name, def), ...)
+   * 用的是**服务自己的 root ctx** 做 owner，不是插件 ctx。所以：
+   *   · 工具注册在「全局层」（scope === undefined）
+   *   · disposer 挂在 root ctx 上，插件卸载时清不掉
+   * 结果就是热重载时新实例注册同名工具 → "tool ... is already registered" → apply 抛异常。
+   *
+   * 这里不能根治（那是 DSH 的全局工具语义），但至少做到：
+   *   ① 重复注册不抛异常，apply 不会整个失败
+   *   ② 只在「已存在」这一种情况下吞掉，别的错误照抛
+   *   ③ 记一条日志，排查时能看到「这次是跳过的」
+   *
+   * 想彻底干净地重载工具：用 uninject + inject（已验证有效），
+   * 或者重启 DSH。dsd 的 reload 路径清不掉全局层。
+   */
+  function safeRegister(def) {
+    try {
+      return ctx.tools.register(def)
+    } catch (e) {
+      const msg = String(e?.message || e)
+      if (/already registered/i.test(msg)) {
+        log('工具 ' + (def?.name || '?') + ' 已存在（热重载残留），本次跳过注册')
+        return () => {}
+      }
+      throw e
+    }
+  }
+
+  ctx.effect(() => safeRegister({
     name: 'wechat_bot_status',
     description: '微信群聊机器人状态：bridge 连接/登录、模型路由、拟人参数、各群节流与最近消息。',
     parameters: { type: 'object', properties: {} },
@@ -4854,7 +4885,7 @@ let res = await callLlm(route, sys, usr, undefined)
     },
   }), SHORT + ': wechat_bot_status')
 
-  ctx.effect(() => ctx.tools.register({
+  ctx.effect(() => safeRegister({
     name: 'wechat_bot_selfcheck',
     description: '微信群聊机器人一键自检：桥连接/微信登录/hook 存活/数据库可读/消息轮询/自己是谁/群昵称一致性/语音识别/识图/表情包库/记忆/LLM 路由，'
       + '逐项 ✅❌⚠️ 打出来并给修复建议（纯只读：不发消息、不改配置、不重启任何东西）。'
@@ -4884,7 +4915,7 @@ let res = await callLlm(route, sys, usr, undefined)
     },
   }), SHORT + ': wechat_bot_selfcheck')
 
-  ctx.effect(() => ctx.tools.register({
+  ctx.effect(() => safeRegister({
     name: 'wechat_bot_say',
     description: '以机器人身份在指定微信群发一条消息（手动干预/测试用）。room 可用群名或 roomId，留空则在唯一群里发。',
     parameters: {
@@ -4928,7 +4959,7 @@ let res = await callLlm(route, sys, usr, undefined)
     },
   }), SHORT + ': wechat_bot_say')
 
-  ctx.effect(() => ctx.tools.register({
+  ctx.effect(() => safeRegister({
     name: 'wechat_bot_config',
     description: '读取或实时修改微信机器人的拟人参数（无需重启）。key 留空 = 查看全部；给了 value = 修改。可改：enabled/dryRun/persona/replyProbability/minReplyGapMs/maxRepliesPer10Min/quietHours/stickerChance/splitChance/patChance/botName/rooms/temperature/voiceOnVoice/voiceSay/voiceSayProbability/voiceSayOnVoiceProbability/voiceSayMaxChars/voiceSayEmotion/healthAlert/healthAlertQuietMs/healthCheckMs/videoDeleteAfterRead/videoUpgradeDelayMs/videoFrames/linkVideo/linkVideoProbability/linkVideoMaxSeconds/linkVideoMaxMB/linkVideoCooldownMs/linkVideoTimeoutMs/linkVideoFrames。',
     parameters: {
@@ -4955,7 +4986,7 @@ let res = await callLlm(route, sys, usr, undefined)
     },
   }), SHORT + ': wechat_bot_config')
 
-  ctx.effect(() => ctx.tools.register({
+  ctx.effect(() => safeRegister({
     name: 'wechat_bot_stickers',
     description: '查看微信机器人收藏的表情包库（含语境标签与使用次数），或用一段文字试挑一张。',
     parameters: {
@@ -4980,7 +5011,7 @@ let res = await callLlm(route, sys, usr, undefined)
     },
   }), SHORT + ': wechat_bot_stickers')
 
-  ctx.effect(() => ctx.tools.register({
+  ctx.effect(() => safeRegister({
     name: 'wechat_bot_gensticker',
     description: '用 Agnes 图生图现场生成一张微信表情包（主体按参考图角色，只换题材/场景），生成后入库并可顺手发到指定群。'
       + '题材可以是情绪（大笑/无语/委屈…）或生活活动（吃饭/睡觉/摸鱼/打游戏…，场景道具会自动适配）；'
@@ -5018,7 +5049,7 @@ let res = await callLlm(route, sys, usr, undefined)
     },
   }), SHORT + ': wechat_bot_gensticker')
 
-  ctx.effect(() => ctx.tools.register({
+  ctx.effect(() => safeRegister({
     name: 'wechat_bot_vision',
     description: '用视觉模型识别一张本地图片并返回描述（调试"群里发图能识别"这条链路，也可手动识图）。',
     parameters: {
@@ -5038,7 +5069,7 @@ let res = await callLlm(route, sys, usr, undefined)
     },
   }), SHORT + ': wechat_bot_vision')
 
-  ctx.effect(() => ctx.tools.register({
+  ctx.effect(() => safeRegister({
     name: 'wechat_bot_memory',
     description: '查看/管理机器人的长期记忆（本地保存，每次对话都会带上）。不传参数=看该群记忆；add=手动加一条；clear=true 清空。',
     parameters: {
@@ -5077,7 +5108,7 @@ let res = await callLlm(route, sys, usr, undefined)
     },
   }), SHORT + ': wechat_bot_memory')
 
-  ctx.effect(() => ctx.tools.register({
+  ctx.effect(() => safeRegister({
     name: 'wechat_bot_search',
     description: '用 DSH 的联网搜索查一条信息（调试"机器人自己判断要不要联网"这条链路，也可手动查）。',
     parameters: {
@@ -5094,7 +5125,7 @@ let res = await callLlm(route, sys, usr, undefined)
     },
   }), SHORT + ': wechat_bot_search')
 
-  ctx.effect(() => ctx.tools.register({
+  ctx.effect(() => safeRegister({
     name: 'wechat_bot_names',
     description: '查看/设置群成员名字（wxid → 昵称）。hook 拿不到联系人库，所以靠这个让机器人"知道群里谁是谁"、并会 @ 对人。不传参数=查看；传 pairs 批量设置。',
     parameters: {
@@ -5147,7 +5178,7 @@ let res = await callLlm(route, sys, usr, undefined)
     },
   }), SHORT + ': wechat_bot_names')
 
-  ctx.effect(() => ctx.tools.register({
+  ctx.effect(() => safeRegister({
     name: 'wechat_bot_history',
     description: '查看某个群最近的消息记录（机器人记忆里的上下文）。',
     parameters: {
