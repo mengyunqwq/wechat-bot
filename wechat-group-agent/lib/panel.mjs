@@ -124,7 +124,8 @@ export function setupPanel(ctx, api) {
     if (mounted) return
     const ws = getWs()
     if (!ws || typeof ws.register !== 'function') {
-      if (++tries <= 20) { setTimeout(mount, 1000); return }
+      // 注入后服务的就绪时间不确定（实测 inject 后 20 秒都还没就绪）→ 重试 5 分钟，2 秒一次
+      if (++tries <= 150) { setTimeout(mount, 2000); return }
       api.log('面板：没有可用的 webServer 服务，已跳过挂载（机器人功能不受影响）')
       return
     }
