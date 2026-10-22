@@ -29,6 +29,8 @@ const ALLOWED_OPS = new Set([
   'eyesInfo', 'eyesSetDir', 'eyesToggle', 'eyesClean',
   'eyesUpload', 'eyesInstall', 'eyesCheck',
   'checkUpdate', 'updateInfo', 'applyUpdate',
+  // 2026-10-22：微信客户端电源（关进程 / 开进程+自动点进入微信）
+  'wechatPower',
 ])
 
 // 不做模块级缓存：热重载后 panel/index.html 的改动必须立刻可见
