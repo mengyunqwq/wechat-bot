@@ -347,6 +347,13 @@ function detectWechatDir() {
 const CAP_MAIN = Buffer.from('5374617274433243446f776e6c6f6164', 'hex').toString('latin1')
 const CAP_VIDEO = Buffer.from('6864766964656f', 'hex').toString('latin1')
 
+// 解压用 bsdtar（Windows 10+ 自带）。用绝对路径：插件进程的 PATH 未必含 System32，
+// 而且 powershell 的 Expand-Archive 在 -NoProfile 下模块加载不稳定。
+const TAR_EXE = process.env.WECHAT_TAR || 'C:\\Windows\\System32\\tar.exe'
+
+// 拖入 zip 之后、点安装之前，预检结果暂存在这里（跨两个 HTTP 请求）
+let eyesPkgCache = null
+
 function dllCapability(p) {
   try {
     const buf = readFileSync(p)
@@ -543,9 +550,132 @@ const LOCAL_OPS = {
     } catch { /* ignore */ }
     return { ok: true, wechatRunning: running }
   },
-  // 拖入 zip 装 DLL 这两步也能做，但需要 multipart 上传；先用明确提示，避免半成品
-  eyesUpload: () => ({ ok: false, error: '拖入 zip 目前只在 DSH 面板里支持（独立服务还没做文件上传通道）' }),
-  eyesInstall: () => ({ ok: false, error: '同上：装 DLL 需要先有上传的包，请在 DSH 面板操作' }),
+  // 拖入 zip：接收 base64 → 存盘 → 解压 → 找 DLL → 预检能力（不安装）
+  eyesUpload: (a) => {
+    const b64 = String(a.b64 || '')
+    if (!b64) return { ok: false, error: '没有收到文件内容' }
+    let buf
+    try { buf = Buffer.from(b64, 'base64') } catch { return { ok: false, error: 'base64 解码失败' } }
+    if (!buf.length) return { ok: false, error: '文件为空' }
+    if (buf.length > 32 * 1024 * 1024) return { ok: false, error: '文件太大（>32MB）' }
+
+    const dir = join(process.env.TEMP || process.env.TMP || 'C:\\Windows\\Temp', 'dsh-eyes-' + Date.now())
+    mkdirSync(dir, { recursive: true })
+    // 存盘用 ASCII 名（原名只用于显示，避免中文路径在 tar 里出问题）
+    const zipPath = join(dir, 'upload.zip')
+    writeFileSync(zipPath, buf)
+
+    try {
+      execFileSync(TAR_EXE, ['-xf', zipPath, '-C', dir], { stdio: 'pipe', timeout: 120000, windowsHide: true })
+    } catch (e) {
+      return { ok: false, error: '解压失败：' + String(e?.stderr || e?.message || e).slice(0, 160) }
+    }
+
+    // 递归找 version.dll（压缩包通常有一层 <目录>/version.dll）
+    let dll = null
+    const walk = (d, depth) => {
+      if (depth > 4 || dll) return
+      let ents = []
+      try { ents = readdirSync(d, { withFileTypes: true }) } catch { return }
+      for (const ent of ents) {
+        const p = join(d, ent.name)
+        if (ent.isDirectory()) walk(p, depth + 1)
+        else if (/^version.*\.dll$/i.test(ent.name) && !dll) dll = p
+      }
+    }
+    walk(dir, 0)
+    if (!dll) return { ok: false, error: '压缩包里没找到 version.dll' }
+
+    const dllBuf = readFileSync(dll)
+    const hasMain = dllBuf.includes(Buffer.from(CAP_MAIN))
+    const hasVideo = dllBuf.includes(Buffer.from(CAP_VIDEO))
+    const sha256 = createHash('sha256').update(dllBuf).digest('hex')
+
+    // 顺带列出包里的文档（给面板展示，最多 8 个）
+    const docs = []
+    const collectDocs = (d, depth) => {
+      if (depth > 4) return
+      let ents = []
+      try { ents = readdirSync(d, { withFileTypes: true }) } catch { return }
+      for (const ent of ents) {
+        const p = join(d, ent.name)
+        if (ent.isDirectory()) collectDocs(p, depth + 1)
+        else if (/\.(md|txt)$/i.test(ent.name) && docs.length < 8) docs.push(ent.name)
+      }
+    }
+    collectDocs(dir, 0)
+
+    eyesPkgCache = { dir, zipPath, dll, sha256 }
+    return {
+      ok: true,
+      zipMB: +(buf.length / 1048576).toFixed(2),
+      sha256,
+      dllKB: Math.round(dllBuf.length / 1024),
+      hasMain,
+      hasVideo,
+      usable: hasMain && hasVideo,
+      docs,
+      workDir: dir,
+      origName: String(a.name || ''),
+    }
+  },
+
+  // 安装：微信必须已退出（DLL 被锁换不了）→ 备份 → 复制 → 写重放配置
+  eyesInstall: () => {
+    const pkg = eyesPkgCache
+    if (!pkg || !existsSync(pkg.dll)) return { ok: false, error: '没有待安装的包（先在面板里拖入 zip）' }
+    const wxDir = detectWechatDir()
+    if (!wxDir) return { ok: false, error: '检测不到微信安装目录 —— 请设环境变量 WECHAT_DIR（version.dll 所在处）', needWxDir: true }
+    const targetDll = process.env.WECHAT_DLL || join(wxDir, 'version.dll')
+
+    // ① 微信在跑 → DLL 被占用，复制会失败（甚至把文件弄坏），必须拒绝
+    let running = false
+    try {
+      const out = execFileSync('powershell', ['-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden', '-Command',
+        '(Get-Process -Name Weixin -EA SilentlyContinue | Measure-Object).Count'],
+        { encoding: 'utf8', timeout: 8000, windowsHide: true })
+      running = parseInt(String(out).trim(), 10) > 0
+    } catch { /* 查不到就当没在跑，复制失败会再报 */ }
+    if (running) return { ok: false, error: '微信还在运行 —— 请先完全退出微信（托盘右键 → 退出微信），再点安装', needExit: true }
+
+    // ② 备份旧 DLL
+    let backup = ''
+    if (existsSync(targetDll)) {
+      backup = targetDll + '.bak-' + new Date().toISOString().replace(/[:T]/g, '-').slice(0, 19)
+      try { copyFileSync(targetDll, backup) } catch (e) {
+        return { ok: false, error: '备份旧 DLL 失败：' + String(e?.message || e).slice(0, 120) }
+      }
+    }
+
+    // ③ 复制新 DLL
+    try { copyFileSync(pkg.dll, targetDll) } catch (e) {
+      return { ok: false, error: '写 DLL 失败（文件被占用？）：' + String(e?.message || e).slice(0, 120), backup }
+    }
+
+    // ④ 写重放配置：目录沿用已有的，没有就建一个
+    const dirFile = process.env.WECHAT_REPLAY_DIR_FILE || join(wxDir, 'hook-cdn-replay.dir')
+    const switchFile = process.env.WECHAT_REPLAY_SWITCH_FILE || join(wxDir, 'hook-cdn-replay.on')
+    let replayDir = ''
+    try { replayDir = readFileSync(dirFile, 'utf8').trim() } catch { /* 没配过 */ }
+    if (!replayDir) replayDir = join(wxDir, 'replay')
+    try { mkdirSync(replayDir, { recursive: true }); writeFileSync(dirFile, replayDir, 'utf8') } catch { /* ignore */ }
+    try { writeFileSync(switchFile, '', 'utf8') } catch { /* ignore */ }
+
+    // ⑤ 清缓存 + 清临时目录（装完不留垃圾）
+    const doneSha = pkg.sha256
+    eyesPkgCache = null
+    try { rmdirSync(pkg.dir, { recursive: true }) } catch { /* 清不掉就算了 */ }
+    return {
+      ok: true,
+      installedTo: targetDll,
+      backup,
+      replayDir,
+      dirFile,
+      switchFile,
+      sha256: doneSha,
+      hint: 'DLL 已装好，重放已开启。现在启动微信（登录窗口按回车）即可。',
+    }
+  },
 
   // ── 更新检查（能查；覆盖代码需要 DSH）──
   checkUpdate: async () => {
