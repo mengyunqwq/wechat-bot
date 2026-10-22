@@ -4179,6 +4179,7 @@ let res = await callLlm(route, sys, usr, undefined)
         writeFileSync(zipPath, buf)
         // 解压
         try {
+          log('[eyes] 上传 ' + Math.round(buf.length/1024) + 'KB zip，解压到 ' + dir + '（tar=' + TAR_EXE + '）')
           execFileSync(TAR_EXE, ['-xf', zipPath, '-C', dir], { stdio: 'pipe', timeout: 120000, windowsHide: true })
         } catch (e) {
           return { ok: false, error: '解压失败：' + String(e?.stderr || e?.message || e).slice(0, 120) }
@@ -4196,11 +4197,14 @@ let res = await callLlm(route, sys, usr, undefined)
           }
         }
         walk(dir, 0)
+        log('[eyes] 找到 DLL: ' + (dll || '(none)'))
+        if (!dll) { log('[eyes] 解压后目录内容: ' + (() => { try { return readdirSync(dir).join(',') } catch { return '?' } })()) }
         if (!dll) return { ok: false, error: '压缩包里没找到 version.dll' }
         // 预检：DLL 能力
         const dllBuf = readFileSync(dll)
         const hasReplay = dllBuf.includes(Buffer.from('StartC2CDownload'))
         const hasVideo = dllBuf.includes(Buffer.from('hdvideo'))
+        log('[eyes] DLL ' + Math.round(dllBuf.length/1024) + 'KB  replay=' + hasReplay + '  video=' + hasVideo)
         const { createHash } = await import('node:crypto')
         const sha256 = createHash('sha256').update(dllBuf).digest('hex')
         // 找文档（可选）

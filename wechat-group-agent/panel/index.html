@@ -1294,14 +1294,15 @@ function renderEyes() {
       <div id="eyes-upload-msg" class="small" style="margin-top:8px"></div>
     </div>
 
-    ${pkg ? `<div class="section" style="border:1px solid ${pkg.usable ? 'var(--ok)' : 'var(--bad)'}">
-      <div class="hd">${pkg.usable ? '✅' : '❌'} 预检结果 <span class="muted">${esc(pkg.zipMB)}MB 上传包</span></div>
+    ${pkg ? `<div class="section" style="border:1px solid ${pkg.ok === false ? 'var(--bad)' : (pkg.usable ? 'var(--ok)' : 'var(--warn)')}">
+      <div class="hd">${pkg.ok === false ? '❌' : (pkg.usable ? '✅' : '⚠️')} 预检结果 ${pkg.zipMB ? `<span class="muted">${esc(pkg.zipMB)}MB 上传包</span>` : ''}</div>
+      ${pkg.ok === false ? `<div class="small" style="color:var(--bad);white-space:pre-wrap">预检失败：${esc(pkg.error || '未知错误')}</div>` : `
       <table class="table"><tbody>
         <tr><td class="muted">DLL</td><td>${pkg.dllKB}KB · <span class="mono">${esc((pkg.sha256 || '').slice(0, 16))}…</span></td></tr>
         <tr><td class="muted">CDN 重放</td><td>${pkg.hasReplay ? '✅ 有' : '❌ 没有'}</td></tr>
         <tr><td class="muted">视频整片</td><td>${pkg.hasVideo ? '✅ 有' : '❌ 没有'}</td></tr>
       </tbody></table>
-      ${pkg.usable ? '' : '<div class="small" style="color:var(--bad);margin-top:6px">这个包里的 DLL 不含 CDN 重放 → 装了也没有原图。请用带「眼睛」的版本。</div>'}
+      ${pkg.usable ? '' : '<div class="small" style="color:var(--bad);margin-top:6px">这个包里的 DLL 不含 CDN 重放 → 装了也没有原图。请用带「眼睛」的版本。</div>'}`}
       <div class="row" style="margin-top:10px">
         <button class="btn primary" id="eyes-install" ${pkg.usable ? '' : 'disabled'}>安装到微信目录</button>
         <span class="muted small">需要先完全退出微信</span>
