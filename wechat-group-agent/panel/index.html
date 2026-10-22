@@ -230,7 +230,7 @@
 </head>
 <body>
 <header>
-  <div class="brand">🐟 微信机器人控制台 <small id="ver"></small></div>
+  <div class="brand">🐟 微信机器人控制台 <small id="ver"></small><small id="panel-url" title="点一下复制" style="cursor:pointer;margin-left:10px;font-family:ui-monospace,Consolas,monospace;font-size:11px;opacity:.7"></small></div>
   <div class="pills" id="pills"><span class="pill">加载中…</span></div>
   <label class="hswitch">总开关 <span class="sw"><input type="checkbox" id="m-enabled"><i></i></span></label>
   <label class="hswitch">演练 <span class="sw"><input type="checkbox" id="m-dry"><i></i></span></label>
@@ -362,6 +362,19 @@ async function loadDiag(force) {
 function renderHeader() {
   const S = App.S;
   if (!S) return;
+  // 面板自己的地址：端口看 DSH 启动时的 --port，不能写死。
+  // 显示出来有两个用处：① 自己知道该记哪个地址 ② 点一下复制就能发给别人
+  const pu = $('#panel-url');
+  if (pu) {
+    const url = location.origin + '/wechat-bot';
+    if (pu.textContent !== url) {
+      pu.textContent = url;
+      pu.onclick = () => {
+        try { navigator.clipboard.writeText(url); toast('地址已复制', 'ok') }
+        catch { toast('复制失败，手动选中吧', 'err') }
+      };
+    }
+  }
   $('#ver').textContent = 'v' + (S.version || '') + ' · ' + (S.stats ? (S.stats.replied + '/' + S.stats.msgIn) : '');
   const br = S.bridge || {};
   const st = br.status || {};
