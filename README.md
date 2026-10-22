@@ -112,32 +112,39 @@ pwsh -ExecutionPolicy Bypass -File .\一键部署.ps1
 
 ### 控制面板：两种跑法
 
-**① 独立模式（推荐给只想看状态的人）**
+**① 独立模式（推荐，不需要 DSH）**
 
 不需要 DSH，只连桥：
 
 ```powershell
-node wechat-group-agent/standalone-panel.mjs
+# 推荐用启动器：它守护面板，让「一键更新」能自动重启
+node wechat-group-agent/panel-launcher.mjs
 # → http://127.0.0.1:8741
 
-# 换端口 / 暴露到局域网（局域网必须给 token，否则脚本拒绝启动）
-node wechat-group-agent/standalone-panel.mjs --port 8080
-node wechat-group-agent/standalone-panel.mjs --host 0.0.0.0 --token 一串足够长的随机字符
+# 也可以直接跑（没有守护，更新后退化为自接力重启）
+node wechat-group-agent/standalone-panel.mjs
+
+# 换端口 / 暴露到局域网（局域网必须给 token，否则拒绝启动）
+node wechat-group-agent/panel-launcher.mjs --port 8080
+node wechat-group-agent/panel-launcher.mjs --host 0.0.0.0 --token 一串足够长的随机字符
 ```
+
+**为什么推荐启动器**：面板要「一键更新」就必须能重启自己。自己 spawn 自己有两个坑——端口还没释放、新进程挂了没人管。启动器用 `exit(42)` 约定接住重启请求，端口随进程退出自然释放；60 秒内快速退出超过 3 次会停止重启并提示代码有问题，避免死循环。
 
 独立模式能做的事：
 
 | 能 | 不能（会明确告诉你为什么） |
 |---|---|
-| 看群 / 消息 / 表情包 / 语音 | 拖入 zip 装眼睛（要文件上传通道） |
-| 发消息 / 表情 / 拍一拍 / 语音 | 提炼长期记忆（要跑 LLM） |
-| 改 101 项配置（人设、概率、模型…）| 一键更新（覆盖代码后要安全重启自己）|
+| 看群 / 消息 / 表情包 / 语音 | 提炼长期记忆（要跑 LLM，独立服务不加载模型）|
+| 发消息 / 表情 / 拍一拍 / 语音 | |
+| 改 101 项配置（人设、概率、模型…）| |
 | 记忆增删查、成员名字 | |
+| **拖入 zip 装眼睛**（预检 + 备份 + 安装 + 配重放）| |
 | 眼睛状态/目录/开关/清理、DLL 能力检测 | |
 | 自检 7 项、诊断（崩溃/数据库/磁盘）| |
-| 用量统计、检查更新 | |
+| 用量统计、**一键更新（含自动重启）** | |
 
-**② DSH 插件模式（功能最全）**
+**② DSH 插件模式**
 
 ```powershell
 npx @deepseek-ai/dsh web --port 3080
