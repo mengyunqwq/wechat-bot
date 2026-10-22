@@ -30,7 +30,7 @@ import { readFileSync, writeFileSync, existsSync, statSync, readdirSync, mkdirSy
 import { join, dirname, resolve, extname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { randomBytes, createHash } from 'node:crypto'
-import { execFileSync } from 'node:child_process'
+import { execFileSync, spawn } from 'node:child_process'
 import { request as httpsRequest } from 'node:https'
 import { publicMeta, GROUPS, FEATURES } from './lib/panel-meta.mjs'
 
@@ -701,7 +701,144 @@ const LOCAL_OPS = {
     try { local = JSON.parse(readFileSync(join(ROOT, 'version.json'), 'utf8')) } catch {}
     return { ...st, localVersion: String(local.version || '0.0.0'), version: String(local.version || '0.0.0') }
   },
-  applyUpdate: () => ({ ok: false, error: '覆盖代码需要 DSH 面板（它知道怎么安全重启自己）；也可手动 git pull' }),
+  // 一键更新：下载 → 校验 → 备份 → 覆盖 → 重启
+  // 重启优先「退出等启动器重拉」（被 panel-launcher.mjs 守护时），
+  // 否则降级为自接力（spawn 新进程后自己退出）。两种都实测过能自动完成。
+  applyUpdate: async () => {
+    // ① 先看有没有新版
+    const upd = await LOCAL_OPS.checkUpdate()
+    if (!upd.available) return { ok: true, alreadyLatest: true, version: upd.localVersion }
+    if (!/^[0-9a-f]{40}$/i.test(upd.commitSha)) {
+      return { ok: false, error: '拿不到合法的 commit sha（' + upd.commitSha + '），拒绝下载' }
+    }
+
+    // ② 下载源码 zip（codeload 只认 commit sha，不认 blob sha —— v1.1.3 修过这个）
+    let buf
+    try { buf = await httpsGet('https://codeload.github.com/' + UPDATE_REPO + '/zip/' + upd.commitSha, 180000) } catch (e) {
+      return { ok: false, error: '下载失败：' + String(e?.message || e) }
+    }
+    if (!buf || buf.length < 100000) return { ok: false, error: '下载内容异常（' + (buf ? buf.length : 0) + ' 字节）' }
+
+    // ③ 解压到临时目录
+    const tmp = join(process.env.TEMP || process.env.TMP || 'C:\\Windows\\Temp', 'dsh-panel-update-' + Date.now())
+    mkdirSync(tmp, { recursive: true })
+    const zip = join(tmp, 'src.zip')
+    writeFileSync(zip, buf)
+    try { execFileSync(TAR_EXE, ['-xf', zip, '-C', tmp], { stdio: 'pipe', timeout: 120000, windowsHide: true }) } catch (e) {
+      return { ok: false, error: '解压失败：' + String(e?.stderr || e?.message || e).slice(0, 160) }
+    }
+    let srcRoot = tmp
+    const subs = readdirSync(tmp).filter((f) => { try { return statSync(join(tmp, f)).isDirectory() } catch { return false } })
+    if (subs.length === 1) srcRoot = join(tmp, subs[0])
+
+    // ④ 只覆盖白名单里的代码；config.json / node_modules / 数据一律不碰
+    const PATHSPEC = [
+      'wechat-group-agent/lib',
+      'wechat-group-agent/panel',
+      'wechat-group-agent/standalone-panel.mjs',
+      'wechat-group-agent/panel-launcher.mjs',
+      'wx-bridge/lib',
+      'wx-bridge/server.mjs',
+      'scripts',
+      'version.json',
+    ]
+
+    // ⑤ 先备份（失败就中止，绝不半覆盖）
+    mkdirSync(BACKUP_DIR, { recursive: true })
+    const stamp = new Date().toISOString().replace(/[:T]/g, '-').slice(0, 19)
+    const backupZip = join(BACKUP_DIR, 'code-' + stamp + '.zip')
+    const existing = PATHSPEC.filter((p) => existsSync(join(ROOT, p)))
+    try {
+      execFileSync(TAR_EXE, ['-a', '-cf', backupZip, ...existing], { cwd: ROOT, stdio: 'pipe', timeout: 180000, windowsHide: true })
+    } catch (e) {
+      return { ok: false, error: '备份现有代码失败，已中止（未做任何覆盖）：' + String(e?.stderr || e?.message || e).slice(0, 160) }
+    }
+
+    // ⑥ 覆盖
+    const copied = []
+    const failed = []
+    const copyPath = (rel) => {
+      const src = join(srcRoot, rel)
+      const dst = join(ROOT, rel)
+      if (!existsSync(src)) return
+      try {
+        const st = statSync(src)
+        if (st.isDirectory()) {
+          mkdirSync(dst, { recursive: true })
+          for (const f of readdirSync(src)) copyPath(join(rel, f))
+        } else {
+          mkdirSync(dirname(dst), { recursive: true })
+          copyFileSync(src, dst)
+          copied.push(rel)
+        }
+      } catch (e) { failed.push(rel + ': ' + String(e?.message || e).slice(0, 80)) }
+    }
+    for (const p of PATHSPEC) copyPath(p)
+
+    if (failed.length) {
+      return {
+        ok: false,
+        error: '覆盖时 ' + failed.length + ' 个文件失败（已复制 ' + copied.length + ' 个）',
+        failed: failed.slice(0, 10),
+        backup: backupZip,
+        rollbackHint: '回滚：把 ' + backupZip + ' 解压覆盖回项目根目录',
+      }
+    }
+
+    // ⑦ 语法自检：新代码跑不起来就不该重启
+    const checkTargets = [
+      join(ROOT, 'wechat-group-agent', 'standalone-panel.mjs'),
+      join(ROOT, 'wechat-group-agent', 'panel-launcher.mjs'),
+      join(ROOT, 'wechat-group-agent', 'lib', 'index.js'),
+    ].filter((p) => existsSync(p))
+    const badSyntax = []
+    for (const p of checkTargets) {
+      try { execFileSync(process.execPath, ['--check', p], { stdio: 'pipe', timeout: 30000, windowsHide: true }) } catch (e) {
+        badSyntax.push(p.split(/[\\/]/).pop() + ': ' + String(e?.stderr || e?.message || e).slice(0, 100))
+      }
+    }
+    if (badSyntax.length) {
+      return {
+        ok: false,
+        error: '新代码语法检查不通过，已停止（未重启）',
+        details: badSyntax,
+        backup: backupZip,
+        rollbackHint: '回滚：把 ' + backupZip + ' 解压覆盖回项目根目录',
+      }
+    }
+
+    try { rmdirSync(tmp, { recursive: true }) } catch {}
+
+    // ⑧ 重启
+    const supervised = process.env.PANEL_SUPERVISED === '1'
+    const result = {
+      ok: true, updated: true,
+      from: upd.localVersion, to: upd.remoteVersion,
+      commit: upd.commitSha.slice(0, 7),
+      copied: copied.length,
+      backup: backupZip,
+      restartMode: supervised ? 'launcher' : 'self-spawn',
+    }
+    setTimeout(() => {
+      try { server.close() } catch {}
+      if (supervised) {
+        // 启动器看到 42 就重拉；端口已随进程退出释放
+        setTimeout(() => process.exit(42), 400)
+      } else {
+        // 无守护者：自己拉起新进程再退出
+        setTimeout(() => {
+          try {
+            const c = spawn(process.execPath, [fileURLToPath(import.meta.url), ...process.argv.slice(2)], {
+              detached: true, stdio: 'ignore', windowsHide: true,
+            })
+            c.unref()
+          } catch { /* 起不来只能让用户手动重启 */ }
+          process.exit(0)
+        }, 500)
+      }
+    }, 800)   // 留时间把 HTTP 响应发出去
+    return result
+  },
 
   // ── 自检 ──
   selfcheck: async () => {
