@@ -96,7 +96,7 @@ export class DbPoller {
     if (this._consecFail >= 5 && !this.paused()) {
       this._pauseMs = this._backoffMs
       this._pauseUntil = Date.now() + this._pauseMs
-      this._backoffMs = Math.min(this._backoffMs * 2, 300000)   // 60s → … → 最多 5 分钟
+      this._backoffMs = Math.min(this._backoffMs * 2, 600000)   // 60s → … → 最多 10 分钟
       this.stats.pauses++
       this.log(`轮询暂停（连续 ${this._consecFail} 次失败，${Math.round(this._pauseMs / 1000)} 秒后重试）：`
         + this._lastReadErr.slice(0, 120))
@@ -338,12 +338,16 @@ export class DbPoller {
     if (this._pauseUntil > 0) {
       this._pauseUntil = 0
       try {
-        await this.q('message_0.db', 'SELECT COUNT(*) AS c FROM sqlite_master', 10000)
+        // ★ 2026-10-22：原来这里硬编码探测 message_0.db —— 但很多机器上只有 
+        //   message_1.db，探测不存在的库会让 hook 缓存坏句柄（整库失聪）甚至崩溃。
+        //   改成走 resolveShard：它会先问 hook「有哪些真实分片」，只探测存在的。
+        const shard = await this.resolveShard(10000)
+        if (!shard) throw new Error('消息库分片暂不可用')
         this._noteReadOk()                       // 会打"轮询恢复"
       } catch (e) {
         this._pauseMs = this._backoffMs
         this._pauseUntil = Date.now() + this._pauseMs
-        this._backoffMs = Math.min(this._backoffMs * 2, 300000)
+        this._backoffMs = Math.min(this._backoffMs * 2, 600000)
         this.stats.pauses++
         this.log(`轮询暂停（探测仍失败，${Math.round(this._pauseMs / 1000)} 秒后重试）：`
           + String(e?.message || e).slice(0, 120))

@@ -1,5 +1,5 @@
 {
-  "notes": "UI 重做（GitHub 式分层：灰底+白卡+蓝强调，降低视觉疲劳）；按钮/输入框/开关/表头统一到 34-36px 控件与 6px 圆角；暗色模式改用 GitHub dark 配色",
-  "releasedAt": "2026-10-22",
-  "version": "1.1.1"
+  "version": "1.1.2",
+  "notes": "修复轮询探测的两个 bug：① 暂停到点后硬编码探测 message_0.db（很多机器只有 message_1.db）→ 必然失败形成死循环，且会污染 hook 的句柄缓存；改成走 resolveShard 先问真实分片。② 两处退避封顶从 5 分钟统一到 10 分钟。",
+  "releasedAt": "2026-10-22"
 }
