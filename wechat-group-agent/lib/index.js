@@ -4262,8 +4262,8 @@ let res = await callLlm(route, sys, usr, undefined)
         if (!dll) return { ok: false, error: '压缩包里没找到 version.dll' }
         // 预检：DLL 能力
         const dllBuf = readFileSync(dll)
-        const hasReplay = dllBuf.includes(Buffer.from('StartC2CDownload'))
-        const hasVideo = dllBuf.includes(Buffer.from('hdvideo'))
+        const hasReplay = dllBuf.includes(Buffer.from(DLL_NEEDLE_MAIN))
+        const hasVideo = dllBuf.includes(Buffer.from(DLL_NEEDLE_VIDEO))
         log('[eyes] DLL ' + Math.round(dllBuf.length/1024) + 'KB  replay=' + hasReplay + '  video=' + hasVideo)
         const { createHash } = await import('node:crypto')
         const sha256 = createHash('sha256').update(dllBuf).digest('hex')
