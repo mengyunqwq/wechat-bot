@@ -14,11 +14,14 @@
  *
  * 纯 ESM，无编译步骤（本环境没有可用的 tsc），改完 dev_reload_package 即生效。
  */
-import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
+import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { homedir } from 'node:os'
 import { createHash, randomUUID } from 'node:crypto'
 import { BridgeClient } from './bridge-client.mjs'
+// 配置元数据先静态拿一份（校验用）；真正挂面板时会用带 cache-bust 的动态 import
+// 再加载一份最新的（热重载后改了 label/范围不用重启 DSH）。
+import { CONFIG_META as STATIC_CONFIG_META } from './panel-meta.mjs'
 import {
   parseQuietWindows, isQuiet, detectTrigger, humanDelayMs,
   splitMessage, gapMs, RoomPolicy, cleanReply, pickCanned,
@@ -40,6 +43,9 @@ export const name = '@dsh-external/dsh-wechat-bot'// Cordis 4.0.4 的 inject 只
 export const inject = ['tools', 'llm']
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
+
+// 面板用的配置元数据。动态 import 成功后会替换成最新模块导出的那份。
+let CONFIG_META = STATIC_CONFIG_META
 
 /**
  * "群里明确要求发语音"的识别（用于 must-send-voice 那条路径）。
@@ -387,7 +393,7 @@ export function apply(ctx, rawConfig) {
 function applyInner(ctx, rawConfig) {
   const config = { ...DEFAULT_CONFIG, ...(rawConfig ?? {}) }
   const SHORT = 'dsh-wechat-bot'
-const BUILD_VER = '2026-10-16.3'   // 抬版本：让新实例压过热重载残留的旧实例   // 带版本号的实例才允许踢掉旧连接（旧代码没这个字段）
+const BUILD_VER = '2026-10-22.21'   // 抬版本：让新实例压过热重载残留的旧实例   // 带版本号的实例才允许踢掉旧连接（旧代码没这个字段）
   const dshHome = process.env.DSH_HOME || join(homedir(), '.dsh')
   // ★ 持久化：把 wechat_bot_config 改过的值存到文件，重载插件后自动读回来。
   //   （以前纯内存，重载/重启 DSH 就全部回落默认，每次都要重设一遍。）
@@ -398,6 +404,90 @@ const BUILD_VER = '2026-10-16.3'   // 抬版本：让新实例压过热重载残
       for (const [k, v] of Object.entries(saved)) { if (k in DEFAULT_CONFIG) config[k] = v }
     }
   } catch { /* 文件坏了用默认 */ }
+
+  // ── 配置的单一写入口（面板 / wechat_bot_config 工具共用）──────────────
+  // 以前工具里内联改值，面板再写一套就会漂移；现在统一走这里：
+  //   校验 → 应用 → 副作用（安静时段 / 各环节流配置）→ 原子落盘。
+  function persistConfig() {
+    try {
+      mkdirSync(dirname(CONFIG_FILE), { recursive: true })
+      const dump = {}
+      for (const k of Object.keys(DEFAULT_CONFIG)) dump[k] = config[k]
+      const tmp = CONFIG_FILE + '.tmp'
+      writeFileSync(tmp, JSON.stringify(dump, null, 1), 'utf8')
+      renameSync(tmp, CONFIG_FILE)
+    } catch (e) { log('配置持久化失败：' + String(e?.message || e).slice(0, 120)) }
+  }
+
+  function normalizeConfigValue(key, raw) {
+    if (!(key in DEFAULT_CONFIG)) throw new Error('未知参数：' + key)
+    const cur = DEFAULT_CONFIG[key]
+    let v
+    if (typeof cur === 'number') {
+      v = Number(raw)
+      if (!Number.isFinite(v)) throw new Error('值不合法（需要数字）：' + raw)
+    } else if (typeof cur === 'boolean') {
+      v = typeof raw === 'boolean' ? raw : /^(1|true|yes|on|开)$/i.test(String(raw))
+    } else if (Array.isArray(cur)) {
+      v = Array.isArray(raw)
+        ? raw.map((s) => String(s).trim()).filter(Boolean)
+        : String(raw).split(/[,，]/).map((s) => s.trim()).filter(Boolean)
+    } else if (cur && typeof cur === 'object') {
+      if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('值不合法（需要对象）')
+      v = raw
+    } else {
+      v = String(raw)
+    }
+    const m = CONFIG_META[key]
+    if (m) {
+      if (m.type === 'number' && Number.isFinite(v)) {
+        if (m.min != null && v < m.min) throw new Error((m.label || key) + ' 不能小于 ' + m.min)
+        if (m.max != null && v > m.max) throw new Error((m.label || key) + ' 不能大于 ' + m.max)
+      }
+      if (m.type === 'enum' && Array.isArray(m.options) && !m.options.includes(v)) {
+        throw new Error((m.label || key) + ' 只能是：' + m.options.filter((x) => x !== '').join(' / '))
+      }
+      if (m.type === 'quiet' && v) {
+        const parts = String(v).split(',').map((s) => s.trim()).filter(Boolean)
+        for (const p of parts) {
+          if (!/^([01]?\d|2[0-3]):[0-5]\d\s*-\s*([01]?\d|2[0-3]):[0-5]\d$/.test(p)) {
+            throw new Error((m.label || key) + ' 格式应为 23:00-08:00（多个时段用逗号分隔）')
+          }
+        }
+      }
+    }
+    return v
+  }
+
+  /** 批量应用配置：要么全部通过校验再写，要么一条都不改。 */
+  function applyConfigPatch(patch) {
+    const applied = []
+    const rejected = []
+    const warnings = []
+    if (!patch || typeof patch !== 'object' || Array.isArray(patch)) {
+      return { ok: false, applied, rejected: [{ key: '*', reason: 'patch 必须是对象' }], warnings }
+    }
+    const next = {}
+    for (const [k, raw] of Object.entries(patch)) {
+      try { next[k] = normalizeConfigValue(k, raw) } catch (e) { rejected.push({ key: k, reason: String(e?.message || e) }) }
+    }
+    // 全部合法才落：避免一半新一半旧（面板一次改多个字段时尤其重要）
+    if (rejected.length) return { ok: false, applied, rejected, warnings }
+
+    const quietNext = next.quietHours !== undefined ? parseQuietWindows(next.quietHours) : null
+    for (const [k, v] of Object.entries(next)) {
+      config[k] = v
+      applied.push({ key: k, value: v })
+      if (k === 'quietHours' && quietNext) { quietWindows.length = 0; quietWindows.push(...quietNext) }
+    }
+    for (const r of rooms.values()) r.policy.cfg = config
+    if (applied.length) {
+      persistConfig()
+      log('配置变更：' + applied.map((x) => x.key + '=' + JSON.stringify(x.value)).join('，'))
+    }
+    return { ok: true, applied, rejected, warnings }
+  }
+
   const logFile = config.logFile || join(dshHome, 'super-injector', SHORT + '.log')
   const memoryDir = config.memoryDir || join(dshHome, 'wechat-bot', 'memory')
 // 群成员名字映射（wxid → 昵称）：hook 拿不到联系人库，靠自动学习 + 手动设置
@@ -410,6 +500,57 @@ const namesFile = join(dirname(memoryDir), 'members.json')
     sentText: 0, sentSticker: 0, sentPat: 0, startedAt: Date.now(),
   }
   /** roomId -> 群状态 */
+  // ── token 用量统计（2026-10-22）────────────────────────────────────
+  //   为什么单独存：面板要显示"花了多少 token"，而 stats 里的 llmCalls 只是次数。
+  //   数据来源：DSH 的 LLM 流里 type==='usage' 的 chunk（每次调用都带）。
+  //   持久化到 config 同目录的 usage.json，跨插件重载/重启累计。
+  const usageFile = join(dirname(memoryDir), 'usage.json')
+  const usageStats = {
+    prompt: 0, completion: 0, total: 0, calls: 0,
+    byModel: {}, byDay: {}, startedAt: Date.now(),
+  }
+  try {
+    const u = JSON.parse(readFileSync(usageFile, 'utf8')) || {}
+    usageStats.prompt = Number(u.prompt) || 0
+    usageStats.completion = Number(u.completion) || 0
+    usageStats.total = Number(u.total) || 0
+    usageStats.calls = Number(u.calls) || 0
+    usageStats.byModel = u.byModel || {}
+    usageStats.byDay = u.byDay || {}
+    usageStats.startedAt = u.startedAt || Date.now()
+  } catch { /* 首次运行 */ }
+  let usageSaveTimer = null
+  function saveUsageSoon() {
+    if (usageSaveTimer) return
+    usageSaveTimer = setTimeout(() => {
+      usageSaveTimer = null
+      try { writeFileSync(usageFile, JSON.stringify(usageStats, null, 1), 'utf8') } catch { /* ignore */ }
+    }, 1500)
+  }
+  /** 记一次 LLM 调用的 token 用量（兼容多种 field 名）*/
+  function recordUsage(usage, model) {
+    if (!usage || typeof usage !== 'object') return
+    const p = Number(usage.inputTokens ?? usage.promptTokens ?? usage.prompt_tokens ?? usage.input_tokens ?? 0) || 0
+    const c = Number(usage.outputTokens ?? usage.completionTokens ?? usage.completion_tokens ?? usage.output_tokens ?? 0) || 0
+    let t = Number(usage.totalTokens ?? usage.total_tokens ?? 0) || 0
+    if (!t) t = p + c
+    if (!p && !c && !t) return
+    usageStats.prompt += p
+    usageStats.completion += c
+    usageStats.total += t
+    usageStats.calls += 1
+    const day = new Date().toISOString().slice(0, 10)
+    const mdl = String(model || 'unknown')
+    for (const [bucket, key] of [[usageStats.byDay, day], [usageStats.byModel, mdl]]) {
+      const cur = bucket[key] || { prompt: 0, completion: 0, total: 0, calls: 0 }
+      cur.prompt += p; cur.completion += c; cur.total += t; cur.calls += 1
+      bucket[key] = cur
+    }
+    // 只保留最近 30 天，避免文件无限增长
+    const days = Object.keys(usageStats.byDay).sort()
+    while (days.length > 30) delete usageStats.byDay[days.shift()]
+    saveUsageSoon()
+  }
   const rooms = new Map()
   const timers = new Set()
   let lastRoute = null
@@ -442,12 +583,92 @@ const namesFile = join(dirname(memoryDir), 'members.json')
     return next()
   })
 
+  // ── 群名 / 人名缓存（微信 4.x 的 contact.db 经常被卸载/句柄失效，用 contact_fts.db 兜底）──
+  // 背景：桥侧 rooms() 早期只能返回 roomId，消息里 senderName 也只能拿到 wxid。
+  // 群名和联系人昵称都在 contact_fts_v5_content.c0（\b 分隔），
+  // 用 name2id.rowid ↔ username 对上即可；这段查询只读、慢一点也无妨。
+  const HOOK_API_BASE = process.env.WECHAT_HOOK_API || 'http://127.0.0.1:30001'
+  const roomNameCache = new Map()
+  const contactNameCache = new Map()
+  let namesAt = 0
+  let namesFailAt = 0
+  let namesLogged = ''
+
+  async function refreshNameCaches() {
+    if ((roomNameCache.size || contactNameCache.size) && Date.now() - namesAt < 5 * 60_000) return roomNameCache
+    if (namesFailAt && Date.now() - namesFailAt < 60_000) return roomNameCache
+    try {
+      const ac = new AbortController()
+      const timer = setTimeout(() => ac.abort(new Error('名字查询超时')), 8000)
+      let res
+      try {
+        res = await fetch(HOOK_API_BASE + '/QueryDB/execute', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            optDbName: 'contact_fts.db',
+            SQL: 'SELECT n.username AS id, c.c0 AS name FROM name2id n JOIN contact_fts_v5_content c ON c.id = n.rowid',
+          }),
+          signal: ac.signal,
+        })
+      } finally {
+        clearTimeout(timer)
+      }
+      const j = await res.json()
+      let addedRooms = 0
+      let addedPeople = 0
+      for (const row of Array.isArray(j?.data) ? j.data : []) {
+        const id = String(row.id || '')
+        if (!id) continue
+        const parts = String(row.name || '').split(/\u0008+/).map((s) => s.trim()).filter(Boolean)
+        const name = parts[0] || ''
+        if (!name) continue
+        if (id.endsWith('@chatroom')) {
+          if (roomNameCache.get(id) !== name) addedRooms++
+          roomNameCache.set(id, name)
+        } else if (!id.endsWith('@openim')) {
+          if (contactNameCache.get(id) !== name) addedPeople++
+          contactNameCache.set(id, name)
+        }
+      }
+      if (roomNameCache.size || contactNameCache.size) namesAt = Date.now()
+      // 已经建出来的群状态 / 历史消息也同步改名（否则要等下一条消息才更新）
+      for (const r of rooms.values()) {
+        const rn = roomNameCache.get(r.roomId)
+        if (rn && r.roomName !== rn) r.roomName = rn
+        for (const m of r.msgs) {
+          if (m.isSelf || !m.sender) continue
+          const n = contactNameCache.get(m.sender) || (config.memberNames || {})[m.sender]
+          if (n) m.senderName = n
+        }
+      }
+      const sig = `${roomNameCache.size}/${contactNameCache.size}`
+      if (sig !== namesLogged) {
+        namesLogged = sig
+        log(`名字缓存：群 ${roomNameCache.size} 个 / 人 ${contactNameCache.size} 个（contact_fts.db，本次 +${addedRooms}/+${addedPeople}）`)
+      }
+    } catch (e) {
+      namesFailAt = Date.now()
+      log('名字读取失败（暂用 roomId/wxid）：' + String(e?.message || e).slice(0, 120))
+    }
+    return roomNameCache
+  }
+
   // ── 群状态与记忆 ────────────────────────────────────────────
   function roomState(roomId, roomName) {    let r = rooms.get(roomId)
-    if (r) { if (roomName) r.roomName = roomName; return r }
+    if (r) {
+      // 消息事件里的 roomName 往往就是 roomId；别用 id 覆盖已经查到的真群名
+      if (roomName && !String(roomName).endsWith('@chatroom')) r.roomName = roomName
+      else if (roomNameCache.get(roomId)) r.roomName = roomNameCache.get(roomId)
+      return r
+    }
+    const cachedName = roomNameCache.get(roomId)
+    const display = (roomName && !String(roomName).endsWith('@chatroom'))
+      ? roomName
+      : (cachedName || roomName || roomId)
     r = {
       roomId,
-      roomName: roomName || roomId,
+      roomName: display,
       policy: new RoomPolicy(config),
       msgs: [],          // {ts, isSelf, sender, senderName, text}
       pending: [],       // 待评估的消息批次
@@ -494,7 +715,9 @@ const namesFile = join(dirname(memoryDir), 'members.json')
     try {
       const raw = JSON.parse(readFileSync(memFile(r.roomId), 'utf8'))
       if (Array.isArray(raw?.msgs)) r.msgs = raw.msgs.slice(-300)
-      if (raw?.roomName) r.roomName = raw.roomName
+      // 旧记忆文件里存的 roomName 可能还是 roomId；别用它覆盖刚查到的真群名
+      const cur = String(r.roomName || '')
+      if (raw?.roomName && (!cur || cur.endsWith('@chatroom'))) r.roomName = raw.roomName
     } catch { /* 首次 */ }
   }
 
@@ -512,7 +735,8 @@ const namesFile = join(dirname(memoryDir), 'members.json')
     // 有人说话 → 清零"主动没人理"的计数（用户要求：没人回就别继续主动说）
     if (!m.isSelf) r.proactiveStreak = 0
     // 带上 msgid：视频"延迟复查"升级内容时要能找回**这一条**的上下文副本（r.msgs 里是拷贝）
-    r.msgs.push({ id: m.id || '', ts: m.ts || Date.now(), isSelf: !!m.isSelf, sender: m.sender, senderName: m.senderName, text: m.text })
+    const senderName = m.isSelf ? (m.senderName || '我') : nameOf(m.sender, m.senderName)
+    r.msgs.push({ id: m.id || '', ts: m.ts || Date.now(), isSelf: !!m.isSelf, sender: m.sender, senderName, text: m.text })
     if (r.msgs.length > 300) r.msgs = r.msgs.slice(-300)
     if (++r.dirty >= 20) saveMemory(r)
   }
@@ -956,9 +1180,19 @@ let res = await callLlm(route, sys, usr, undefined)
     const w = String(wxid || '')
     const n = (config.memberNames || {})[w]
     if (n) return n
+    const c = contactNameCache.get(w)
+    if (c) return c
     const f = String(fallback || '')
     if (f && f !== w && !/^wxid_/.test(f) && !f.includes('@chatroom')) return f
     return w
+  }
+
+  /** 把文本里的 wxid 换成人名（老记忆里存的是 wxid，面板显示时顺手美化）。 */
+  function prettyNames(text) {
+    return String(text || '').replace(/wxid_[A-Za-z0-9_-]+/g, (w) => {
+      const n = nameOf(w, w)
+      return n && n !== w ? n : w
+    })
   }
 
   /**
@@ -1170,16 +1404,16 @@ let res = await callLlm(route, sys, usr, undefined)
       '  · 会按时间说话（这才像活人）：清早/上午顺口问个早；快到饭点（11~13、17~19）会提吃饭；'
         + '深夜（23 点后）会催人去睡（「这么晚还不睡啊」「熬什么夜」）；周末会提周末；节日/季节也能顺口带上。',
       '  · 但别每句都报时间、别当报时钟，自然带过就行；不要主动宣布「今天是 X 月 X 日」除非跟话题相关。',
-    // ★ 她的"眼睛"：图片识别 + 视频抽帧（2026-10-21 接入）
-      '【你能看到什么 —— 这些是你真能看到的，别装作看不见】',
-      '  · 图片：群里的图你能看到内容，图里的文字一般也能读出来（截图、聊天记录、菜单、海报…）。'
+      // ★ 她的"眼睛"：图片原图 + 整段视频（2026-10-21 接入）
+      '【你的眼睛 —— 这些是你真能看到的，别装作看不见】',
+      '  · 图片：你能看到**全分辨率的原图**，图里的字也能读出来（截图、聊天记录、文章、菜单、价格、海报…都行）。'
         + '别人发图问「这是啥/帮我看看/上面写的什么」，就按你看到的说具体内容。',
-      '  · 视频：视频文件在本地时，你能看到画面（按秒抽帧）+ 听到里面说话（音轨转成文字给你）。'
-        + '所以别人发视频问「这视频讲的啥」，你能说出过程和台词，别只说封面。',
+      '  · 视频：你能看到**整段视频**（每秒一帧的画面）+ **听到里面说话**（音轨转成文字给你）。'
+        + '所以别人发视频问「这视频讲的啥/里面说什么」，你能说出过程和台词，别只说封面。',
       '  · 表情包：能看懂是啥梗、什么情绪。',
-      '  · 但如果真看不清（图太小/很糊/黑乎乎/视频没下载），就老实说看不清，'
+      '  · 但如果真看不清（图太小/很糊/黑乎乎），就老实说「这张有点糊，看不清」，'
         + '**不要硬编内容**——编错了比说看不清更难堪。',
-      '  · 别炫耀这些能力，也别解释你怎么看到的；就像普通人看了一眼那样自然。',
+      '  · 别炫耀这些能力，也别解释你怎么看到的；就像普通人"看了一眼"那样自然。',
       known.length ? `群里的人：${known.join('、')}` : (names ? `群成员：${names}` : ''),
       // 长期记忆：每次都带上（用户要求"每次都通过记忆系统"）
       (r.facts || []).length
@@ -1372,7 +1606,7 @@ let res = await callLlm(route, sys, usr, undefined)
         ? '接着他的话回一句（像聊天一样自然接住，别重复你刚说过的）：'
         : priority === 'image'
           ? ((trigger.videoCover || trigger.videoSeconds || trigger.videoAudio)
-            ? `就这条${trigger.linkVideoSite ? trigger.linkVideoSite + '视频（群里分享的链接）' : '视频'}接一句（可以吐槽、可以问一句、可以夸；你看到的是从视频里抽的几帧画面${trigger.videoAudio ? '和音轨转写' : ''}${trigger.videoCover ? '（只有封面帧）' : ''}，**别声称你看完了完整视频**）：`
+            ? `就这条${trigger.linkVideoSite ? trigger.linkVideoSite + '视频（群里分享的链接）' : '视频'}接一句（可以吐槽、可以问一句、可以夸；你看到的是从视频里抽的几帧画面${trigger.videoAudio ? '和音轨转写' : ''}${trigger.videoCover ? '（只有封面帧）' : ''}，**别声称你看完了整段视频**）：`
             : '就这张图接一句（可以吐槽、可以问一句、可以夸，别像在写图片说明）：')
           : '写你要发的那一条消息（只输出这句话）：',
     ].join('\n')
@@ -1949,6 +2183,7 @@ let res = await callLlm(route, sys, usr, undefined)
           if (chunk.reason?.failure) diag.failure = chunk.reason.failure
         } else if (chunk.type === 'usage') {
           diag.usage = chunk.usage
+          try { recordUsage(chunk.usage, opts && opts.model) } catch { /* ignore */ }
         }
       }
     } catch (e) {
@@ -3290,6 +3525,12 @@ let res = await callLlm(route, sys, usr, undefined)
   async function resolveRoom(input) {
     const roomsList = await client.call('rooms', {}, 10_000)
     if (!roomsList?.length) throw new Error('bridge 没返回任何群（微信是否已登录？）')
+    // 桥侧若还只会返回 roomId，用本插件的群名缓存补一层（不改桥也能显示群名）
+    if (!roomNameCache.size) { try { await refreshNameCaches() } catch { /* ignore */ } }
+    for (const x of roomsList) {
+      const n = roomNameCache.get(x.roomId)
+      if (n) x.name = n
+    }
     const key = String(input ?? '').trim()
     if (!key) {
       if (roomsList.length === 1) return roomsList[0]
@@ -3300,6 +3541,573 @@ let res = await callLlm(route, sys, usr, undefined)
     const byName = roomsList.find((x) => x.name === key) || roomsList.find((x) => x.name.includes(key))
     if (byName) return byName
     throw new Error('找不到群：' + key + '\n现有：\n' + roomsList.map((x) => `- ${x.name}（${x.roomId}）`).join('\n'))
+  }
+
+  /**
+   * 面板读写记忆专用：从磁盘还原一个"影子群对象"，**不创建活动群状态**。
+   * 为什么不能用 roomState()：它会建 policy、回填数据库、拉群成员，还会被主动发言/
+   * 记忆提炼的定时器看到 —— 用户只是打开面板看一眼某个群，不应该让机器人开始在
+   * 那个群"主动冒泡"或额外调用 LLM。
+   */
+  function panelRoomView(room) {
+    const liveName = room.name && !String(room.name).endsWith('@chatroom') ? room.name : ''
+    const r = { roomId: room.roomId, roomName: liveName || room.roomId, msgs: [], facts: [] }
+    try {
+      const raw = JSON.parse(readFileSync(memFile(room.roomId), 'utf8'))
+      if (Array.isArray(raw?.msgs)) r.msgs = raw.msgs
+      // 同样：旧文件里的 roomName 可能是 roomId，不能盖掉真群名
+      if (!liveName && raw?.roomName && !String(raw.roomName).endsWith('@chatroom')) r.roomName = raw.roomName
+    } catch { /* 没有短期记忆 */ }
+    try {
+      const saved = JSON.parse(readFileSync(factsFile(room.roomId), 'utf8'))
+      if (Array.isArray(saved)) r.facts = saved
+    } catch { /* 没有长期记忆 */ }
+    return r
+  }
+
+  // ── 模型接口：读取 DSH 的 provider 目录 / 设置（面板「模型接口」页用）──
+  const getSvc = (name) => {
+    try { return (typeof ctx.get === 'function' ? ctx.get(name) : null) ?? ctx[name] } catch { return null }
+  }
+
+  async function panelProvidersState() {
+    const out = { ok: true, registered: [], configurable: [], settings: [], error: '' }
+    try {
+      const llm = getSvc('llm')
+      if (llm && typeof llm.listProviders === 'function') {
+        out.registered = llm.listProviders().map((p) => ({ id: p.id, name: p.name }))
+      }
+      if (llm && typeof llm.listConfigurableProviders === 'function') {
+        out.configurable = llm.listConfigurableProviders().map((p) => ({
+          provider: p.provider,
+          displayName: p.displayName,
+          settingsNs: String(p.settingsNs || ''),
+          settingsPath: Array.isArray(p.settingsPath) ? [...p.settingsPath] : [],
+          declared: !!p.declared,
+        }))
+      }
+      const settings = getSvc('settings')
+      if (settings && typeof settings.describe === 'function') {
+        const desc = await settings.describe({ redactSecrets: true })
+        out.settings = (desc || [])
+          .filter((d) => d.value && (d.value.providers || String(d.ns) === 'agent-default-model'))
+          .map((d) => ({
+            ns: String(d.ns),
+            revision: d.revision,
+            value: d.value,
+            writable: settings.writable !== false,
+          }))
+      }
+      // 每个 provider 的 key 引用是否真的配了（只看 configured/source，不返回值）
+      const creds = getSvc('credentials')
+      out.credentials = {}
+      if (creds && typeof creds.describe === 'function') {
+        const pi = out.settings.find((s) => s.ns === 'llm-pi-ai')
+        for (const [id, p] of Object.entries(pi?.value?.providers || {})) {
+          const ref = p?.apiKeyEnv
+          if (!ref) continue
+          try {
+            const info = await creds.describe(ref)
+            out.credentials[id] = { ref, configured: !!info?.configured, source: info?.source || '', writable: info?.writable !== false }
+          } catch { out.credentials[id] = { ref, configured: false, source: '', writable: false } }
+        }
+      }
+    } catch (e) {
+      out.ok = false
+      out.error = String(e?.stack || e?.message || e)
+      log('模型接口：读取 provider 状态失败 ' + String(e?.message || e))
+    }
+    return out
+  }
+
+  /** 找到某个 provider 的 settings 命名空间与当前描述符。 */
+  async function providerDoc(provider) {
+    const llm = getSvc('llm')
+    const settings = getSvc('settings')
+    if (!llm || typeof llm.listConfigurableProviders !== 'function') throw new Error('当前 DSH 没有 llm 服务')
+    if (!settings || typeof settings.describe !== 'function') throw new Error('当前 DSH 没有 settings 服务')
+    const dir = llm.listConfigurableProviders().find((p) => p.provider === provider)
+    if (!dir) throw new Error('DSH 不认识这个 provider：' + provider)
+    const descs = await settings.describe({ redactSecrets: true })
+    const desc = (descs || []).find((d) => String(d.ns) === String(dir.settingsNs))
+    if (!desc) throw new Error('找不到设置命名空间：' + String(dir.settingsNs))
+    return { llm, settings, dir, desc, ns: String(dir.settingsNs) }
+  }
+
+  /**
+   * 新增/修改一个模型服务商。
+   * 只写「凭据引用 + 端点 + 模型清单」，API key 存 DSH 凭据库，绝不回显、不写进配置。
+   * 保存后 pi-ai 会原子地注册/替换路由，下一次请求即生效（无需重启 DSH）。
+   */
+  async function panelProviderSave(body) {
+    const provider = String(body?.provider || '').trim()
+    if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(provider)) throw new Error('provider id 不合法')
+    const { settings, desc, ns, dir } = await providerDoc(provider)
+    const providers = JSON.parse(JSON.stringify(desc.value?.providers || {}))
+    const profile = providers[provider] || {}
+
+    if (body.displayName !== undefined && String(body.displayName).trim()) profile.displayName = String(body.displayName).trim()
+    if (body.baseURL !== undefined && String(body.baseURL).trim()) profile.baseURL = String(body.baseURL).trim()
+    if (body.api !== undefined && String(body.api).trim()) profile.api = String(body.api).trim()
+    if (body.models !== undefined) {
+      const list = String(body.models).split(/[,，\n]/).map((s) => s.trim()).filter(Boolean)
+      if (list.length) profile.models = list.map((id) => ({ id }))
+      else delete profile.models          // 留空 = 用内置目录，不要写空数组（会被当成"没有模型"）
+    }
+
+    // key：显式传入才写凭据；只给 keyRef 则只改引用（用于沿用已有 key）
+    // ★ 先注册路由（settings.update）成功后再写凭据：否则模型清单/协议写错导致整次保存失败时，
+    //   会在凭据库里留下一个没有归属的 key（实测踩过）。
+    let ref = String(body.keyRef || '').trim()
+    const pendingKey = body.apiKey !== undefined && String(body.apiKey).trim() ? String(body.apiKey).trim() : ''
+    if (pendingKey) {
+      const creds = getSvc('credentials')
+      if (!creds || typeof creds.set !== 'function') throw new Error('当前 DSH 没有 credentials 服务，无法保存 API key')
+      ref = ref || ('WECHAT_LLM_' + provider.toUpperCase().replace(/[^A-Z0-9]/g, '_') + '_KEY')
+      if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(ref)) throw new Error('keyRef 必须是 POSIX 变量名（如 OPENAI_API_KEY）')
+    }
+    if (ref) {
+      if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(ref)) throw new Error('keyRef 必须是 POSIX 变量名（如 OPENAI_API_KEY）')
+      profile.apiKeyEnv = ref
+    }
+    // 用 mutate(set) 整段替换 profile：这样删掉 models/displayName 等字段时能真正消失
+    // （settings.update 对 dict 是合并语义，删字段/删 provider 都不会生效）。
+    if (typeof settings.mutate === 'function' && Array.isArray(dir.settingsPath) && dir.settingsPath.length) {
+      await settings.mutate(ns, [{ op: 'set', path: [...dir.settingsPath], value: profile }], desc.revision)
+    } else {
+      providers[provider] = profile
+      await settings.update(ns, { providers }, desc.revision)
+    }
+    if (pendingKey) {
+      const creds = getSvc('credentials')
+      await creds.set(ref, pendingKey)
+    }
+
+    // 可选：直接设为机器人聊天/视觉默认路由
+    if (body.setChat && body.model) applyConfigPatch({ provider, model: String(body.model) })
+    if (body.setVision && body.model) applyConfigPatch({ visionProvider: provider, visionModel: String(body.model) })
+
+    log(`模型接口：已保存 ${provider}（keyRef=${profile.apiKeyEnv || '未设置'}）`)
+    const state = await panelProvidersState()
+    return { ok: true, provider, profile, state }
+  }
+
+  /** 删除一个服务商配置（不删凭据，方便以后重新启用）。 */
+  async function panelProviderRemove(body) {
+    const provider = String(body?.provider || '').trim()
+    const { settings, desc, ns, dir } = await providerDoc(provider)
+    const providers = JSON.parse(JSON.stringify(desc.value?.providers || {}))
+    const ref = providers[provider]?.apiKeyEnv || String(body?.keyRef || '').trim()
+    const purge = async () => {
+      if (!ref) return
+      const creds = getSvc('credentials')
+      if (creds && typeof creds.unset === 'function') {
+        try { await creds.unset(ref) } catch (e) { log('模型接口：删凭据失败 ' + String(e?.message || e)) }
+      }
+    }
+    if (!providers[provider]) {
+      if (body.purgeKey) await purge()
+      return { ok: true, removed: false, state: await panelProvidersState() }
+    }
+    // ★ 删除必须用 mutate({op:'unset'})：settings.update 对 dict 是"合并"，
+    //   把某个 provider 从对象里删掉再 update 并不会真的删除（实测踩过）。
+    if (typeof settings.mutate === 'function' && Array.isArray(dir.settingsPath) && dir.settingsPath.length) {
+      await settings.mutate(ns, [{ op: 'unset', path: [...dir.settingsPath] }], desc.revision)
+    } else {
+      delete providers[provider]
+      await settings.update(ns, { providers }, desc.revision)
+    }
+    // 可选：连凭据一起删（默认保留，方便以后重新启用）
+    if (body.purgeKey) await purge()
+    // 如果机器人正指着它，顺手退回默认，避免之后每条消息都报 MISSING_CREDENTIAL/UNKNOWN_MODEL
+    if (config.provider === provider) applyConfigPatch({ provider: '', model: '' })
+    if (config.visionProvider === provider) applyConfigPatch({ visionProvider: '', visionModel: '' })
+    log('模型接口：已移除 ' + provider)
+    return { ok: true, removed: true, state: await panelProvidersState() }
+  }
+
+  /** 用一次极小的真实请求验证路由是否可用（会消耗几个 token）。 */
+  async function panelProviderTest(body) {
+    const provider = String(body?.provider || '').trim()
+    const llm = getSvc('llm')
+    if (!llm || typeof llm.stream !== 'function') throw new Error('当前 DSH 没有 llm 服务')
+    let model = String(body?.model || '').trim()
+    if (!model && typeof llm.listModels === 'function') {
+      const list = await llm.listModels(provider)
+      model = list?.[0]?.id || ''
+    }
+    if (!model) throw new Error('请填模型 id（该服务商没有可自动挑选的模型）')
+    const ac = new AbortController()
+    const timer = setTimeout(() => ac.abort(new Error('模型测试超时（25s）')), 25_000)
+    const t0 = Date.now()
+    let text = ''
+    try {
+      const stream = llm.stream({
+        provider,
+        model,
+        messages: [createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: '只回复两个字：在的' }] })],
+        maxTokens: 32,
+        signal: ac.signal,
+      })
+      for await (const chunk of stream) {
+        if (chunk.type === 'text-delta') text += chunk.text
+        else if (chunk.type === 'block-end' && !text && chunk.block?.type === 'text') text = chunk.block.text || ''
+      }
+    } finally {
+      clearTimeout(timer)
+    }
+    return { ok: true, provider, model, text: String(text).trim().slice(0, 300), ms: Date.now() - t0 }
+  }
+
+  async function panelProviderModels(provider) {
+    const llm = getSvc('llm')
+    if (!llm || typeof llm.listModels !== 'function') return []
+    try {
+      const list = await llm.listModels(provider)
+      return (list || []).map((m) => ({ id: m.id, name: m.name, modalities: m.inputModalities || [] }))
+    } catch (e) {
+      return { error: String(e?.message || e) }
+    }
+  }
+
+  // ── 图像生成接口（桥侧 data/image-gen.json，每次生成都会重新读）──
+  const bridgeDataDir = dirname(process.env.WECHAT_BRIDGE_LOG_DIR || 'D:\\微信deepseek\\data\\logs')
+  const imageCfgFile = join(bridgeDataDir, 'image-gen.json')
+
+  function readImageConfig() {
+    let cfg = {}
+    try { cfg = JSON.parse(readFileSync(imageCfgFile, 'utf8')) || {} } catch { /* 默认 */ }
+    return {
+      apiUrl: String(cfg.apiUrl || 'https://apihub.agnes-ai.com/v1/images/generations'),
+      model: String(cfg.model || 'agnes-image-2.1-flash'),
+      keyRef: String(cfg.keyRef || 'AGNES_API_KEY'),
+      mode: String(cfg.mode || 'i2i'),
+      backend: String(cfg.backend || 'agnes'),
+      style: String(cfg.style || 'agnes'),
+      hasApiKey: !!(cfg.apiKey && String(cfg.apiKey).trim()),
+      file: imageCfgFile,
+    }
+  }
+
+  async function panelImageSave(body) {
+    const cfg = readImageConfig()
+    const next = {
+      apiUrl: String(body.apiUrl || cfg.apiUrl).trim(),
+      model: String(body.model || cfg.model).trim(),
+      keyRef: String(body.keyRef || cfg.keyRef).trim(),
+      mode: ['i2i', 't2i'].includes(String(body.mode)) ? String(body.mode) : cfg.mode,
+      backend: ['agnes', 'comfy'].includes(String(body.backend)) ? String(body.backend) : cfg.backend,
+      style: ['agnes', 'openai'].includes(String(body.style)) ? String(body.style) : cfg.style,
+    }
+    if (!/^https?:\/\//i.test(next.apiUrl)) throw new Error('接口地址必须是 http(s) URL')
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(next.keyRef)) throw new Error('keyRef 必须是 POSIX 变量名（如 OPENAI_API_KEY）')
+    if (body.apiKey !== undefined && String(body.apiKey).trim()) {
+      const creds = getSvc('credentials')
+      if (!creds || typeof creds.set !== 'function') throw new Error('没有 credentials 服务，无法保存 API key')
+      await creds.set(next.keyRef, String(body.apiKey).trim())
+    }
+    const existing = (() => { try { return JSON.parse(readFileSync(imageCfgFile, 'utf8')) || {} } catch { return {} } })()
+    delete existing.apiKey                 // key 一律走凭据库，不落明文配置
+    const merged = { ...existing, ...next }
+    delete merged.hasApiKey
+    mkdirSync(dirname(imageCfgFile), { recursive: true })
+    writeFileSync(imageCfgFile, JSON.stringify(merged, null, 2), 'utf8')
+    log(`图像接口：apiUrl=${next.apiUrl}｜model=${next.model}｜keyRef=${next.keyRef}｜mode=${next.mode}`)
+    return { ok: true, config: readImageConfig() }
+  }
+
+  // ── 环境诊断（2026-10-22）────────────────────────────────────────
+  //   面板的「诊断」页用。为什么要有：崩溃 / 库读不到 / 不回话这几种故障，
+  //   在面板上原来只能靠"消息收不到"间接猜，看不出根因。
+  //   这里把三类证据一次性拉齐：
+  //     ① 微信崩溃 dump（时间/大小/趋势）—— 判断客户端是否稳定
+  //     ② hook 的 //Debug/DBRescan + /Debug/ApiTable —— 判断数据库链路
+  //     ③ hires 目录 + 磁盘占用 —— 判断"眼睛"是否在工作
+  async function collectDiag() {
+    const out = { at: Date.now() }
+    const HOOK = process.env.WECHAT_HOOK_HTTP || 'http://127.0.0.1:30001'
+
+    // ① 崩溃 dump
+    try {
+      const dir = join(process.env.APPDATA || '', 'Tencent', 'xwechat', 'crashinfo', 'reports')
+      const names = existsSync(dir) ? readdirSync(dir).filter((f) => f.endsWith('.dmp')) : []
+      const items = names.map((f) => {
+        try { const s = statSync(join(dir, f)); return { f, t: s.mtimeMs, bytes: s.size } } catch { return null }
+      }).filter(Boolean).sort((a, b) => b.t - a.t)
+      const t0 = new Date(); t0.setHours(0, 0, 0, 0)
+      const todayMs = t0.getTime()
+      const today = items.filter((x) => x.t >= todayMs)
+      const yesterday = items.filter((x) => x.t >= todayMs - 86400_000 && x.t < todayMs)
+      out.crash = {
+        dir, total: items.length, today: today.length, yesterday: yesterday.length,
+        lastAt: items[0]?.t || 0, lastMB: items[0] ? +(items[0].bytes / 1048576).toFixed(1) : 0,
+        recent: items.slice(0, 5).map((x) => ({ at: x.t, mb: +(x.bytes / 1048576).toFixed(1) })),
+      }
+    } catch (e) { out.crash = { error: String(e?.message || e).slice(0, 120) } }
+
+    // ② 桥状态（登录 / 自己 / 表情包库）
+    try {
+      const st = await client.call('status', {}, 8000)
+      out.wechat = {
+        loggedIn: st?.loggedIn ?? null, mock: st?.mock ?? null,
+        self: st?.self || '', stickers: st?.stickers?.count ?? null,
+      }
+    } catch (e) { out.wechat = { error: String(e?.message || e).slice(0, 120) } }
+
+    // ③ hook 诊断端点
+    const getJson = async (path, ms = 6000) => {
+      const r = await fetch(HOOK + path, { signal: AbortSignal.timeout(ms) })
+      if (!r.ok) throw new Error('HTTP ' + r.status)
+      return await r.json()
+    }
+    // 三个端点并发拉取（串行的话 hook 挂了要等 18 秒）
+    const [dbRes, apiRes, hookRes] = await Promise.allSettled([
+      getJson('/Debug/DBRescan'), getJson('/Debug/ApiTable'), getJson('/QueryDB/debug'),
+    ])
+    out.db = dbRes.status === 'fulfilled' ? dbRes.value : { error: String(dbRes.reason?.message || dbRes.reason).slice(0, 120) }
+    out.api = apiRes.status === 'fulfilled' ? apiRes.value : { error: String(apiRes.reason?.message || apiRes.reason).slice(0, 120) }
+    if (hookRes.status === 'fulfilled') {
+      const q = hookRes.value
+      out.hook = {
+        IsLogin: q.IsLogin ?? null, base: q.base ?? 0, module_size: q.module_size ?? 0,
+        dbs: Array.isArray(q.dbs) ? q.dbs.length : 0,
+        api_ptrs_in_module: q.api_ptrs_in_module ?? null, hooks: q.hooks || null,
+      }
+    } else { out.hook = { error: String(hookRes.reason?.message || hookRes.reason).slice(0, 120) } }
+
+    // ④ hires 目录（眼睛）：本机可选组件写进来的原图/整片视频
+    try {
+      const dir = process.env.WECHAT_HIRES_DIR || 'D:\\cdndl-replay'
+      const files = existsSync(dir) ? readdirSync(dir) : []
+      let bytes = 0; let newest = 0
+      for (const f of files) {
+        try { const s = statSync(join(dir, f)); bytes += s.size; if (s.mtimeMs > newest) newest = s.mtimeMs } catch { /* ignore */ }
+      }
+      out.hires = { dir, count: files.length, mb: +(bytes / 1048576).toFixed(1), newestAt: newest }
+    } catch (e) { out.hires = { error: String(e?.message || e).slice(0, 120) } }
+
+    // ⑤ 磁盘占用（几个会长大的文件/目录）
+    try {
+      const cfgDir = dirname(memoryDir)
+      const sizeOf = (p) => { try { return statSync(p).size } catch { return 0 } }
+      const dirSize = (d) => {
+        let n = 0
+        try { for (const f of readdirSync(d)) { try { n += statSync(join(d, f)).size } catch { /* ignore */ } } } catch { /* ignore */ }
+        return n
+      }
+      out.disk = {
+        configKB: +(sizeOf(CONFIG_FILE) / 1024).toFixed(1),
+        usageKB: +(sizeOf(usageFile) / 1024).toFixed(1),
+        membersKB: +(sizeOf(namesFile) / 1024).toFixed(1),
+        memoryMB: +(dirSize(memoryDir) / 1048576).toFixed(1),
+        cfgDir,
+      }
+    } catch (e) { out.disk = { error: String(e?.message || e).slice(0, 120) } }
+
+    // ⑥ LLM 路由（为空 = 会抛「无法确定 LLM 路由」→ 完全不回话）
+    out.llm = {
+      provider: config.provider || '', model: config.model || '',
+      visionProvider: config.visionProvider || '', visionModel: config.visionModel || '',
+      explicit: !!(config.provider && config.model),
+      lastRoute: lastTextRoute || null,
+    }
+    return out
+  }
+  // ── 面板动作（HTTP → 机器人能力）────────────────────────────
+  // 只暴露明确列出的 op；参数在插件侧再解析一次，面板拿到的是"结果对象"，不是任意代码执行。
+  async function handlePanelAction(op, args = {}) {
+    const a = args || {}
+    switch (op) {
+      case 'status':
+        return await client.call('status', {}, 8000)
+      case 'usage': {
+        const today = new Date().toISOString().slice(0, 10)
+        return {
+          prompt: usageStats.prompt, completion: usageStats.completion,
+          total: usageStats.total, calls: usageStats.calls,
+          today: usageStats.byDay[today] || { prompt: 0, completion: 0, total: 0, calls: 0 },
+          byModel: usageStats.byModel, byDay: usageStats.byDay,
+          startedAt: usageStats.startedAt, file: usageFile,
+        }
+      }
+      case 'diag': {
+        return await collectDiag()
+      }
+      case 'diagCleanHires': {
+        // 清理 hires 目录（眼睛的缓存）：只删本机缓存的原图/整片，不影响微信
+        const dir = process.env.WECHAT_HIRES_DIR || 'D:\\cdndl-replay'
+        let removed = 0
+        try {
+          for (const f of readdirSync(dir)) {
+            try { unlinkSync(join(dir, f)); removed++ } catch { /* ignore */ }
+          }
+        } catch (e) {
+          return { ok: false, error: String(e?.message || e).slice(0, 120), dir }
+        }
+        return { ok: true, removed, dir }
+      }
+      case 'selfcheck': {
+        const h = await healthCheck({ deep: true })
+        healthLast = h
+        return h
+      }
+      case 'rooms': {
+        const list = await client.call('rooms', {}, 10_000)
+        await refreshNameCaches()
+        return (list || []).map((x) => ({ ...x, name: roomNameCache.get(x.roomId) || x.name }))
+      }
+      case 'members': {
+        const room = await resolveRoom(a.room)
+        const res = await client.call('members', { roomId: room.roomId }, 20_000)
+        if (!contactNameCache.size) { try { await refreshNameCaches() } catch { /* ignore */ } }
+        for (const m of res?.members || []) {
+          const n = contactNameCache.get(String(m.wxid || ''))
+          if (n) m.name = n
+          if (!m.name) m.name = n || m.nick || m.wxid
+        }
+        return res
+      }
+      case 'history': {
+        const room = await resolveRoom(a.room)
+        const res = await client.call('history', { roomId: room.roomId, limit: Number(a.limit) || 20 }, 10_000)
+        const items = Array.isArray(res) ? res : (res?.items || [])
+        for (const it of items) {
+          if (it && !it.isSelf) it.senderName = nameOf(it.sender, it.senderName)
+        }
+        return res
+      }
+      case 'searchMessages': {
+        const room = await resolveRoom(a.room)
+        const res = await client.call('searchMessages', {
+          roomId: room.roomId, query: String(a.query || ''), limit: Number(a.limit) || 20, scan: Number(a.scan) || 800,
+        }, 25_000)
+        if (!contactNameCache.size) { try { await refreshNameCaches() } catch { /* ignore */ } }
+        for (const it of res?.items || []) {
+          if (it && !it.isSelf) it.senderName = nameOf(it.sender, it.senderName)
+        }
+        return res
+      }
+      case 'sendText': {
+        const room = await resolveRoom(a.room)
+        const text = String(a.text ?? '').trim()
+        if (!text) throw new Error('text 不能为空')
+        const r0 = roomState(room.roomId, room.name)
+        // 真 @：与 wechat_bot_say 同一条路径（成员索引是异步的，先确保一次）
+        if (config.allowAt && text.includes('@')) await ensureAtIndex(r0)
+        const mm = resolveMentions(r0, text)
+        const sent = await client.call('sendText', {
+          roomId: room.roomId, text: mm.text,
+          ...(mm.mentions.length ? { mentions: mm.mentions } : {}),
+        }, 20_000)
+        stats.sentText++
+        push(r0, { ts: Date.now(), isSelf: true, sender: 'self', senderName: '我', text: mm.text })
+        let stickerId = ''
+        if (a.sticker) {
+          const picked = await client.call('pickSticker', { text, roomId: room.roomId, minScore: 0 }, 10_000)
+          if (picked?.id) {
+            await client.call('sendSticker', { roomId: room.roomId, stickerId: picked.id }, 15_000)
+            stats.sentSticker++
+            stickerId = picked.id
+          }
+        }
+        return { room: room.name, roomId: room.roomId, rc: sent?.rc ?? sent, mentions: mm.mentions.length, stickerId }
+      }
+      case 'sayVoice': {
+        const room = await resolveRoom(a.room)
+        const text = String(a.text ?? '').trim()
+        if (!text) throw new Error('text 不能为空')
+        const r = await client.call('sayVoice', {
+          roomId: room.roomId, text, emotion: String(a.emotion || config.voiceSayEmotion || 'main'),
+        }, 90_000)
+        if (r?.ok) {
+          stats.sentVoice = (stats.sentVoice || 0) + 1
+          push(roomState(room.roomId, room.name), { ts: Date.now(), isSelf: true, sender: 'self', senderName: '我', text })
+        }
+        return r
+      }
+      case 'sendSticker': {
+        const room = await resolveRoom(a.room)
+        const payload = { roomId: room.roomId }
+        if (a.stickerId) payload.stickerId = String(a.stickerId)
+        else payload.text = String(a.text || '')
+        const res = await client.call('sendSticker', payload, 20_000)
+        if (res?.stickerId) stats.sentSticker++
+        return res
+      }
+      case 'pickSticker':
+        return await client.call('pickSticker', { text: String(a.text || ''), minScore: 0 }, 8000)
+      case 'voiceSwitch':
+        return await client.call('voiceSwitch', a.on === undefined ? {} : { on: !!a.on }, 8000)
+      case 'pat': {
+        const room = await resolveRoom(a.room)
+        const res = await client.call('pat', { roomId: room.roomId, wxid: String(a.wxid || '') }, 8000)
+        stats.sentPat++
+        return res
+      }
+      case 'stickers':
+        return await client.call('stickers', { limit: Number(a.limit) || 30 }, 10_000)
+      case 'genEmotions':
+        return await client.call('genEmotions', {}, 10_000)
+      case 'genSticker':
+        return await client.call('genSticker', {
+          emotion: String(a.emotion || '开心'),
+          extra: String(a.extra || ''),
+          bubble: String(a.bubble || ''),
+          force: !!a.force,
+        }, 240_000)
+      case 'memory.list': {
+        const room = await resolveRoom(a.room)
+        const r = panelRoomView(room)
+        return {
+          roomId: r.roomId, roomName: r.roomName,
+          facts: (r.facts || []).slice(-50).map((f) => ({ ...f, text: prettyNames(f.text) })),
+          msgs: (r.msgs || []).length,
+          pendingQuestion: '',
+        }
+      }
+      case 'memory.add': {
+        const room = await resolveRoom(a.room)
+        const r = panelRoomView(room)
+        const ok = addFact(r, String(a.add || ''), 'manual')
+        return { ok, count: (r.facts || []).length }
+      }
+      case 'memory.clear': {
+        const room = await resolveRoom(a.room)
+        const r = panelRoomView(room)
+        r.facts = []
+        saveFacts(r)
+        return { ok: true, count: 0 }
+      }
+      case 'memory.extract': {
+        const room = await resolveRoom(a.room)
+        const r = panelRoomView(room)
+        const added = await extractFacts(r, { force: true })
+        return { ok: true, added, count: (r.facts || []).length }
+      }
+      case 'names.set': {
+        const wxid = String(a.wxid || '').trim()
+        const name = cleanAtName(String(a.name || ''))
+        if (!wxid || !name) throw new Error('需要 wxid 与 name')
+        ;(config.memberNames ||= {})[wxid] = name
+        saveNames()
+        persistConfig()
+        return { ok: true, wxid, name, count: Object.keys(config.memberNames).length }
+      }
+      case 'names.add': {
+        const list = String(a.names || '').split(/[,，、\s]+/).map((s) => cleanAtName(s)).filter(Boolean)
+        const added = []
+        for (const n of list) {
+          if (!atNames.includes(n)) { atNames.push(n); added.push(n) }
+        }
+        if (atNames.length > 60) atNames = atNames.slice(-60)
+        if (added.length) saveNames()
+        return { ok: true, added, total: atNames.length }
+      }
+      case 'names.refresh':
+        return { memberNames: config.memberNames || {}, atNames: [...atNames] }
+      default:
+        throw new Error('未知操作：' + op)
+    }
   }
 
   ctx.effect(() => ctx.tools.register({
@@ -3440,30 +4248,9 @@ let res = await callLlm(route, sys, usr, undefined)
       }
       if (!(key in DEFAULT_CONFIG)) return `未知参数：${key}\n可改：${Object.keys(DEFAULT_CONFIG).join(', ')}`
       if (args?.value === undefined) return `${key} = ${JSON.stringify(config[key])}`
-      const cur = DEFAULT_CONFIG[key]
-      let v = String(args.value)
-      if (typeof cur === 'number') v = Number(v)
-      else if (typeof cur === 'boolean') v = /^(1|true|yes|on|开)$/i.test(v)
-      else if (Array.isArray(cur)) v = v.split(',').map((s) => s.trim()).filter(Boolean)
-      if (typeof cur === 'number' && !Number.isFinite(v)) return `值不合法：${args.value}`
-      config[key] = v
-      // 持久化到文件（重载/重启后不丢）
-      try {
-        const fs2 = await import('node:fs')
-        fs2.mkdirSync(dirname(CONFIG_FILE), { recursive: true })
-        const dump = {}
-        for (const k of Object.keys(DEFAULT_CONFIG)) dump[k] = config[k]
-        fs2.writeFileSync(CONFIG_FILE, JSON.stringify(dump, null, 1), 'utf8')
-      } catch (e) { log('配置持久化失败：' + String(e?.message || e).slice(0, 80)) }
-      if (key === 'quietHours') {
-        quietWindows.length = 0
-        quietWindows.push(...parseQuietWindows(config.quietHours))
-      }
-      if (key === 'maxRepliesPer10Min' || key === 'minReplyGapMs' || key === 'replyProbability') {
-        for (const r of rooms.values()) r.policy.cfg = config
-      }
-      log(`配置变更：${key} = ${JSON.stringify(v)}`)
-      return `已更新：${key} = ${JSON.stringify(v)}（立即生效）`
+      const r = applyConfigPatch({ [key]: args.value })
+      if (!r.ok) return `值不合法：${r.rejected.map((x) => x.reason).join('；')}`
+      return `已更新：${key} = ${JSON.stringify(config[key])}（立即生效）`
     },
   }), SHORT + ': wechat_bot_config')
 
@@ -3683,7 +4470,70 @@ let res = await callLlm(route, sys, usr, undefined)
     },
   }), SHORT + ': wechat_bot_history')
 
+  // ── Web 控制面板（挂在 DSH 已有 webServer 的 /wechat-bot）──────────────
+  // 没有 webServer 的环境（纯 CLI / 别的 profile）会自动跳过，不影响机器人本体。
+  // 用带 ?t= 的动态 import：Node 的 ESM 缓存不会因为 dev_reload_package 清掉子模块，
+  // 不这样做会出现"面板代码改了、热重载后还是旧页面"（实测踩过）。
+  let panelDisposed = false
+  ctx.effect(() => () => { panelDisposed = true }, SHORT + ': panel dispose flag')
+  const panelApi = {
+    version: BUILD_VER,
+    config,
+    defaults: DEFAULT_CONFIG,
+    stats,
+    rooms,
+    client,
+    log,
+    applyConfigPatch,
+    healthCheck,
+    lastHealth: () => healthLast,
+    lastRoute: () => lastTextRoute || lastRoute,
+    hasSpeech: () => !!speechService(),
+    hasAttachments: () => {
+      try { return !!(ctx.get?.('attachments') ?? ctx.attachments) } catch { return false }
+    },
+    handleAction: handlePanelAction,
+    providersState: panelProvidersState,
+    refreshRoomNames: refreshNameCaches,
+    roomName: (roomId) => roomNameCache.get(roomId) || '',
+    senderName: (wxid) => contactNameCache.get(String(wxid || '')) || (config.memberNames || {})[String(wxid || '')] || '',
+    nameCounts: () => ({ rooms: roomNameCache.size, people: contactNameCache.size }),
+    providerSave: panelProviderSave,
+    providerRemove: panelProviderRemove,
+    providerTest: panelProviderTest,
+    providerModels: panelProviderModels,
+    imageConfig: readImageConfig,
+    imageSave: panelImageSave,
+    configFile: CONFIG_FILE,
+    memoryDir,
+    logFile,
+    // 桥日志目录（本机固定在工作区；可用环境变量覆盖）
+    bridgeLogDir: process.env.WECHAT_BRIDGE_LOG_DIR || 'D:\\微信deepseek\\data\\logs',
+  }
+  void (async () => {
+    try {
+      const stamp = Date.now()
+      const [panelMod, metaMod] = await Promise.all([
+        import('./panel.mjs?t=' + stamp),
+        import('./panel-meta.mjs?t=' + stamp),
+      ])
+      if (panelDisposed) return
+      CONFIG_META = metaMod.CONFIG_META
+      panelMod.setupPanel(ctx, {
+        ...panelApi,
+        meta: metaMod.publicMeta(),
+        groups: metaMod.GROUPS,
+        features: metaMod.FEATURES,
+      })
+    } catch (e) {
+      log('面板初始化失败（不影响机器人）：' + String(e?.stack || e?.message || e))
+    }
+  })()
+
   loadNames()      // 载入群成员名字映射
+  // 群名缓存：等 hook/微信稍就绪再拉一次（失败也不影响启动，面板请求时会重试）
+  track(setTimeout(() => { void refreshNameCaches() }, 5000))
   log(`插件已启动｜bridge=${config.bridgeUrl}｜昵称=${config.botName}｜闲聊概率=${config.replyProbability}｜安静时段=${config.quietHours || 'off'}｜记忆目录=${memoryDir}`)
   log(`当前人格：${config.persona}`)
 }
+

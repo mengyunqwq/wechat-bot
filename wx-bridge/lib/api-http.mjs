@@ -95,7 +95,7 @@ export function createApiHandler({ handle, rooms, log, bridge, counters, started
         if (!text) throw new Error('需要 text')
         return sendJson(res, 200, await handle('sendText', {
         roomId, text,
-        // split=true → 长文本自动拆成多条发
+        // split=true → 长文本自动拆成多条发（每条之间有拟人间隔）
         split: arg('split') === true || arg('split') === 'true',
         maxLines: Number(arg('maxLines')) || undefined,
       }))

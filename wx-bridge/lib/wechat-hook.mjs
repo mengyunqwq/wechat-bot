@@ -21,8 +21,79 @@ import { copyFileSync, existsSync, mkdirSync, writeFileSync, readFileSync, readd
 import { join, dirname } from 'node:path'
 import { tmpdir } from 'node:os'
 
+// ── 高分辨率图片提供者（hires provider）────────────────────────────────────
+//   本机可选安装一个「提供者」（不随本项目分发），它会把全分辨率的图写到这个目录。
+//   会把全尺寸的图（明文 JPEG）写到这个目录。
+//   实测 1260x2800 / 1.46MB —— 不用解密、不用 HEVC 解码，直接就是能识别的原图。
+//   文件名约定 = <roomId>_<unix秒>_<localId>_<序号>_<任意标记>.dat
+const HIRES_DIR = process.env.WECHAT_HIRES_DIR || 'D:\\cdndl-replay'
 
+async function waitHiresImage(roomId, tsIn, timeoutMs = 8000) {
+  if (!roomId || !tsIn) return null
+  // ★ ts 单位坑：插件传【毫秒】(1792571878000)，文件名里是【秒】(1792571878)
+  let ts = Number(tsIn)
+  if (ts > 1e12) ts = Math.round(ts / 1000)
+  try { pruneHiresDir() } catch { /* ignore */ }
+  const seenSize = new Map()
+  const t0 = Date.now()
+  while (Date.now() - t0 < timeoutMs) {
+    try {
+      let best = null
+      for (const f of readdirSync(HIRES_DIR)) {
+        // 契约：<roomId>_<unix秒>_<localId>_<序号>_<任意标记>.dat（内容必须是明文 JPEG）
+        const m = f.match(/^(.+)_(\d{10})_(\d+)_(\d+)_.*\.dat$/)
+        if (f.includes('hdvideo')) continue          // 视频文件别当图片
+        if (!m) continue
+        if (m[1] !== roomId) continue
+        if (Math.abs(Number(m[2]) - ts) > 5) continue     // 允许 5 秒偏差
+        const p = join(HIRES_DIR, f)
+        let sz = 0
+        try { sz = statSync(p).size } catch { continue }
+        if (sz < 3000) continue
+        {
+          const prev = seenSize.get(f)
+          seenSize.set(f, sz)
+          if (prev === undefined || prev !== sz) continue   // 还在写，等下一轮
+        }
+        if (!best || sz > best.size) best = { path: p, name: f, size: sz }
+      }
+      if (best) return best
+    } catch { /* 目录还没建 */ }
+    await new Promise((r) => setTimeout(r, 250))
+  }
+  return null
+}
 
+/** 把重放出来的 .dat（其实是 JPEG）复制成 .jpg —— DSH 的图片入库按扩展名判断，.dat 会被拒 */
+function hiresToJpg(src) {
+  const tmpDir = join(dirname(fileURLToPath(import.meta.url)), '..', 'data', 'wechat-image-tmp')
+  try { mkdirSync(tmpDir, { recursive: true }) } catch { /* ignore */ }
+  const dst = join(tmpDir, `hires-${Date.now()}-${Math.random().toString(36).slice(2, 6)}.jpg`)
+  copyFileSync(src, dst)
+  return dst
+}
+
+/** 清理重放目录：删掉 2 小时前的文件（每张图 0.1~1.5MB，不清理会一直涨） */
+let g_lastPrune = 0
+function pruneHiresDir(maxAgeMs = 2 * 3600_000, keepLatest = 60) {
+  const now = Date.now()
+  if (now - g_lastPrune < 60_000) return
+  g_lastPrune = now
+  let files = []
+  try { files = readdirSync(HIRES_DIR) } catch { return }
+  let removed = 0
+  const stat = []
+  for (const f of files) {
+    try { stat.push({ f, t: statSync(join(HIRES_DIR, f)).mtimeMs }) } catch { /* ignore */ }
+  }
+  stat.sort((a, b) => b.t - a.t)
+  stat.forEach((x, idx) => {
+    if (idx < keepLatest) return
+    if (now - x.t < maxAgeMs) return
+    try { unlinkSync(join(HIRES_DIR, x.f)); removed++ } catch { /* ignore */ }
+  })
+  return removed
+}
 // ── 表情包图片收藏（2026-10-21）──────────────────────────────────────────────
 //   收到群友发来的表情包（type=47）时：
 //     ① 老逻辑：只存 XML（原生表情转发用，但本构建的 ForwardXMLMsg 会崩，所以发不出去）
@@ -62,6 +133,56 @@ async function collectStickerImage(xml, lib, meta) {
   }
 }
 
+/** 找 hires provider 写的【视频】文件（文件名含 _hdvideo_），等它写完才返回
+ *  ★ 2026-10-21 修复：以前一看到 >50KB 就复制，结果拿到半截文件 → 抽帧/音轨全错。
+ *    现在要求：① 与消息时间差 ≤5 秒  ② 大小与 XML 声明值接近  ③ 连续两次采样大小不变
+ */
+async function waitHiresVideo(roomId, tsIn, timeoutMs = 20000, declaredBytes = 0) {
+  if (!roomId || !tsIn) return null
+  let ts = Number(tsIn)
+  if (ts > 1e12) ts = Math.round(ts / 1000)
+  const t0 = Date.now()
+  const seen = new Map()
+  const want = Number(declaredBytes) || 0
+  while (Date.now() - t0 < timeoutMs) {
+    let best = null
+    let bestDelta = Infinity
+    try {
+      for (const f of readdirSync(HIRES_DIR)) {
+        if (!f.includes('hdvideo')) continue
+        const m = f.match(/^(.+)_(\d{10})_(\d+)_(\d+)_/)
+        if (!m || m[1] !== roomId) continue
+        const delta = Math.abs(Number(m[2]) - ts)
+        if (delta > 5) continue
+        const p = join(HIRES_DIR, f)
+        let sz = 0
+        try { sz = statSync(p).size } catch { continue }
+        if (sz < 50_000) continue
+        const prev = seen.get(f)
+        seen.set(f, sz)
+        const stable = prev !== undefined && prev === sz
+        if (!stable) continue                        // 还在写，等下一轮
+        if (want > 0 && sz < want * 0.55) continue   // 明显小于声明大小 → 还没写完
+        if (delta < bestDelta || (delta === bestDelta && sz > (best ? best.size : 0))) {
+          best = { path: p, name: f, size: sz }
+          bestDelta = delta
+        }
+      }
+    } catch { /* 目录还没建 */ }
+    if (best) return best
+    await new Promise((r) => setTimeout(r, 300))
+  }
+  return null
+}
+
+/** 把 hires 视频复制成 .mp4（ffmpeg 需要已知扩展名）*/
+function hiresVideoToMp4(src) {
+  const tmpDir = join(dirname(fileURLToPath(import.meta.url)), '..', 'data', 'wechat-video-tmp')
+  try { mkdirSync(tmpDir, { recursive: true }) } catch { /* ignore */ }
+  const dst = join(tmpDir, `hires-${Date.now()}-${Math.random().toString(36).slice(2, 6)}.mp4`)
+  copyFileSync(src, dst)
+  return dst
+}
 // ── 读图片实际分辨率（判断拿到的是不是缩略图）──
 //   JPEG 扫 SOF 段；PNG 读 IHDR；GIF 读逻辑屏；WebP 读 VP8X/VP8/VP8L。
 //   为什么要它：微信 CDN 对无鉴权请求经常只回缩略图（8~30KB），
@@ -140,6 +261,8 @@ export class WeChatHookBridge {
     this._srv = null
     this._contactMap = new Map()
     this._roomCache = new Map()
+    this._roomNamesAt = 0
+    this._roomNamesFailAt = 0
     this._memberCache = new Map()
     this._recentText = new Map()
     this._seen = new Set()
@@ -529,6 +652,7 @@ export class WeChatHookBridge {
       }
     } catch { /* ignore */ }
     void this.loadContacts()
+    void this.refreshRoomNames()
     // 消息来源：**数据库轮询**（公开源码里没有回调推送实现，见 lib/db-poller.mjs 顶部说明）
     if (!this.poller) {
       this.poller = new DbPoller({
@@ -1044,13 +1168,34 @@ export class WeChatHookBridge {
     const meta = xmlVideoMeta(xml)
     const tag = `video-${Number(nearTs) || Date.now()}-${Math.random().toString(36).slice(2, 6)}`
 
+    // ── ⓪ 优先：hires provider 下到的整段视频（不需要点开播放）──
+    try {
+      const hv = await waitHiresVideo(roomId, Number(nearTs) || 0, 20000, Number(meta.length) || 0)
+      if (hv) {
+        const mp4 = hiresVideoToMp4(hv.path)
+        this.log(`高分辨率视频命中：${hv.name}（${Math.round(hv.size / 1024)}KB）→ ${mp4}`)
+        const r = probeVideo(mp4, { frames: Number(frames) || 6, fps: 1, tag, log })
+        if (r?.sheet) {
+          const sheetCount = (r.sheets || [r.sheet]).length
+          this.log(`视频内容已抽取：${r.frames} 帧（每秒 1 帧）→ ${sheetCount} 张联系表`
+            + `｜时长 ${r.durationSec}s${r.wav ? `｜音轨 ${r.wavSeconds}s` : '｜无音轨'}`)
+          return {
+            file: r.sheet, sheets: r.sheets || [r.sheet], kind: 'video', wav: r.wav || '',
+            durationSec: r.durationSec || 0, frames: r.frames || 0,
+            note: r.wav ? '抽帧+音轨（hires）' : '只有画面（hires）',
+            srcVideo: mp4, declaredBytes: hv.size,
+          }
+        }
+      }
+    } catch (e) { this.log('hires 视频链路异常：' + String(e?.message || e).slice(0, 120)) }
+
     // ── ① 主路：视频文件 → 抽帧拼联系表 + 抽音轨 ──
     try {
       const f = findVideoFile(root, roomId, {
         nearTs: Number(nearTs) || 0, declaredBytes: meta.length, log,
       })
       if (f) {
-        const r = probeVideo(f.path, { frames: Number(frames) || 6, fps: 1, tag, log })
+        const r = probeVideo(f.path, { frames: Number(frames) || 6, tag, log })
         if (r?.sheet) {
           this.log(`视频内容已抽取：${r.frames} 帧拼成联系表（${Math.round(r.sheetBytes / 1024)}KB）`
             + `｜时长 ${r.durationSec}s${r.wav ? `｜音轨 ${r.wavSeconds}s → ${r.wav}` : '｜无音轨'}`)
@@ -1094,6 +1239,16 @@ export class WeChatHookBridge {
     // 密钥在微信进程内存里（需客户端解密过一次图片）。hook 的 /Decode_Pic 对这个构建失效，
     // 所以我们自己解密（lib/wechat-image.mjs）。
     if (type === 3 && roomId) {
+      // ★ 优先用「hires provider」提供的全分辨率图（未加密 JPEG）
+      //   本机若装了可选的提供者（不随本项目分发），它会把这个目录填上；没有就自动跳过。
+      //   那份是【未加密的普通 JPEG】且是全尺寸（实测 1260x2800 / 1.46MB），不需要解密也不用 HEVC。
+      //   文件名约定 = <roomId>_<unix秒>_<localId>_<序号>_<任意标记>.dat
+      const replay = await waitHiresImage(roomId, Number(nearTs) || 0)
+      if (replay) {
+        this.log(`高分辨率缓存命中：${replay.name}（${Math.round(replay.size / 1024)}KB）`)
+        return hiresToJpg(replay.path)
+      }
+      this.log(`高分辨率缓存未命中（ts=${Number(nearTs) || 0}），改走本地 .dat`)
       try {
         const root = await resolveDataRoot(this.api.bind(this), this.selfWxid || '')
         // ★ 候选顺序：_h 高清预览 > _t 缩略图 > 原图(WXGF)
@@ -1266,8 +1421,58 @@ export class WeChatHookBridge {
     return file
   }
 
+  /**
+   * 群名 + 联系人名：contact.db 在微信 4.x 里经常被卸载/句柄失效，但 contact_fts.db 一直可读。
+   * 文本在 contact_fts_v5_content.c0（\b 分隔），用 name2id.rowid ↔ username 对上。
+   * - username 以 @chatroom 结尾 → 群名（只补 _roomCache 里已知的会话）
+   * - 其它 → 联系人昵称（补 _contactMap，消息 senderName 就能显示人名）
+   */
+  async refreshRoomNames() {
+    this._roomNamesAt = Date.now()
+    try {
+      const sql = 'SELECT n.username AS id, c.c0 AS name '
+        + 'FROM name2id n JOIN contact_fts_v5_content c ON c.id = n.rowid'
+      const r = await this.api('/QueryDB/execute', { optDbName: 'contact_fts.db', SQL: sql }, 'POST', 15000)
+      const rows = Array.isArray(r?.data) ? r.data : []
+      let changed = 0
+      let people = 0
+      for (const row of rows) {
+        const id = String(row.id || '')
+        if (!id) continue
+        const parts = String(row.name || '').split(/\u0008+/).map((s) => s.trim()).filter(Boolean)
+        const name = parts[0] || ''
+        if (!name) continue
+        if (id.endsWith('@chatroom')) {
+          if (!this._roomCache.has(id)) continue
+          if (this._roomCache.get(id) !== name) {
+            this._roomCache.set(id, name)
+            changed++
+          }
+        } else if (!id.endsWith('@openim')) {
+          if (this._contactMap.get(id) !== name) {
+            this._contactMap.set(id, name)
+            people++
+          }
+        }
+      }
+      if (changed) this.saveRooms()
+      if (changed || people) {
+        this.log(`名字已更新：群 ${changed} 个 / 人 ${people} 个（contact_fts.db）`)
+      }
+    } catch (e) {
+      this._roomNamesAt = 0            // 失败不锁 60 秒，下次 rooms() 再试
+      this._roomNamesFailAt = Date.now()
+      this.log('名字读取失败（保留 roomId/wxid）：' + String(e?.message || e).slice(0, 120))
+    }
+  }
+
   /** 群列表：库里读不到，就返回"见过的群"（回调出现过的 + 表情包库记录的） */
   async rooms() {
+    // 群名过期（或还是 roomId）→ 后台补一次；不阻塞本次返回
+    if (Date.now() - (this._roomNamesAt || 0) > 60_000
+      && Date.now() - (this._roomNamesFailAt || 0) > 60_000) {
+      void this.refreshRoomNames()
+    }
     if (this.stickers?.items) {
       for (const it of this.stickers.items) {
         for (const rid of it.rooms || []) if (rid && !this._roomCache.has(rid)) this._roomCache.set(rid, rid)

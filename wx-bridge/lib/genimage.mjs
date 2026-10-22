@@ -119,6 +119,9 @@ export function loadImageConfig() {
     mode: String(process.env.IMAGE_MODE || fileCfg.mode || 'i2i'),
     // backend: agnes = 云端（默认）；comfy = 本机 ComfyUI（已弃用，仅留档）—— 本地 SDXL 实测达不到「角色不变+动作自由」，模型已删
     backend: String(process.env.IMAGE_BACKEND || fileCfg.backend || 'agnes'),
+    // 请求格式：agnes = Agnes 自定义字段（size:'1K' + ratio + extra_body）；
+    //           openai = 标准 OpenAI images/generations（size:'1024x1024'）
+    style: String(process.env.IMAGE_STYLE || fileCfg.style || 'agnes'),
     comfyUrl: String(process.env.COMFY_URL || fileCfg.comfyUrl || 'http://127.0.0.1:8188'),
     comfyModel: String(process.env.COMFY_MODEL || fileCfg.comfyModel || 'NoobAI-XL-v1.0.safetensors'),
     comfyDenoise: Number(process.env.COMFY_DENOISE || fileCfg.comfyDenoise || 0.55),
@@ -249,14 +252,20 @@ export function autoBubble(emotion, rand = Math.random()) {
   return pool[Math.min(pool.length - 1, Math.floor(rand * pool.length))]
 }
 
-/** 从环境变量或 ~/.dsh/.credentials.yaml 取密钥 */
+/** 从环境变量或 DSH 凭据文件取密钥（DSH_HOME 优先，兼容 ~/.dsh） */
 export function resolveAgnesKey(ref = 'AGNES_API_KEY') {
   if (process.env[ref] && process.env[ref].trim()) return process.env[ref].trim()
-  try {
-    const text = readFileSync(join(homedir(), '.dsh', '.credentials.yaml'), 'utf8')
-    const m = new RegExp(`^\\s*${ref}:\\s*(\\S+)\\s*$`, 'm').exec(text)
-    return m ? m[1].trim() : ''
-  } catch { return '' }
+  const candidates = []
+  if (process.env.DSH_HOME) candidates.push(join(process.env.DSH_HOME, '.credentials.yaml'))
+  candidates.push(join(homedir(), '.dsh', '.credentials.yaml'))
+  for (const file of candidates) {
+    try {
+      const text = readFileSync(file, 'utf8')
+      const m = new RegExp(`^\\s*${ref}:\\s*(\\S+)\\s*$`, 'm').exec(text)
+      if (m) return m[1].trim()
+    } catch { /* 试下一个 */ }
+  }
+  return ''
 }
 
 /**
@@ -346,16 +355,25 @@ async function _generateStickerImageInner({
   log(`图片生成(${cfg.mode})：${emotion}${extra ? '｜' + extra : ''}｜model=${cfg.model}｜${String(cfg.apiUrl).replace(/^https?:\/\//, '').slice(0, 40)}（参考图 ${Math.round(refB64.length / 1024)}KB base64）`)
 
   // 带退避的重试：Agnes 高峰期会返回 503 "image queue is full"，直接放弃会白丢一张表情
-  const body = JSON.stringify({
-    model: cfg.model,
-    prompt,
-    size: '1K',
-    ratio: '1:1',
-    // ★ 默认走 t2i（不传 image）：i2i 队列挤到不可用。想用图生图就设 IMAGE_MODE=i2i。
-    extra_body: cfg.mode === 't2i'
-      ? { response_format: 'url' }
-      : { image: [`data:image/jpeg;base64,${refB64}`], response_format: 'url' },
-  })
+  const body = JSON.stringify(cfg.style === 'openai'
+    ? {
+        model: cfg.model,
+        prompt,
+        n: 1,
+        size: '1024x1024',
+        // OpenAI 系默认 b64_json（gpt-image-1 不返回 url）；兼容只认 url 的网关
+        response_format: 'b64_json',
+      }
+    : {
+        model: cfg.model,
+        prompt,
+        size: '1K',
+        ratio: '1:1',
+        // ★ 默认走 t2i（不传 image）：i2i 队列挤到不可用。想用图生图就设 IMAGE_MODE=i2i。
+        extra_body: cfg.mode === 't2i'
+          ? { response_format: 'url' }
+          : { image: [`data:image/jpeg;base64,${refB64}`], response_format: 'url' },
+      })
   let res = null
   let text = ''
   for (let attempt = 1; attempt <= 1; attempt++) {   // ★ 不再内联重试（会把自己队列挤爆），失败交给后台补生成队列
@@ -373,16 +391,24 @@ async function _generateStickerImageInner({
     log(`Agnes 忙（HTTP ${res.status}）→ ${Math.round(waitMs / 1000)}s 后重试（第 ${attempt}/3 次）`)
     await new Promise((r) => setTimeout(r, waitMs))
   }
-  if (!res.ok) throw new Error(`Agnes HTTP ${res.status}：${text.slice(0, 200)}`)
+  if (!res.ok) throw new Error(`生图接口 HTTP ${res.status}：${text.slice(0, 200)}`)
   let json = null
   try { json = JSON.parse(text) } catch { /* ignore */ }
-  const url = json?.data?.[0]?.url
-  if (!url) throw new Error('Agnes 没返回图片 URL：' + text.slice(0, 200))
-  log('Agnes 返回图片：' + url)
+  const item = json?.data?.[0] || {}
+  const url = item.url
+  const b64 = item.b64_json
+  if (!url && !b64) throw new Error('生图接口没返回图片（url/b64_json 都为空）：' + text.slice(0, 200))
 
-  const imgRes = await fetch(url, { signal: AbortSignal.timeout(120_000) })
-  if (!imgRes.ok) throw new Error('下载生成图失败 HTTP ' + imgRes.status)
-  const buf = Buffer.from(await imgRes.arrayBuffer())
+  let buf
+  if (b64) {
+    log('生图接口返回 b64_json（' + Math.round(String(b64).length / 1024) + 'KB）')
+    buf = Buffer.from(b64, 'base64')
+  } else {
+    log('生图接口返回图片：' + url)
+    const imgRes = await fetch(url, { signal: AbortSignal.timeout(120_000) })
+    if (!imgRes.ok) throw new Error('下载生成图失败 HTTP ' + imgRes.status)
+    buf = Buffer.from(await imgRes.arrayBuffer())
+  }
 
   mkdirSync(outDir, { recursive: true })
   const raw = join(outDir, `agnes-${emotion}-${Date.now()}.png`)
