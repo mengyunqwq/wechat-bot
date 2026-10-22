@@ -497,6 +497,7 @@ const BUILD_VER = '2026-10-22.21'   // 抬版本：让新实例压过热重载�
   //   · 插件进程的 PATH 不一定含 C:\Windows\System32
   //   · powershell 的 Expand-Archive 在 -NoProfile 下模块加载不稳定（实测报「找不到 Microsoft.PowerShell.Archive」）
   const TAR_EXE = process.env.WECHAT_TAR || 'C:\\Windows\\System32\\tar.exe'
+  let eyesPkgCache = null   // 眼睛安装包的上传/解压结果（面板 eyesUpload → eyesInstall 之间传递）
 // 群成员名字映射（wxid → 昵称）：hook 拿不到联系人库，靠自动学习 + 手动设置
 const namesFile = join(dirname(memoryDir), 'members.json')
   try { mkdirSync(memoryDir, { recursive: true }) } catch { /* ignore */ }
@@ -4226,7 +4227,7 @@ let res = await callLlm(route, sys, usr, undefined)
           }
         }
         collectDocs(dir, 0)
-        App._eyesPkg = { dir, zipPath, dll, sha256 }
+        eyesPkgCache = { dir, zipPath, dll, sha256 }
         return {
           ok: true, zipMB: +(buf.length / 1048576).toFixed(2), sha256,
           dllKB: Math.round(dllBuf.length / 1024),
@@ -4236,7 +4237,7 @@ let res = await callLlm(route, sys, usr, undefined)
       }
       case 'eyesInstall': {
         // 安装：微信必须已退出（DLL 被锁就换不了）
-        const pkg = App._eyesPkg
+        const pkg = eyesPkgCache
         if (!pkg || !existsSync(pkg.dll)) return { ok: false, error: '没有待安装的包（先拖入 zip）' }
         const targetDll = process.env.WECHAT_DLL || 'D:\\wxhook\\wx4110\\version.dll'
         const targetDir = pkg.dll.replace(/\\[^\\]+$/, '')
@@ -4268,7 +4269,7 @@ let res = await callLlm(route, sys, usr, undefined)
         try { writeFileSync(switchFile, '', 'utf8') } catch { /* ignore */ }
         // ⑤ 清理临时目录
         const workDir = pkg.workDir
-        App._eyesPkg = null
+        eyesPkgCache = null
         log('[eyes] 安装完成：' + pkg.sha256.slice(0, 16) + ' → ' + targetDll)
         return {
           ok: true, installedTo: targetDll, backup, replayDir, dirFile, switchFile, sha256: pkg.sha256,
@@ -4283,7 +4284,7 @@ let res = await callLlm(route, sys, usr, undefined)
             "(Get-Process -Name Weixin -EA SilentlyContinue | Measure-Object).Count"], { encoding: 'utf8', timeout: 15000, windowsHide: true })
           running = parseInt(String(out).trim(), 10) > 0
         } catch { /* ignore */ }
-        return { ok: true, wechatRunning: running, hasPkg: !!(App._eyesPkg && existsSync(App._eyesPkg.dll)) }
+        return { ok: true, wechatRunning: running, hasPkg: !!(eyesPkgCache && existsSync(eyesPkgCache.dll)) }
       }
       case 'eyesInfo': {
         // 眼睛（hires provider）状态：DLL 能力 / 目录 / 开关 / 文件情况
