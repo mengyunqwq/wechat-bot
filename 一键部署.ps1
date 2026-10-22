@@ -373,7 +373,7 @@ if ($NoStart) {
       Say ''
       Warn '没找到 dsh 命令 —— 控制面板和「大脑」需要 DSH 运行时'
       Say '  安装/启动方式：' 'Yellow'
-      Say '    npx @deepseek-ai/dsh web --port 3080' 'Gray'
+      Say "    npx @deepseek-ai/dsh web --port $DshPort" 'Gray'
       Say '  然后把本项目作为插件装进 DSH（见 DEPLOY.md 第 5.1 节）。' 'Gray'
     }
   }
@@ -390,7 +390,8 @@ if ($bridgeOk) { Ok '桥 17300 在监听' } else { Bad '桥 17300 没监听'; $f
 
 # hook 端口
 try {
-  $r = Invoke-RestMethod 'http://127.0.0.1:30001/QueryDB/status' -Method Post -Body '{}' -ContentType 'application/json' -TimeoutSec 5
+  # /QueryDB/status 只认 GET —— 用 POST 会 404，导致这里误报「hook 无响应」
+  $r = Invoke-RestMethod 'http://127.0.0.1:30001/QueryDB/status' -Method Get -TimeoutSec 5
   Ok "hook 30001 可访问（IsLogin=$($r.IsLogin)）"
 } catch { Bad 'hook 30001 无响应（微信没起？DLL 没加载？）'; $fail++ }
 
@@ -412,8 +413,8 @@ Say '╚════════════════════════
 Say ''
 Say '  下一步：' 'Cyan'
 Say '    1. 微信登录（登录窗口按回车）'
-Say '    2. 启动 DSH：npx @deepseek-ai/dsh web --port 3080'
-Say '    3. 打开控制面板：http://127.0.0.1:3080/wechat-bot'
+Say "    2. 启动 DSH：npx @deepseek-ai/dsh web --port $DshPort"
+Say "    3. 打开控制面板：http://127.0.0.1:$DshPort/wechat-bot"
 Say '    4. 在群里 @ 机器人说句话试试'
 Say ''
 Say '  排错：DEPLOY.md 第 6 节 / docs/OPERATIONS-RULES.md' 'Gray'
