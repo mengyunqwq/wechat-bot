@@ -1,5 +1,5 @@
 {
-  "releasedAt": "2026-10-22",
-  "version": "1.1.4",
-  "notes": "修复「大肥鱼的眼睛」在别人机器上报 ENOENT：代码里 9 处路径硬编码成开发机的 D:\\wxhook\\wx4110。现在自动检测微信目录（环境变量 WECHAT_DIR → config.wechatExe → 运行中的微信进程），检测不到会给出明确提示而不是 ENOENT。"
+  "version": "1.1.5",
+  "notes": "修复热重载后桥连接恒为 0：connect() 原来被 closed 标志永久挡住（旧实例被 close 后连重试都不发生），现在显式 connect() 会重置该标志；另加连接诊断日志（能区分「没调用 connect」和「WebSocket 静默挂起」）。",
+  "releasedAt": "2026-10-22"
 }
