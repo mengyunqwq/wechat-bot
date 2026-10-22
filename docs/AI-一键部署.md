@@ -183,8 +183,6 @@ AI 拿到这段指令后会自己：查环境 → 装依赖 → 复制独立微�
                                         开了之后新消息几乎立刻到，不用等轮询周期。 | 想更快可以开，不开也正常
     hook-voice-send.on            | 关   | 打开 /SendVoiceMsg（发真·微信语音气泡，type 34）。
                                         没开时该接口返回 -1001，日志会写明原因。 | 要"会说话"才开
-    hook-voicedump.on             | 关   | 只读埋点：dump 语音发送链路的入参/返回值（排查用） | 排查时才开
-    hook-vuprobe.on               | 关   | 只读埋点：dump 语音"上传"链路的候选点（排查用） | 排查时才开
     示例（开推送 + 开发语音）：
       type nul > "D:\wxhook\wx4110\hook-push.on"
       type nul > "D:\wxhook\wx4110\hook-voice-send.on"
@@ -424,8 +422,6 @@ notepad config.json
 | 文件 | 默认 | 作用 | 默认该不该开 |
 | `hook-push.on` | **关** | 打开 hook 的"数据库写入即时通知"通道（配合环境变量 `WECHAT_PUSH=1` 才真正发事件）。开了新消息几乎立刻到，不用等 2.5 秒轮询 | **可选**：想更即时就开；不开也完全正常 |
 | `hook-voice-send.on` | **关** | 打开 `/SendVoiceMsg`（发真·微信语音气泡，type 34）。没开时接口返回 `-1001` 并在日志写明原因 | **要"会说话"才开**（先在群里自测通过再开） |
-| `hook-voicedump.on` | **关** | 只读埋点：dump 语音发送链路的入参/返回值 | 只在排查问题时临时开 |
-| `hook-vuprobe.on` | **关** | 只读埋点：dump 语音"上传"链路的候选点 | 只在排查问题时临时开 |
 # 打开推送通道（可选）
 type nul > "D:\wxhook\wx4110\hook-push.on"
 # 打开语音气泡（要"会说话"才开）
