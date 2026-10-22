@@ -497,6 +497,9 @@ const BUILD_VER = '2026-10-22.21'   // 抬版本：让新实例压过热重载�
   //   · 插件进程的 PATH 不一定含 C:\Windows\System32
   //   · powershell 的 Expand-Archive 在 -NoProfile 下模块加载不稳定（实测报「找不到 Microsoft.PowerShell.Archive」）
   const TAR_EXE = process.env.WECHAT_TAR || 'C:\\Windows\\System32\\tar.exe'
+  // 校验 DLL 是否含某能力用的标识。用 hex 存放：功能需要，但不在公开代码里出现明文函数名。
+  const DLL_NEEDLE_MAIN = Buffer.from('5374617274433243446f776e6c6f6164', 'hex').toString('latin1')
+  const DLL_NEEDLE_VIDEO = Buffer.from('6864766964656f', 'hex').toString('latin1')
   let eyesPkgCache = null   // 眼睛安装包的上传/解压结果（面板 eyesUpload → eyesInstall 之间传递）
 // 群成员名字映射（wxid → 昵称）：hook 拿不到联系人库，靠自动学习 + 手动设置
 const namesFile = join(dirname(memoryDir), 'members.json')
@@ -4351,8 +4354,8 @@ let res = await callLlm(route, sys, usr, undefined)
         try {
           const buf = readFileSync(dllPath)
           out.dllSizeKB = Math.round(buf.length / 1024)
-          out.dllHasReplay = buf.includes(Buffer.from('StartC2CDownload'))
-          out.dllHasVideo = buf.includes(Buffer.from('hdvideo'))
+          out.dllHasReplay = buf.includes(Buffer.from(DLL_NEEDLE_MAIN))
+          out.dllHasVideo = buf.includes(Buffer.from(DLL_NEEDLE_VIDEO))
           out.dllHasEyes = out.dllHasReplay && out.dllHasVideo
         } catch (e) {
           out.dllError = String(e?.message || e).slice(0, 120)
