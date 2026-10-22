@@ -102,6 +102,39 @@ http://127.0.0.1:3080/wechat-bot
 
 ## 快速开始
 
+### 方式一：一键部署（推荐）
+
+```powershell
+# 在仓库根目录运行。依次完成：环境检查 → 装依赖 → 准备独立微信
+# → 编译 Hook（调 scripts/build-hook.ps1）→ 部署 DLL → 写配置 → 启动 → 健康检查
+pwsh -ExecutionPolicy Bypass -File .\一键部署.ps1
+```
+
+**可选参数**
+
+```powershell
+# 已有 version.dll，跳过编译（最快）
+pwsh -ExecutionPolicy Bypass -File .\一键部署.ps1 -HookDll "D:\my-version.dll"
+
+# 只装代码和依赖，不碰微信、不启动
+pwsh -ExecutionPolicy Bypass -File .\一键部署.ps1 -SkipHook -NoStart
+
+# 指定微信目录（不给就自动找）
+pwsh -ExecutionPolicy Bypass -File .\一键部署.ps1 -WeChatDir "D:\wxhook\wx4110"
+```
+
+**关于耗时**（最常问的）
+
+| 情况 | 耗时 |
+|---|---|
+| 机器上已有 VS 2022 / MSBuild | **整套约 1~2 分钟**（编译本身 1.2 秒）|
+| 机器上没有编译器 | **首次多花 15~30 分钟**（自动装 VS Build Tools，2~6 GB，脚本会先问你）|
+| 之后微信升级要重编 | 还是 **1.2 秒** |
+
+> 脚本优先用 `pwsh`（PowerShell 7，原生 UTF-8）；只有 5.1 时回退，脚本自带 BOM 不会乱码。
+
+### 方式二：手动（照 DEPLOY.md 做）
+
 ```powershell
 # 1) 前置：Node 18+、Python 3.10+（含 pycryptodome）
 # 2) 克隆
@@ -126,10 +159,12 @@ npx @deepseek-ai/dsh web --port 3080
 **完整部署步骤（含微信 Hook 编译、回调/轮询、排错）见 [DEPLOY.md](DEPLOY.md)。**
 
 > ⚠️ **关于预编译 Hook（version.dll）**
-> 本仓库**暂时不提供**预编译的 `version.dll`。
-> 原因：数据库句柄的 hook 时机在不同机器上表现不一致（见 [docs/DB-句柄修复说明.md](docs/DB-句柄修复说明.md)），
-> 未在足够多的环境验证前，提供一个"可能装了就坏"的二进制是不负责任的。
-> 请按 [DEPLOY.md](DEPLOY.md) 自己编译，或先用 [aixed/WeChat-Hook](https://github.com/aixed/WeChat-Hook) 的官方 release。
+> 本仓库**不分发**编译好的 `version.dll` —— 上游 [aixed/WeChat-Hook](https://github.com/aixed/WeChat-Hook) 没有 LICENSE，
+> 它的编译产物属于衍生作品，再分发有法律风险。所以改成**脚本在你本机编译**：
+> 克隆上游源码 → 打本仓库的补丁 → 编译 → 部署（自动备份原文件）。效果一样，但更干净。
+>
+> **注意**：直接下载官方 release 的 `version.dll` **不能用** —— 官方版的 `QueryDB` 是坏的，且没有回调推送实现，
+> 会导致读不到数据库、收不到消息。必须走「源码 + 补丁 + 编译」这条路。
 
 > 🤖 **想让 AI 替你装？** 把 **[docs/AI-一键部署.md](docs/AI-一键部署.md)** 第 2 节整段复制给任意 AI 客户端
 > （豆包 / Claude Desktop / Cursor / Cline / DSH…），它会自己完成环境检查 → 装依赖 → 复制独立微信 →
