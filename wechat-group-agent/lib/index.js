@@ -271,7 +271,7 @@ const DEFAULT_CONFIG = {
   selfHeal: false,                       // 总开关（改成 true 才启用）
   selfHealScript: '',                    // safe-restart-client.ps1 的绝对路径
   selfHealBridgeDir: '',                 // wx-bridge 目录（给脚本用）
-  selfHealWeChatDir: 'D:\\wxhook\\wx4110',  // 客户端目录
+  selfHealWeChatDir: '',                    // 客户端目录（空 = 自动检测）
   selfHealMaxPerDay: 1,                  // 每天最多自动重启几次
   douyinShareMaxPerDay: 3,            // 每天最多分享几条（防刷屏）
 
@@ -4178,6 +4178,41 @@ let res = await callLlm(route, sys, usr, undefined)
     }
     return out
   }
+  /**
+   * 检测微信安装目录（version.dll 就放在这里）。
+   *
+   * 为什么需要它：原来有 9 处路径硬编码成 D:\wxhook\wx4110 —— 那是开发机的目录，
+   * 别人（微信装在 C:\Program Files\Tencent\Weixin 之类）一用就
+   * ENOENT: no such file or directory, open '...\version.dll'。
+   *
+   * 顺序：环境变量 WECHAT_DIR → config.wechatExe → 运行中的微信进程 → 空字符串。
+   */
+  let _wxDirCache = null
+  function detectWechatDir() {
+    if (_wxDirCache !== null) return _wxDirCache
+    let found = ''
+    const envDir = String(process.env.WECHAT_DIR || '').trim()
+    if (envDir && existsSync(envDir)) found = envDir
+    if (!found) {
+      try {
+        const exe = String(config.wechatExe || '').trim()
+        if (exe && existsSync(exe)) found = dirname(exe)
+      } catch { /* ignore */ }
+    }
+    if (!found) {
+      try {
+        const out = execFileSync('powershell', ['-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden', '-Command',
+          '(Get-Process -Name Weixin -EA SilentlyContinue | Select-Object -First 1).Path'],
+          { encoding: 'utf8', timeout: 8000, windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] })
+        const exe = String(out).trim()
+        if (exe && existsSync(exe)) found = dirname(exe)
+      } catch { /* ignore */ }
+    }
+    _wxDirCache = found
+    return found
+  }
+  /** 用完清缓存（面板改了微信目录后调用） */
+  function resetWechatDirCache() { _wxDirCache = null }
   // ── 面板动作（HTTP → 机器人能力）────────────────────────────
   // 只暴露明确列出的 op；参数在插件侧再解析一次，面板拿到的是"结果对象"，不是任意代码执行。
   async function handlePanelAction(op, args = {}) {
@@ -4251,10 +4286,12 @@ let res = await callLlm(route, sys, usr, undefined)
         }
       }
       case 'eyesInstall': {
+        const wxDir = detectWechatDir()
         // 安装：微信必须已退出（DLL 被锁就换不了）
         const pkg = eyesPkgCache
         if (!pkg || !existsSync(pkg.dll)) return { ok: false, error: '没有待安装的包（先拖入 zip）' }
-        const targetDll = process.env.WECHAT_DLL || 'D:\\wxhook\\wx4110\\version.dll'
+        if (!wxDir) return { ok: false, error: '检测不到微信安装目录 —— 请设环境变量 WECHAT_DIR', needWxDir: true }
+        const targetDll = process.env.WECHAT_DLL || join(wxDir, 'version.dll')
         const targetDir = pkg.dll.replace(/\\[^\\]+$/, '')
         // ① 微信在跑？DLL 会被锁
         const wxRunning = (() => {
@@ -4291,6 +4328,7 @@ let res = await callLlm(route, sys, usr, undefined)
           hint: 'DLL 已装好，重放已开启。现在启动微信（登录窗口按回车）即可。',
         }
       }
+
       case 'eyesCheck': {
         // 只检查微信是否已退出（供面板"我退出了，继续"按钮用）
         let running = false
@@ -4302,11 +4340,13 @@ let res = await callLlm(route, sys, usr, undefined)
         return { ok: true, wechatRunning: running, hasPkg: !!(eyesPkgCache && existsSync(eyesPkgCache.dll)) }
       }
       case 'eyesInfo': {
+        const wxDir = detectWechatDir()
         // 眼睛（hires provider）状态：DLL 能力 / 目录 / 开关 / 文件情况
-        const dllPath = process.env.WECHAT_DLL || 'D:\\wxhook\\wx4110\\version.dll'
-        const dirFile = process.env.WECHAT_REPLAY_DIR_FILE || 'D:\\wxhook\\wx4110\\hook-cdn-replay.dir'
-        const switchFile = process.env.WECHAT_REPLAY_SWITCH_FILE || 'D:\\wxhook\\wx4110\\hook-cdn-replay.on'
-        const out = { dllPath, dirFile, switchFile }
+        if (!wxDir) return { ok: false, error: '检测不到微信安装目录 —— 请设环境变量 WECHAT_DIR 指向微信目录（version.dll 所在处）', wxDir: '' }
+        const dllPath = process.env.WECHAT_DLL || join(wxDir, 'version.dll')
+        const dirFile = process.env.WECHAT_REPLAY_DIR_FILE || join(wxDir, 'hook-cdn-replay.dir')
+        const switchFile = process.env.WECHAT_REPLAY_SWITCH_FILE || join(wxDir, 'hook-cdn-replay.on')
+        const out = { dllPath, dirFile, switchFile, wxDir, wxDirSource: (process.env.WECHAT_DIR ? 'env' : (config.wechatExe ? 'config' : 'process')) }
         // ① DLL 是否含 CDN 重放（眼睛的硬件前提）
         try {
           const buf = readFileSync(dllPath)
@@ -4341,11 +4381,12 @@ let res = await callLlm(route, sys, usr, undefined)
         return out
       }
       case 'eyesSetDir': {
+        const wxDir = detectWechatDir()
         // 改重放目录：写 hook-cdn-replay.dir（DLL + 桥都动态读它 → 立即生效，不用重启）
         const dir = String(a.dir || '').trim()
         if (!dir) return { ok: false, error: '目录不能为空' }
         if (!/^[a-zA-Z]:[\\/]/.test(dir)) return { ok: false, error: '请填绝对路径（如 D:\\cdndl-replay）' }
-        const dirFile = process.env.WECHAT_REPLAY_DIR_FILE || 'D:\\wxhook\\wx4110\\hook-cdn-replay.dir'
+        const dirFile = process.env.WECHAT_REPLAY_DIR_FILE || join(wxDir, 'hook-cdn-replay.dir')
         try {
           mkdirSync(dir, { recursive: true })
           writeFileSync(dirFile, dir, 'utf8')
@@ -4356,9 +4397,10 @@ let res = await callLlm(route, sys, usr, undefined)
         }
       }
       case 'eyesToggle': {
+        const wxDir = detectWechatDir()
         // 开/关重放：写/删 hook-cdn-replay.on（DLL 读它决定要不要抓）
         const on = !!a.on
-        const switchFile = process.env.WECHAT_REPLAY_SWITCH_FILE || 'D:\\wxhook\\wx4110\\hook-cdn-replay.on'
+        const switchFile = process.env.WECHAT_REPLAY_SWITCH_FILE || join(wxDir, 'hook-cdn-replay.on')
         try {
           if (on) writeFileSync(switchFile, '', 'utf8')
           else if (existsSync(switchFile)) unlinkSync(switchFile)
@@ -4369,7 +4411,8 @@ let res = await callLlm(route, sys, usr, undefined)
         }
       }
       case 'eyesClean': {
-        const dirFile = process.env.WECHAT_REPLAY_DIR_FILE || 'D:\\wxhook\\wx4110\\hook-cdn-replay.dir'
+        const wxDir = detectWechatDir()
+        const dirFile = process.env.WECHAT_REPLAY_DIR_FILE || join(wxDir, 'hook-cdn-replay.dir')
         let dir = 'D:\\cdndl-replay'
         try { dir = readFileSync(dirFile, 'utf8').trim() || dir } catch { /* 用默认 */ }
         let removed = 0
@@ -4480,7 +4523,7 @@ let res = await callLlm(route, sys, usr, undefined)
               const argv = nodeArgs
                 ? nodeArgs.match(/"[^"]*"|\S+/g).map((x) => x.replace(/^"|"$/g, ''))
                 : ['server.mjs', '--transport=wechat-hook', '--api-port=30001', '--cb-port=18998',
-                   '--data-dir=' + join(base, 'data'), '--wechat=' + (process.env.WECHAT_EXE || 'D:\\wxhook\\wx4110\\Weixin.exe')]
+                   '--data-dir=' + join(base, 'data'), '--wechat=' + (process.env.WECHAT_EXE || (detectWechatDir() ? join(detectWechatDir(), 'Weixin.exe') : ''))]
               const { spawn } = await import('node:child_process')
               const child = spawn(process.execPath, argv, { cwd: bridgeDir, detached: true, stdio: 'ignore', windowsHide: true })
               child.unref()
