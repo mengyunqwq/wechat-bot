@@ -1797,6 +1797,18 @@ function renderDiag() {
 /* ── 手动操作 ─────────────────────────────────────────── */
 function renderManual() {
   view.innerHTML = `<h2>手动操作</h2>
+    <div class="section"><div class="hd">⚡ 微信客户端电源</div>
+      <div class="field"><div class="lab">进程</div><div class="ctl">
+        <label class="hswitch" style="gap:10px">
+          <span class="sw"><input type="checkbox" id="wx-power"><i></i></span>
+          <span id="wx-power-label">读取中…</span>
+        </label>
+      </div></div>
+      <div class="muted small" style="margin:6px 0 10px">
+        关掉 = 杀掉微信进程；打开 = 启动微信并自动点「进入微信」（最长等 2 分钟，会一路等 hook 就绪）
+      </div>
+      <div id="wx-power-result" class="small mono" style="margin-top:8px"></div></div>
+
     <div class="section"><div class="hd">🕹 以机器人身份发一条</div>
       <div class="field"><div class="lab">操作</div><div class="ctl">
         <select id="op"><option value="sendText">发文字</option><option value="sayVoice">发语音（合成）</option>
@@ -1821,6 +1833,54 @@ function renderManual() {
 
   fillRoomSelect($('#op-room'), true);
   fillRoomSelect($('#q-room'), true);
+
+  // ── 微信客户端电源开关 ────────────────────────────────────────────
+  //  关闭 = 杀进程；打开 = 启动 + 自动点「进入微信」+ 等 hook 就绪
+  const refreshWxPower = async () => {
+    try {
+      const j = await api('/action', { method: 'POST', body: JSON.stringify({ op: 'wechatPower', args: { action: 'status' } }) });
+      const r = (j && j.result) || {};
+      const on = !!r.running;
+      const cb = $('#wx-power');
+      if (cb) cb.checked = on;
+      const lab = $('#wx-power-label');
+      if (lab) {
+        lab.textContent = on
+          ? ('运行中（' + (r.procs || 0) + ' 进程' + (r.isLogin ? '，已登录' : '，未登录') + '）')
+          : '已停止';
+        lab.style.color = on ? 'var(--ok)' : 'var(--muted)';
+      }
+    } catch {
+      const lab = $('#wx-power-label');
+      if (lab) lab.textContent = '状态读取失败（桥没连上？）';
+    }
+  };
+  refreshWxPower();
+  const wxCb = $('#wx-power');
+  if (wxCb) {
+    wxCb.onchange = async (e) => {
+      const want = e.target.checked;
+      const act = want ? 'start' : 'kill';
+      const lab = $('#wx-power-label');
+      const res = $('#wx-power-result');
+      e.target.disabled = true;
+      if (lab) lab.textContent = want ? '启动中…（最长 2 分钟，不要关页面）' : '正在退出…';
+      if (res) res.textContent = '';
+      try {
+        const j = await api('/action', { method: 'POST', body: JSON.stringify({ op: 'wechatPower', args: { action: act } }) });
+        const r = (j && j.result) || {};
+        if (res) res.textContent = JSON.stringify(r, null, 1);
+        if (!r.ok) toast(r.error || '操作失败', 'err');
+        else toast(want ? '已启动' : '已关闭', 'ok');
+      } catch (err) {
+        toast(err.message, 'err');
+        if (res) res.textContent = String(err.message || err);
+      } finally {
+        e.target.disabled = false;
+        await refreshWxPower();
+      }
+    };
+  }
   ensureBridgeRooms().then(() => { fillRoomSelect($('#op-room'), true); fillRoomSelect($('#q-room'), true); });
   $('#op').onchange = () => {
     const op = $('#op').value;

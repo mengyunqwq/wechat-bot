@@ -4294,6 +4294,23 @@ let res = await callLlm(route, sys, usr, undefined)
     switch (op) {
       case 'status':
         return await client.call('status', {}, 8000)
+      case 'wechatPower': {
+        // 微信客户端电源开关：关 = 杀进程，开 = 启动并自动点「进入微信」
+        // 实际动作在桥 → scripts/wechat-power.ps1（UIA 点击只能在 PowerShell 做）
+        const action = String(a.action || 'status')
+        if (!['status', 'kill', 'start'].includes(action)) {
+          return { ok: false, error: 'action 只能是 status / kill / start' }
+        }
+        // start 要等 UIA 点进主界面 + hook 就绪，放宽到 150 秒
+        const timeout = action === 'start' ? 150000 : 40000
+        try {
+          const r = await client.call('wechatPower', { action }, timeout)
+          log('[wechatPower] ' + action + ' → ' + JSON.stringify(r).slice(0, 200))
+          return r
+        } catch (e) {
+          return { ok: false, error: String(e?.message || e).slice(0, 200) }
+        }
+      }
       case 'eyesUpload': {
         // 面板拖入 zip → 上传 → 存到临时目录并做预检（不安装）
         const b64 = String(a.b64 || '')

@@ -178,6 +178,16 @@ export function createApiHandler({ handle, rooms, log, bridge, counters, started
         return sendJson(res, 200, { sent: parts.length, parts, totalDelayMs: total })
       }
 
+      // ── 微信客户端电源（关 = 杀进程，开 = 启动 + 自动点「进入微信」）──
+      if (path === '/api/wechat/power') {
+        const action = String(arg('action') || 'status')
+        return sendJson(res, 200, await handle('wechatPower', { action }))
+      }
+      // ── 解除轮询硬闸（之前只加到 handle 的 case 里，HTTP 侧漏了 → 一直 404）──
+      if (path === '/api/pollResume') {
+        return sendJson(res, 200, await handle('pollResume', {}))
+      }
+
       return sendJson(res, 404, { error: '未知接口：' + path, hint: '见 PROTOCOL.md' })
     } catch (e) {
       const msg = String(e?.message || e)

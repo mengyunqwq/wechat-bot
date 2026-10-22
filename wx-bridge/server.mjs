@@ -388,6 +388,44 @@ async function handle(op, a = {}) {
       const p = bridge.poller
       return { ok: true, hardStopped: typeof p?.hardStopped === 'function' ? p.hardStopped() : false }
     }
+    case 'wechatPower': {
+      // 微信客户端电源开关：kill = 杀进程，start = 启动并自动点「进入微信」，status = 查状态
+      //
+      // 为什么委托给 PowerShell 脚本：
+      //   「进入微信」那步必须用 UIA 找到 mmui::LoginWindow 里的按钮再坐标点击，
+      //   这是 .NET/Windows API，Node 侧做不到。实测 UIA Invoke 对 Qt 窗口无效、
+      //   键盘回车也不行，只有坐标鼠标点击有效（见 scripts/wechat-power.ps1 注释）。
+      const action = String(a?.action || 'status')
+      if (!['status', 'kill', 'start'].includes(action)) {
+        return { ok: false, error: 'action 只能是 status / kill / start' }
+      }
+      const ps1 = join(ROOT_DIR, '..', 'scripts', 'wechat-power.ps1')
+      if (!existsSync(ps1)) return { ok: false, error: '找不到脚本：' + ps1 }
+
+      const res = await new Promise((resolve) => {
+        execFile(
+          'powershell.exe',
+          ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ps1, '-Action', action],
+          { timeout: action === 'start' ? 180000 : 60000, windowsHide: true },
+          (err, stdout, stderr) => resolve({ err, stdout: String(stdout || ''), stderr: String(stderr || '') })
+        )
+      })
+
+      // 脚本约定：末行是 `JSON: {...}`
+      let parsed = null
+      for (const line of res.stdout.split(/\r?\n/).reverse()) {
+        const m = line.match(/^JSON:\s*(\{.*\})\s*$/)
+        if (m) { try { parsed = JSON.parse(m[1]); break } catch { /* 继续找 */ } }
+      }
+      if (parsed) return parsed
+
+      return {
+        ok: false,
+        error: (res.err && res.err.message) || '脚本没有输出 JSON',
+        stderr: res.stderr.slice(0, 400),
+        stdout: res.stdout.slice(-400),
+      }
+    }
     case 'rooms':
       return bridge.rooms()
     case 'members': {
