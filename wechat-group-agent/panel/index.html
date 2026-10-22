@@ -79,23 +79,50 @@
   .small{font-size:12px}
   .mono{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:12.5px}
 
-  .btn{display:inline-flex;align-items:center;gap:6px;padding:6px 12px;border-radius:3px;border:1px solid var(--line);
-    background:var(--card);cursor:pointer;font-size:13px;transition:border-color .12s,background .12s}
-  .btn:hover{border-color:color-mix(in srgb,var(--accent) 55%,var(--line));background:var(--card-2)}
-  .btn.primary{background:var(--accent);border-color:var(--accent);color:#fff}
-  .btn.primary:hover{background:color-mix(in srgb,var(--accent) 88%,#000);border-color:transparent}
-  .btn.danger{color:var(--bad);border-color:color-mix(in srgb,var(--bad) 40%,var(--line))}
-  .btn:disabled{opacity:.45;cursor:default}
+  /* 按钮：有实体感 —— 顶部高光 + 下沿暗边 + 按下下沉 */
+  .btn{display:inline-flex;align-items:center;justify-content:center;gap:6px;padding:6px 13px;
+    border-radius:4px;border:1px solid var(--line);border-bottom-color:color-mix(in srgb,var(--line) 62%,var(--text));
+    background:linear-gradient(180deg,#FFFFFF,var(--card-2));
+    box-shadow:inset 0 1px 0 rgba(255,255,255,.9), 0 1px 1px rgba(14,23,32,.04);
+    cursor:pointer;font-size:13px;font-weight:500;letter-spacing:.01em;
+    transition:border-color .12s,box-shadow .12s,transform .06s,background .12s;white-space:nowrap}
+  @media (prefers-color-scheme: dark){
+    .btn{background:linear-gradient(180deg,color-mix(in srgb,var(--card) 88%,#fff),var(--card));
+      border-bottom-color:color-mix(in srgb,var(--line) 50%,#000);
+      box-shadow:inset 0 1px 0 rgba(255,255,255,.06), 0 1px 1px rgba(0,0,0,.3)}}
+  .btn:hover{border-color:color-mix(in srgb,var(--accent) 45%,var(--line));
+    background:linear-gradient(180deg,#FFFFFF,color-mix(in srgb,var(--accent) 5%,var(--card-2)))}
+  .btn:active{transform:translateY(1px);box-shadow:inset 0 1px 2px rgba(14,23,32,.12)}
+  /* 主按钮：渐变 + 高光 + 一点点外发光 */
+  .btn.primary{background:linear-gradient(180deg,#4A86F2,#2F6FEB 55%,#2860D4);
+    border-color:#2A63D6;border-bottom-color:#1E4FAF;color:#fff;
+    box-shadow:inset 0 1px 0 rgba(255,255,255,.28), 0 1px 2px rgba(47,111,235,.30)}
+  .btn.primary:hover{background:linear-gradient(180deg,#5790F5,#3A78EE 55%,#2C66D9);
+    border-color:#2F6BE0;border-bottom-color:#1E4FAF}
+  .btn.primary:active{transform:translateY(1px);
+    box-shadow:inset 0 1px 3px rgba(0,0,0,.22)}
+  /* 危险按钮：默认描边，hover 才实心化 */
+  .btn.danger{color:var(--bad);border-color:color-mix(in srgb,var(--bad) 45%,var(--line));
+    border-bottom-color:color-mix(in srgb,var(--bad) 32%,var(--line));
+    background:linear-gradient(180deg,#FFFFFF,color-mix(in srgb,var(--bad) 4%,var(--card-2)))}
+  .btn.danger:hover{background:color-mix(in srgb,var(--bad) 92%,#000);color:#fff;border-color:var(--bad)}
+  .btn:disabled{opacity:.45;cursor:default;transform:none;
+    box-shadow:none;background:var(--card-2);border-bottom-color:var(--line)}
   .btn:focus-visible,a:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-visible{
-    outline:2px solid color-mix(in srgb,var(--accent) 60%,transparent);outline-offset:1px}
+    outline:2px solid color-mix(in srgb,var(--accent) 55%,transparent);outline-offset:2px}
 
   .sw{position:relative;display:inline-block;width:40px;height:22px;flex:0 0 auto;vertical-align:middle}
   .sw input{opacity:0;width:0;height:0;position:absolute}
-  .sw i{position:absolute;inset:0;background:var(--line);border-radius:3px;transition:.16s;cursor:pointer}
-  .sw i:before{content:"";position:absolute;width:16px;height:16px;left:3px;top:3px;background:#fff;border-radius:2px;transition:.16s;box-shadow:0 1px 2px rgba(0,0,0,.2)}
-  .sw input:checked+i{background:var(--ok)}
+  .sw i{position:absolute;inset:0;background:var(--line);border-radius:3px;transition:.16s;cursor:pointer;
+    box-shadow:inset 0 1px 2px rgba(14,23,32,.14)}
+  .sw i:before{content:"";position:absolute;width:16px;height:16px;left:3px;top:3px;border-radius:2px;
+    background:linear-gradient(180deg,#fff,#EEF2F6);
+    box-shadow:0 1px 2px rgba(14,23,32,.28), inset 0 1px 0 rgba(255,255,255,.9);transition:.16s}
+  .sw input:checked+i{background:linear-gradient(180deg,var(--ok),color-mix(in srgb,var(--ok) 82%,#000));
+    box-shadow:inset 0 1px 2px rgba(0,0,0,.16)}
   .sw input:checked+i:before{transform:translateX(18px)}
   .sw input:disabled+i{opacity:.4;cursor:not-allowed}
+  .sw:hover i:before{box-shadow:0 1px 3px rgba(14,23,32,.34), inset 0 1px 0 rgba(255,255,255,.9)}
 
   .fcard{position:relative}
   .fcard .top{display:flex;align-items:flex-start;gap:10px}
@@ -113,9 +140,16 @@
   .field .ctl{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
 
   input[type=text],input[type=number],input[type=password],select,textarea{
-    background:var(--bg);border:1px solid var(--line);border-radius:3px;padding:6px 9px;outline:none;min-width:0}
+    background:var(--bg);border:1px solid var(--line);border-radius:3px;padding:6px 9px;outline:none;min-width:0;
+    box-shadow:inset 0 1px 2px rgba(14,23,32,.05);transition:border-color .12s,box-shadow .12s}
+  @media (prefers-color-scheme: dark){
+    input[type=text],input[type=number],input[type=password],select,textarea{
+      box-shadow:inset 0 1px 2px rgba(0,0,0,.35);background:var(--sunken)}}
+  input[type=text]:hover,input[type=number]:hover,input[type=password]:hover,select:hover,textarea:hover{
+    border-color:color-mix(in srgb,var(--line) 60%,var(--muted))}
   input[type=text]:focus,input[type=number]:focus,input[type=password]:focus,select:focus,textarea:focus{
-    border-color:var(--accent)}
+    border-color:var(--accent);
+    box-shadow:inset 0 1px 2px rgba(14,23,32,.03), 0 0 0 3px color-mix(in srgb,var(--accent) 14%,transparent)}
   input[type=range]{accent-color:var(--accent);width:150px}
   textarea{width:100%;min-height:120px;resize:vertical;line-height:1.5}
   .num{width:92px}
