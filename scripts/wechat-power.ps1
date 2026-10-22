@@ -79,42 +79,31 @@ if ($Action -eq 'kill') {
   $before = (Get-WechatProcs).Count
   $method = ''
 
-  # ── 第一步：温和关闭（CloseMainWindow = 等价于点右上角 ×）───────────────
-  #  ★ 2026-10-22 23:30 实测教训：直接用 `taskkill /F` 强杀，微信会写一份
-  #    崩溃 dump（Weixin_xxx.dmp，6MB），看起来像崩溃，非常容易误判。
-  #    正常关闭走 WM_CLOSE 就不会产生 dump。
-  #    所以：**先温和关**，给 12 秒；只在它卡住不退时才 `/F`。
-  $main = Get-WechatProcs | Where-Object { $_.MainWindowHandle -ne 0 } | Select-Object -First 1
-  if ($main -ne $null) {
-    try {
-      if ($main.CloseMainWindow()) {
-        $method = 'CloseMainWindow'
-        $dl = (Get-Date).AddSeconds(12)
-        while ((Get-Date) -lt $dl) {
-          if ((Get-WechatProcs).Count -eq 0) { break }
-          Start-Sleep -Milliseconds 500
-        }
-      }
-    } catch { }
-  }
-
-  # ── 第二步：还没退干净 → 才强杀（循环，防被自己的崩溃恢复拉起）─────────
-  if ((Get-WechatProcs).Count -gt 0) {
-    $method = ($method + '+taskkill/F').TrimStart('+')
-    for ($round = 1; $round -le 4; $round++) {
+  # ── 直接 taskkill /F（实测唯一有效的方式）────────────────────────────
+  #  ★ 2026-10-22 23:4x 实测：`CloseMainWindow()` **对微信是死锁的**。
+  #    微信点右上角 × 只是最小化到托盘，Qt 不把 WM_CLOSE 当"退出"处理，
+  #    这个调用会一直不返回 → 整个脚本卡住 → 桥的 execFile 60 秒超时 →
+  #    用户看到「关不掉」。删掉温和关闭，直接强杀。
+  #
+  #  taskkill /F 实测：0.1 秒杀干净 5 个进程，观察 21 秒不会自己回来。
+  #
+  #  代价：强杀会让微信写一份 6MB 崩溃 dump（和真崩溃同名同大小）。
+  #        这是**异常终止记录**，不是崩溃，看时间点能区分：
+  #        由本脚本 kill 出来的 dump，紧邻着桥日志里的
+  #        「检测到客户端已退出」且**之前没有**轮询失败/句柄错误。
+  for ($round = 1; $round -le 3; $round++) {
+    if ((Get-WechatProcs).Count -eq 0) { break }
+    Stop-WechatHard
+    $method = 'taskkill/F'
+    $dl2 = (Get-Date).AddSeconds(6)
+    while ((Get-Date) -lt $dl2) {
       if ((Get-WechatProcs).Count -eq 0) { break }
-      Stop-WechatHard
-      $dl2 = (Get-Date).AddSeconds(6)
-      while ((Get-Date) -lt $dl2) {
-        if ((Get-WechatProcs).Count -eq 0) { break }
-        Start-Sleep -Milliseconds 400
-      }
-      if ((Get-WechatProcs).Count -eq 0) { break }
-      Start-Sleep -Milliseconds 800
+      Start-Sleep -Milliseconds 400
     }
-  } else {
-    if ($method -eq '') { $method = 'already-stopped' }
+    if ((Get-WechatProcs).Count -eq 0) { break }
+    Start-Sleep -Milliseconds 800
   }
+  if ($method -eq '') { $method = 'already-stopped' }
 
   $after = (Get-WechatProcs).Count
   Out-Json @{

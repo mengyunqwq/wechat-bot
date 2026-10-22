@@ -1797,18 +1797,6 @@ function renderDiag() {
 /* ── 手动操作 ─────────────────────────────────────────── */
 function renderManual() {
   view.innerHTML = `<h2>手动操作</h2>
-    <div class="section"><div class="hd">⚡ 微信客户端电源</div>
-      <div class="field"><div class="lab">进程</div><div class="ctl">
-        <label class="hswitch" style="gap:10px">
-          <span class="sw"><input type="checkbox" id="wx-power"><i></i></span>
-          <span id="wx-power-label">读取中…</span>
-        </label>
-      </div></div>
-      <div class="muted small" style="margin:6px 0 10px">
-        关掉 = 杀掉微信进程；打开 = 启动微信并自动点「进入微信」（最长等 2 分钟，会一路等 hook 就绪）
-      </div>
-      <div id="wx-power-result" class="small mono" style="margin-top:8px"></div></div>
-
     <div class="section"><div class="hd">🕹 以机器人身份发一条</div>
       <div class="field"><div class="lab">操作</div><div class="ctl">
         <select id="op"><option value="sendText">发文字</option><option value="sayVoice">发语音（合成）</option>
@@ -1833,65 +1821,6 @@ function renderManual() {
 
   fillRoomSelect($('#op-room'), true);
   fillRoomSelect($('#q-room'), true);
-
-  // ── 微信客户端电源开关 ────────────────────────────────────────────
-  //  关闭 = 杀进程；打开 = 启动 + 自动点「进入微信」+ 等 hook 就绪
-  //
-  //  ⚠️ 不要在操作期间设 input.disabled —— 面板的 CSS 给 .sw input:disabled 配了
-  //     `cursor:not-allowed`，而 start 要等 UIA 点进主界面 + hook 就绪（实测 48 秒，
-  //     最长 2 分钟）。那段时间鼠标一直显示「不允许」，用户以为坏了。
-  //     改用 wxBusy 标记防重复点击，视觉反馈靠文字。
-  let wxBusy = false
-  const setWxLabel = (txt, color) => {
-    const lab = $('#wx-power-label')
-    if (!lab) return
-    lab.textContent = txt
-    lab.style.color = color || ''
-  }
-  const refreshWxPower = async () => {
-    if (wxBusy) return
-    try {
-      const j = await api('/action', { method: 'POST', body: JSON.stringify({ op: 'wechatPower', args: { action: 'status' } }) })
-      const r = (j && j.result) || {}
-      const on = !!r.running
-      const cb = $('#wx-power')
-      if (cb) cb.checked = on
-      setWxLabel(
-        on ? ('运行中（' + (r.procs || 0) + ' 进程' + (r.isLogin ? '，已登录' : '，未登录') + '）') : '已停止',
-        on ? 'var(--ok)' : 'var(--muted)'
-      )
-    } catch (e) {
-      // 读不到状态时不要卡住开关：让用户仍能点（可能是桥刚重启）
-      setWxLabel('状态读取失败：' + String((e && e.message) || e).slice(0, 40), 'var(--warn)')
-    }
-  }
-  refreshWxPower()
-  const wxCb = $('#wx-power')
-  if (wxCb) {
-    wxCb.onchange = async (e) => {
-      const cb = e.target
-      const want = cb.checked
-      if (wxBusy) { cb.checked = !want; return }   // 上一次还没结束
-      const act = want ? 'start' : 'kill'
-      const res = $('#wx-power-result')
-      wxBusy = true
-      if (res) res.textContent = ''
-      setWxLabel(want ? '启动中…（约 1 分钟，最长 2 分钟）' : '正在退出…', 'var(--muted)')
-      try {
-        const j = await api('/action', { method: 'POST', body: JSON.stringify({ op: 'wechatPower', args: { action: act } }) })
-        const r = (j && j.result) || {}
-        if (res) res.textContent = JSON.stringify(r, null, 1)
-        if (!r.ok) toast(r.error || '操作失败', 'err')
-        else toast(want ? '已启动' : '已关闭', 'ok')
-      } catch (err) {
-        toast(String(err.message || err), 'err')
-        if (res) res.textContent = String(err.message || err)
-      } finally {
-        wxBusy = false
-        await refreshWxPower()
-      }
-    };
-  }
   ensureBridgeRooms().then(() => { fillRoomSelect($('#op-room'), true); fillRoomSelect($('#q-room'), true); });
   $('#op').onchange = () => {
     const op = $('#op').value;
