@@ -415,6 +415,7 @@ export const CONFIG_META = {
   },
   logFile: {
     group: 'advanced', label: '插件日志文件', type: 'text', readonly: true,
+    help: '默认 <DSH_HOME>/data/super-injector/wechat-bot-plugin.log。注意别和 super-injector 自己的 dsh-wechat-bot.log 搞混。',
   },
   memoryDir: {
     group: 'advanced', label: '记忆目录', type: 'text', readonly: true,

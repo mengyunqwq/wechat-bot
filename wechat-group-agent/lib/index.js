@@ -490,7 +490,10 @@ const BUILD_VER = '2026-10-22.21'   // 抬版本：让新实例压过热重载�
     return { ok: true, applied, rejected, warnings }
   }
 
-  const logFile = config.logFile || join(dshHome, 'super-injector', SHORT + '.log')
+    // 日志文件名故意不叫 'dsh-wechat-bot.log'：那个名字和 super-injector 自己的日志撞了
+  // （injector 写在 <DSH_HOME>/data/super-injector/，插件也写这儿，两个文件同名不同内容，
+  //  排查时极易看错）。改叫 wechat-bot-plugin.log，一眼能分清谁是谁。
+  const logFile = config.logFile || join(dshHome, 'super-injector', 'wechat-bot-plugin.log')
   const memoryDir = config.memoryDir || join(dshHome, 'wechat-bot', 'memory')
 
   // tar 的绝对路径（Windows 10+ 自带 bsdtar）。用绝对路径是因为：
