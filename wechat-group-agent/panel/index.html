@@ -1275,6 +1275,17 @@ function renderEyes() {
   const ok = e.dllHasEyes;
   view.innerHTML = `<h2>眼睛 <span class="muted small">把压缩包拖进来，自动配置好</span></h2>
 
+    <div class="section"><div class="hd">📊 能力状态 <span class="muted">它决定下面两个能力能不能用</span></div>
+      <div class="grid">
+        <div class="card"><div class="t">🖼 读图（原图）</div>
+          <div class="k" style="font-size:16px">${ok && e.enabled ? "✅ 已启用" : "❌ 未启用"}</div>
+          <div class="d">${ok ? (e.enabled ? "看到的是全分辨率原图" : "DLL 支持，但重放开关是关的") : "需要拖入「大肥鱼的眼睛.zip」"}</div></div>
+        <div class="card"><div class="t">🎬 读视频（整片）</div>
+          <div class="k" style="font-size:16px">${ok && e.enabled && e.dllHasVideo ? "✅ 已启用" : "❌ 未启用"}</div>
+          <div class="d">${ok ? (e.dllHasVideo ? "按每秒 1 帧抽帧理解全程" : "该 DLL 不含视频整片") : "需要拖入「大肥鱼的眼睛.zip」"}</div></div>
+      </div>
+    </div>
+
     <div class="zone" id="eyes-drop" style="border:2px dashed ${pkg ? 'var(--ok)' : 'var(--line)'};border-radius:10px;padding:26px;text-align:center;margin-bottom:14px;cursor:pointer;transition:.15s">
       <div style="font-size:28px">📦</div>
       <div style="margin-top:6px"><b>把「大肥鱼的眼睛.zip」拖到这里</b></div>
