@@ -1361,7 +1361,7 @@ function renderEyes() {
         r.onerror = () => rej(new Error('读文件失败'));
         r.readAsDataURL(file);
       });
-      const j = await api('/action', { method: 'POST', body: JSON.stringify({ op: 'eyesUpload', name: file.name, b64 }) });
+      const j = await api('/action', { method: 'POST', body: JSON.stringify({ op: 'eyesUpload', args: { name: file.name, b64 } }) });
       App.eyesPkg = (j && j.result) || null;
       App.eyesInst = null;
       if (uploadMsg) uploadMsg.textContent = '';
@@ -1414,7 +1414,7 @@ function renderEyes() {
     const dir = $('#eyes-dir').value.trim();
     if (!dir) return toast('目录不能为空', 'err');
     try {
-      await api('/action', { method: 'POST', body: JSON.stringify({ op: 'eyesSetDir', dir }) });
+      await api('/action', { method: 'POST', body: JSON.stringify({ op: 'eyesSetDir', args: { dir } }) });
       toast('已保存：' + dir, 'ok'); App.eyes = null; setTimeout(renderEyes, 200);
     } catch (err) { toast('保存失败：' + err.message, 'err'); }
   };
@@ -1430,7 +1430,7 @@ function renderEyes() {
   const on = $('#eyes-on');
   if (on) on.onchange = async (ev) => {
     try {
-      await api('/action', { method: 'POST', body: JSON.stringify({ op: 'eyesToggle', on: ev.target.checked }) });
+      await api('/action', { method: 'POST', body: JSON.stringify({ op: 'eyesToggle', args: { on: ev.target.checked } }) });
       toast(ev.target.checked ? '重放已开启' : '重放已关闭', 'ok'); App.eyes = null; setTimeout(renderEyes, 300);
     } catch (err) { toast('切换失败：' + err.message, 'err'); ev.target.checked = !ev.target.checked; }
   };
