@@ -16,6 +16,7 @@
  */
 import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, unlinkSync, writeFileSync, copyFileSync, rmdirSync } from 'node:fs'
 import { execFileSync } from 'node:child_process'
+import { request as httpsRequest } from 'node:https'
 import { join, dirname } from 'node:path'
 import { homedir } from 'node:os'
 import { createHash, randomUUID } from 'node:crypto'
@@ -3850,18 +3851,36 @@ let res = await callLlm(route, sys, usr, undefined)
     try { writeFileSync(UPDATE_STATE_FILE, JSON.stringify(updateState, null, 1), 'utf8') } catch { /* ignore */ }
   }
   // 为什么不用 fetch：本机网络经过代理/防火墙（中间人解密），Node 的 fetch 报
-  //   UNABLE_TO_VERIFY_LEAF_SIGNATURE（证书链不完整）；而 PowerShell 走 Windows
-  //   证书存储，能正常访问 GitHub。所以统一用 PowerShell 做 HTTP。
-  const psJson = (url, ms = 20000) => {
-    const cmd = `[Console]::OutputEncoding=[Text.Encoding]::UTF8; try { (Invoke-RestMethod -Uri '${url}' -Headers @{'User-Agent'='dsh-wechat-bot'; 'Accept'='application/vnd.github+json'} -TimeoutSec ${Math.round(ms / 1000)}) | ConvertTo-Json -Depth 6 -Compress } catch { Write-Output ('ERR:' + $_.Exception.Message) }`
-    const out = execFileSync('powershell', ['-NoProfile', '-NonInteractive', '-Command', cmd], {
-      encoding: 'utf8', timeout: ms + 5000, windowsHide: true,
+  //   UNABLE_TO_VERIFY_LEAF_SIGNATURE（证书链不完整）。
+  // 为什么不用 powershell：execFileSync 在 Windows 上会闪一个控制台窗口（用户能看到）。
+  // 所以用 node:https + 仅对 GitHub 这两个域名关闭证书校验 —— 只读公开仓库、不传任何凭据，
+  // 被劫持最多是拿到假代码，所以风险可接受。
+  const httpsGet = (url, ms = 20000) => new Promise((resolve, reject) => {
+    let u
+    try { u = new URL(url) } catch { reject(new Error('bad url')); return }
+    const req = httpsRequest(u, {
+      method: 'GET',
+      timeout: ms,
+      rejectUnauthorized: false,
+      headers: { 'user-agent': 'dsh-wechat-bot', accept: 'application/vnd.github+json' },
+    }, (res) => {
+      const chunks = []
+      res.on('data', (d) => chunks.push(d))
+      res.on('end', () => {
+        const buf = Buffer.concat(chunks)
+        if (res.statusCode >= 400) { reject(new Error('HTTP ' + res.statusCode)); return }
+        resolve(buf)
+      })
     })
-    const s = String(out || '')
-    if (s.startsWith('ERR:')) throw new Error(s.slice(4, 160))
-    return JSON.parse(s)
+    req.on('timeout', () => req.destroy(new Error('请求超时')))
+    req.on('error', reject)
+    req.end()
+  })
+  const ghJson = async (path, ms = 20000) => {
+    const buf = await httpsGet('https://api.github.com' + path, ms)
+    const text = buf.toString('utf8')
+    try { return JSON.parse(text) } catch { throw new Error('响应不是 JSON：' + text.slice(0, 80)) }
   }
-  const ghJson = async (path, ms = 20000) => psJson('https://api.github.com' + path, ms)
   /** 检查更新：返回 { available, local, remote, behind, commits[] } */
   async function checkUpdate() {
     const head = await ghJson(`/repos/${UPDATE_REPO}/commits/main`)
@@ -3908,15 +3927,14 @@ let res = await callLlm(route, sys, usr, undefined)
     mkdirSync(tmp, { recursive: true })
     const zipPath = join(tmp, 'src.zip')
     const url = `https://codeload.github.com/${UPDATE_REPO}/zip/${sha}`
-    // 同样走 PowerShell（Node fetch 在这台机器上证书验证失败：UNABLE_TO_VERIFY_LEAF_SIGNATURE）
-    const zipEsc = zipPath.replace(/'/g, "''")
-    const psCmd = `[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; Invoke-WebRequest -Uri '${url}' -OutFile '${zipEsc}' -Headers @{'User-Agent'='dsh-wechat-bot'} -TimeoutSec 180`
-    execFileSync('powershell', ['-NoProfile', '-NonInteractive', '-Command', psCmd], { stdio: 'pipe', timeout: 200000, windowsHide: true })
-    const bytes = existsSync(zipPath) ? statSync(zipPath).size : 0
-    if (!bytes) throw new Error('下载后文件为空')
+    // 走 node:https（不用 powershell → 不闪控制台窗口）
+    const buf = await httpsGet(url, 180000)
+    if (!buf || !buf.length) throw new Error('下载内容为空')
+    writeFileSync(zipPath, buf)
+    const bytes = buf.length
     // 解压（Node 无内置 zip，用 PowerShell；Windows 环境固定）
     const ps = `Expand-Archive -LiteralPath '${zipPath.replace(/'/g, "''")}' -DestinationPath '${tmp.replace(/'/g, "''")}' -Force`
-    execFileSync('powershell', ['-NoProfile', '-NonInteractive', '-Command', ps], { stdio: 'pipe', timeout: 120000 })
+    execFileSync('powershell', ['-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden', '-Command', ps], { stdio: 'pipe', timeout: 120000, windowsHide: true })
     // 找解压出来的顶层目录（GitHub zip 会有一层 <repo>-<sha>/）
     const dirs = readdirSync(tmp).filter((f) => {
       try { return statSync(join(tmp, f)).isDirectory() } catch { return false }
@@ -3944,7 +3962,7 @@ let res = await callLlm(route, sys, usr, undefined)
         }
       }
       const ps = `Compress-Archive -Path '${(stage + '\\*').replace(/'/g, "''")}' -DestinationPath '${out.replace(/'/g, "''")}' -Force`
-      execFileSync('powershell', ['-NoProfile', '-NonInteractive', '-Command', ps], { stdio: 'pipe', timeout: 180000, windowsHide: true })
+      execFileSync('powershell', ['-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden', '-Command', ps], { stdio: 'pipe', timeout: 180000, windowsHide: true })
     } finally {
       try { rmRecursive(stage) } catch { /* ignore */ }
     }
@@ -4186,14 +4204,14 @@ let res = await callLlm(route, sys, usr, undefined)
           // 桥需要重启才生效：先记下旧桥的启动参数，杀掉，再按原参数拉起
           try {
             const psFind = "[Console]::OutputEncoding=[Text.Encoding]::UTF8; $c = Get-NetTCPConnection -LocalPort 17300 -State Listen -EA SilentlyContinue | Select-Object -First 1; if ($c) { $c.OwningProcess } else { 0 }"
-            const out = execFileSync('powershell', ['-NoProfile', '-NonInteractive', '-Command', psFind], { encoding: 'utf8', timeout: 15000, windowsHide: true })
+            const out = execFileSync('powershell', ['-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden', '-Command', psFind], { encoding: 'utf8', timeout: 15000, windowsHide: true })
             const pid = parseInt(String(out).trim(), 10)
             if (pid > 0) {
               // 取旧桥的命令行，重启时沿用（这样自定义参数不会丢）
               let oldCmd = ''
               try {
                 const psCmd = `(Get-CimInstance Win32_Process -Filter "ProcessId=${pid}").CommandLine`
-                oldCmd = String(execFileSync('powershell', ['-NoProfile', '-NonInteractive', '-Command', psCmd], { encoding: 'utf8', timeout: 15000, windowsHide: true })).trim()
+                oldCmd = String(execFileSync('powershell', ['-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden', '-Command', psCmd], { encoding: 'utf8', timeout: 15000, windowsHide: true })).trim()
               } catch { /* 拿不到就用手册参数 */ }
               try { process.kill(pid) } catch { /* ignore */ }
               steps.push({ step: '停止旧桥', ok: true, detail: 'pid=' + pid })
@@ -4201,7 +4219,7 @@ let res = await callLlm(route, sys, usr, undefined)
               const t0 = Date.now()
               while (Date.now() - t0 < 8000) {
                 try {
-                  const still = execFileSync('powershell', ['-NoProfile', '-NonInteractive', '-Command',
+                  const still = execFileSync('powershell', ['-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden', '-Command',
                     "if (Get-NetTCPConnection -LocalPort 17300 -State Listen -EA SilentlyContinue) { '1' } else { '0' }"], { encoding: 'utf8', timeout: 8000, windowsHide: true }).trim()
                   if (still === '0') break
                 } catch { break }
@@ -4227,7 +4245,7 @@ let res = await callLlm(route, sys, usr, undefined)
               const t1 = Date.now()
               while (Date.now() - t1 < 25000) {
                 try {
-                  const ok = execFileSync('powershell', ['-NoProfile', '-NonInteractive', '-Command',
+                  const ok = execFileSync('powershell', ['-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden', '-Command',
                     "if (Get-NetTCPConnection -LocalPort 17300 -State Listen -EA SilentlyContinue) { '1' } else { '0' }"], { encoding: 'utf8', timeout: 8000, windowsHide: true }).trim()
                   if (ok === '1') { up = true; break }
                 } catch { /* ignore */ }
@@ -4253,9 +4271,9 @@ let res = await callLlm(route, sys, usr, undefined)
             try {
               const tmp2 = join(process.env.TEMP || 'C:\\Windows\\Temp', 'dsh-wb-rollback-' + Date.now())
               mkdirSync(tmp2, { recursive: true })
-              execFileSync('powershell', ['-NoProfile', '-NonInteractive', '-Command',
+              execFileSync('powershell', ['-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden', '-Command',
                 `Expand-Archive -LiteralPath '${backupPath.replace(/'/g, "''")}' -DestinationPath '${tmp2.replace(/'/g, "''")}' -Force`],
-                { stdio: 'pipe', timeout: 120000 })
+                { stdio: 'pipe', timeout: 120000, windowsHide: true })
               applyFiles(tmp2)
               rolledBack = true
             } catch { /* ignore */ }
