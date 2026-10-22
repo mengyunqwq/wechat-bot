@@ -3964,7 +3964,7 @@ let res = await callLlm(route, sys, usr, undefined)
     writeFileSync(zipPath, buf)
     const bytes = buf.length
     // 解压（Node 无内置 zip，用 PowerShell；Windows 环境固定）
-          execFileSync('tar', ['-xf', zipPath, '-C', tmp], { stdio: 'pipe', timeout: 120000, windowsHide: true })
+          execFileSync(TAR_EXE, ['-xf', zipPath, '-C', tmp], { stdio: 'pipe', timeout: 120000, windowsHide: true })
     // 找解压出来的顶层目录（GitHub zip 会有一层 <repo>-<sha>/）
     const dirs = readdirSync(tmp).filter((f) => {
       try { return statSync(join(tmp, f)).isDirectory() } catch { return false }
@@ -3991,7 +3991,7 @@ let res = await callLlm(route, sys, usr, undefined)
           else copyFileSync(sp, dp)
         }
       }
-      execFileSync('tar', ['-a', '-cf', out, '-C', stage, '.'], { stdio: 'pipe', timeout: 180000, windowsHide: true })
+      execFileSync(TAR_EXE, ['-a', '-cf', out, '-C', stage, '.'], { stdio: 'pipe', timeout: 180000, windowsHide: true })
     } finally {
       try { rmRecursive(stage) } catch { /* ignore */ }
     }
@@ -4179,9 +4179,9 @@ let res = await callLlm(route, sys, usr, undefined)
         writeFileSync(zipPath, buf)
         // 解压
         try {
-          execFileSync('tar', ['-xf', zipPath, '-C', dir], { stdio: 'pipe', timeout: 120000, windowsHide: true })
+          execFileSync(TAR_EXE, ['-xf', zipPath, '-C', dir], { stdio: 'pipe', timeout: 120000, windowsHide: true })
         } catch (e) {
-          return { ok: false, error: '解压失败：' + String(e?.message || e).slice(0, 120) }
+          return { ok: false, error: '解压失败：' + String(e?.stderr || e?.message || e).slice(0, 120) }
         }
         // 找 version.dll
         let dll = null
@@ -4489,7 +4489,7 @@ let res = await callLlm(route, sys, usr, undefined)
             try {
               const tmp2 = join(process.env.TEMP || 'C:\\Windows\\Temp', 'dsh-wb-rollback-' + Date.now())
               mkdirSync(tmp2, { recursive: true })
-              execFileSync('tar', ['-xf', backupPath, '-C', tmp2], { stdio: 'pipe', timeout: 120000, windowsHide: true })
+              execFileSync(TAR_EXE, ['-xf', backupPath, '-C', tmp2], { stdio: 'pipe', timeout: 120000, windowsHide: true })
               applyFiles(tmp2)
               rolledBack = true
             } catch { /* ignore */ }
