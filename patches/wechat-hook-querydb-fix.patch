@@ -4194,10 +4194,10 @@ index 037b10d..1f9d4ae 100644
 -</Project>
 +</Project>
 diff --git a/xdb/db_mgr.cpp b/xdb/db_mgr.cpp
-index 60bf5ba..ea3ae8e 100644
+index 60bf5ba..d7ea9cb 100644
 --- a/xdb/db_mgr.cpp
 +++ b/xdb/db_mgr.cpp
-@@ -1,8 +1,1615 @@
+@@ -1,8 +1,1678 @@
  #include "db_mgr.h"
 +#include <atomic>
 +#include <chrono>
@@ -4584,29 +4584,57 @@ index 60bf5ba..ea3ae8e 100644
 +        }
 +    }
 +
++    // ★★ 2026-10-22 修（第三次崩溃，23:16:07）★★
++    //  旧实现的致命缺陷：只有 db_filename **调用本身**在 SEH 里，返回的 const char*
++    //  后面的每一次解引用全在 SEH 外：
++    //      if (fn == nullptr || *fn == '\0') ...      ← ① 野指针解引用
++    //      if (!IsReadableRegion(fn, 1)) ...          ← 检查写在 ① 之后，等于没用
++    //      while (n < 512 && fn[n] != '\0') ...       ← ② 盲读 512 字节，越界必崩
++    //  db_filename 对已释放的句柄可能返回非空但指向已回收堆块的指针；
++    //  那种指针 IsReadableRegion 可能是 true（页还在映射），读下去就是垃圾或崩。
++    //
++    //  为什么以前不崩：contact.db 被 retire 后 verifyName 根本不会被调用。
++    //  而 trusted 改成"tick 老化先 verifyName"之后，高频查 contact.db 就等于
++    //  给这个 bug 加了触发器 → 23:16:07 崩。
++    //
++    //  正确做法：把**整个字符串读取**包进 SEH，并且读到调用方提供的栈缓冲区里
++    //  （栈一定可写，不会因为写入再崩一次）。函数内无任何带析构的 C++ 对象，
++    //  避免 MSVC C2712「要求对象展开」。
++    inline bool sehReadDbName(void* handle, char* buf, size_t bufsz, size_t* outLen) {
++        __try {
++            const char* fn = (const char*)g_api->db_filename((sqlite3*)handle, "main");
++            if (fn == nullptr) return false;
++            size_t i = 0;
++            while (i + 1 < bufsz) {
++                const char c = fn[i];      // 越界/野指针在这里触发 SEH
++                if (c == '\0') break;
++                buf[i] = c;
++                ++i;
++            }
++            buf[i] = '\0';
++            *outLen = i;
++            return true;
++        } __except (EXCEPTION_EXECUTE_HANDLER) {
++            sehDbFilenameHits().fetch_add(1, std::memory_order_relaxed);
++            return false;
++        }
++    }
++
 +    inline bool safeDbName(void* handle, std::string& out) {
 +        out.clear();
 +        if (g_api == nullptr || g_api->db_filename == nullptr || handle == nullptr) return false;
-+        // ★ 2026-10-22：句柄可能是野指针（WCDB 回收连接后堆块被复用）。
-+        //   IsReadableRegion 只证明"地址可读"，不代表句柄结构完好。真正的 SEH 放在
-+        //   sehDbFilename()（独立裸函数，避免 C2712「要求对象展开」）。
-+        const char* fn = sehDbFilename(handle);
-+        if (fn == nullptr || *fn == '\0') return false;
-+        if (!IsReadableRegion(fn, 1)) return false;
-+        // ★ 2026-10-22：允许中文路径！
-+        //   db_filename 返回的是**完整路径**，而这里原来只放行 0x20~0x7E 的 ASCII 字节。
-+        //   只要路径里有一个中文字符（UTF-8 多字节，每个字节 > 0x7E）→ 整个函数 return false
-+        //   → 名字永远取不到 → 只能靠 name_pass 扫描猜名字 → 按名查找全 miss。
-+        //   （实测：数据目录是中文的那台机器，named 全是 name_pass、lookup_ok 恒为 0）
-+        //   修法：只挡控制字符（<0x20），然后**先取文件名**再校验（文件名本身是 ASCII 的 *.db）。
++
++        char buf[512];
 +        size_t n = 0;
-+        while (n < 512 && fn[n] != '\0') {
-+            const unsigned char c = (unsigned char)fn[n];
-+            if (c < 0x20) return false;          // 控制字符 → 肯定是垃圾
-+            ++n;
++        if (!sehReadDbName(handle, buf, sizeof(buf), &n)) return false;   // 所有解引用都在 SEH 内
++        if (n == 0) return false;
++
++        // ★ 允许中文路径：db_filename 返回完整路径，中文字节 > 0x7E。
++        //   只挡控制字符（<0x20），然后 baseName() 取到 *.db 文件名（本身是 ASCII）。
++        for (size_t i = 0; i < n; ++i) {
++            if ((unsigned char)buf[i] < 0x20) return false;   // 控制字符 → 肯定是垃圾
 +        }
-+        if (n == 0 || n >= 512) return false;
-+        out = baseName(std::string(fn, n));
++        out = baseName(std::string(buf, n));
 +        return looksLikeDbName(out);
 +    }
 +
@@ -4782,6 +4810,32 @@ index 60bf5ba..ea3ae8e 100644
 +        int rc = g_origOpen ? g_origOpen(filename, ppDb) : 1 /*SQLITE_ERROR*/;
 +        if (rc == 0 && ppDb != nullptr && *ppDb != nullptr && filename != nullptr && *filename != '\0') {
 +            noteOpened((void*)*ppDb, std::string(filename));
++        }
++        return rc;
++    }
++
++    // ── detour: open16（宽字符版）────────────────────────────────────────
++    //  ★ 2026-10-22 第二次实测：`open_v1_code=true` 但 open_v2_names 恒为 0，
++    //    registrations 只有 prepare 抓到的 2 个。磁盘上 contact.db 明明 23:19:04 被写了
++    //    （微信确实打开了它），但没有任何 open hook 触发。
++    //    说明微信开库既不调 open、也不调 open_v2，而很可能调 **open16**（wchar 文件名）。
++    //    open16 的槽位地址 0x?????????490（open16） 紧挨着 open 的 0x?????????E20（open）（同一模块），
++    //    是这个 sqlite 版本真正被使用的入口。
++    typedef int (*open16_t)(const void*, sqlite3**);
++    open16_t g_origOpen16 = nullptr;
++    bool g_installedOpen16 = false;
++
++    int detourOpen16(const void* filename, sqlite3** ppDb) {
++        int rc = g_origOpen16 ? g_origOpen16(filename, ppDb) : 1 /*SQLITE_ERROR*/;
++        // filename 是 UTF-16LE；用 WideCharToMultiByte 转成 UTF-8 再交给 noteOpened
++        if (rc == 0 && ppDb != nullptr && *ppDb != nullptr && filename != nullptr) {
++            char buf[512];
++            int n = ::WideCharToMultiByte(CP_UTF8, 0, (const wchar_t*)filename, -1,
++                                          buf, (int)sizeof(buf) - 1, nullptr, nullptr);
++            if (n > 1) {
++                buf[n - 1] = '\0';              // 去掉结尾的 \0
++                noteOpened((void*)*ppDb, std::string(buf));
++            }
 +        }
 +        return rc;
 +    }
@@ -5783,6 +5837,15 @@ index 60bf5ba..ea3ae8e 100644
 +            g_installedOpenV1 = true;
 +            OutputDebugStringA("[db_registry] open(v1) 代码钩子已安装（微信核心开库走这个入口）\n");
 +        }
++
++        // ★ 2026-10-22 第三次：open(v1) 装了却从不触发（open_v2_names 恒 0，
++        //   registrations 只有 prepare 抓到的 2 个），而磁盘上 contact.db 明明被写过。
++        //   微信实际用的是 **open16**（wchar 文件名版）——补上这个入口。
++        if (api->open16 != nullptr &&
++            installOneHook((void*)api->open16, (LPVOID)&detourOpen16, (LPVOID*)&g_origOpen16, "open16")) {
++            g_installedOpen16 = true;
++            OutputDebugStringA("[db_registry] open16 代码钩子已安装（微信实际使用的开库入口）\n");
++        }
 +    }
 +
 +    // 安装：把 API 表里的 open_v2 指向 detour（表在 .rdata，需要临时改页保护）
@@ -5813,7 +5876,7 @@ index 60bf5ba..ea3ae8e 100644
  
  static void codec_get_key(sqlite3CodecGetKey func, sqlite3* db, int index, void** pKey, int* pLen) {
  	__try {
-@@ -29,16 +1636,38 @@ namespace xmgr {
+@@ -29,16 +1699,38 @@ namespace xmgr {
  		return out;
  	}
  
@@ -5853,7 +5916,7 @@ index 60bf5ba..ea3ae8e 100644
  	}
  
  	DatabaseMgr::~DatabaseMgr() {
-@@ -59,13 +1688,18 @@ namespace xmgr {
+@@ -59,13 +1751,18 @@ namespace xmgr {
  		}
  		sqlite3_stmt* stmt = nullptr;
  		int rc = m_sqlite3Rountines->prepare((LPVOID)db, sql.c_str(), -1, &stmt, 0);
@@ -5873,7 +5936,7 @@ index 60bf5ba..ea3ae8e 100644
  		{
  			int col_count = m_sqlite3Rountines->column_count(stmt);
  			nlohmann::ordered_json item;
-@@ -95,10 +1729,42 @@ namespace xmgr {
+@@ -95,10 +1792,42 @@ namespace xmgr {
  			items.push_back(item);
  		}
  		m_sqlite3Rountines->finalize(stmt);
@@ -5916,7 +5979,7 @@ index 60bf5ba..ea3ae8e 100644
  	nlohmann::ordered_json DatabaseMgr::execute(const std::string& dbname, const std::string& sql)
  	{
  		nlohmann::ordered_json rdata = { {"status",0},{"desc",""} };
-@@ -106,8 +1772,10 @@ namespace xmgr {
+@@ -106,8 +1835,10 @@ namespace xmgr {
  		if (dbHandle == nullptr) {
  			rdata["status"] = -1;
  			rdata["desc"] = format_string("get database handle which named %s failed", dbname);
@@ -5927,7 +5990,7 @@ index 60bf5ba..ea3ae8e 100644
  		rdata = execute((sqlite3*)dbHandle, sql);
  		return rdata;
  	}
-@@ -182,72 +1850,382 @@ namespace xmgr {
+@@ -182,72 +1913,382 @@ namespace xmgr {
  		return backup(pExistDbHandle, out_path);
  	}
  
