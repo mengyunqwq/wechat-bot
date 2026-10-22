@@ -492,6 +492,11 @@ const BUILD_VER = '2026-10-22.21'   // 抬版本：让新实例压过热重载�
 
   const logFile = config.logFile || join(dshHome, 'super-injector', SHORT + '.log')
   const memoryDir = config.memoryDir || join(dshHome, 'wechat-bot', 'memory')
+
+  // tar 的绝对路径（Windows 10+ 自带 bsdtar）。用绝对路径是因为：
+  //   · 插件进程的 PATH 不一定含 C:\Windows\System32
+  //   · powershell 的 Expand-Archive 在 -NoProfile 下模块加载不稳定（实测报「找不到 Microsoft.PowerShell.Archive」）
+  const TAR_EXE = process.env.WECHAT_TAR || 'C:\\Windows\\System32\\tar.exe'
 // 群成员名字映射（wxid → 昵称）：hook 拿不到联系人库，靠自动学习 + 手动设置
 const namesFile = join(dirname(memoryDir), 'members.json')
   try { mkdirSync(memoryDir, { recursive: true }) } catch { /* ignore */ }
@@ -4167,7 +4172,8 @@ let res = await callLlm(route, sys, usr, undefined)
       case 'eyesUpload': {
         // 面板拖入 zip → 上传 → 存到临时目录并做预检（不安装）
         const b64 = String(a.b64 || '')
-        const name = String(a.name || 'eyes.zip').replace(/[^\w.\-\u4e00-\u9fa5]/g, '_')
+        const origName = String(a.name || 'eyes.zip')   // 只用于显示
+        const name = 'upload.zip'                        // 存盘用 ASCII 名（避免路径编码问题）
         if (!b64) return { ok: false, error: '没有收到文件内容' }
         let buf
         try { buf = Buffer.from(b64, 'base64') } catch { return { ok: false, error: 'base64 解码失败' } }
