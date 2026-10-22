@@ -302,9 +302,8 @@ const App = {
 };
 
 /* ── HTTP ─────────────────────────────────────────────── */
-// API 前缀：DSH 插件模式是 /wechat-bot/api；
-// API 前缀可以被注入（历史遗留的独立服务方案用过 window.__PANEL_API__）
-const API_BASE = (typeof window !== 'undefined' && window.__PANEL_API__) || '/wechat-bot/api';
+// API 前缀：面板挂在 DSH 的 webServer 上，固定走 /wechat-bot/api
+const API_BASE = '/wechat-bot/api';
 async function api(path, opts) {
   const r = await fetch(API_BASE + path, Object.assign({ credentials:'same-origin' }, opts, {
     headers: Object.assign({ 'content-type':'application/json' }, (opts && opts.headers) || {}),
