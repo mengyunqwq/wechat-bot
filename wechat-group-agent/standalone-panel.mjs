@@ -318,14 +318,6 @@ const BRIDGE_OPS = new Set([
 ])
 
 // 这些 op 依赖 DSH 插件（人设/LLM/记忆/眼睛/更新/诊断），独立服务里不实现
-const PLUGIN_ONLY = new Set([
-  'selfcheck', 'usage', 'diag', 'diagCleanHires',
-  'eyesInfo', 'eyesSetDir', 'eyesToggle', 'eyesClean', 'eyesUpload', 'eyesInstall', 'eyesCheck',
-  'checkUpdate', 'updateInfo', 'applyUpdate',
-  'memory.list', 'memory.add', 'memory.clear', 'memory.extract',
-  'names.set', 'names.add', 'names.refresh',
-])
-
 // ── /api/state：按面板期望的结构合成 ───────────────────────
 // 面板读的是 S.bridge.status / S.stats / S.health / S.rooms / S.bridgeRooms，
 // 必须照它的形状返回，否则会一直卡在「正在读取机器人状态…」。
