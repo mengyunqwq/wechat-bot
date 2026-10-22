@@ -277,7 +277,7 @@ const NAV = [
   {id:'voice', title:'语音', icon:'🎙', groups:['voiceIn','voiceOut'], special:'voice'},
   {id:'memory', title:'记忆', icon:'🧠', groups:['memory'], special:'memory'},
   {id:'identity', title:'群与人', icon:'👥', groups:['identity'], special:'members'},
-  {id:'providers', title:'模型接口', icon:'🧩', dshOnly:true},
+  {id:'providers', title:'模型接口', icon:'🧩'},
   {id:'model', title:'人设模型', icon:'🐟', groups:['model']},
   {id:'eyes', title:'眼睛', icon:'👁', special:'eyes'},
   {id:'diag', title:'诊断', icon:'🔬', special:'diag'},
@@ -303,11 +303,8 @@ const App = {
 
 /* ── HTTP ─────────────────────────────────────────────── */
 // API 前缀：DSH 插件模式是 /wechat-bot/api；
-// 独立服务（standalone-panel.mjs）会注入 window.__PANEL_API__ = '/api'
+// API 前缀可以被注入（历史遗留的独立服务方案用过 window.__PANEL_API__）
 const API_BASE = (typeof window !== 'undefined' && window.__PANEL_API__) || '/wechat-bot/api';
-// 独立模式：API 前缀是 /api（由 standalone-panel.mjs 注入）。
-// 独立模式下「模型接口」页没有意义（provider 路由归 DSH），要隐藏。
-const IS_STANDALONE = API_BASE === '/api';
 async function api(path, opts) {
   const r = await fetch(API_BASE + path, Object.assign({ credentials:'same-origin' }, opts, {
     headers: Object.assign({ 'content-type':'application/json' }, (opts && opts.headers) || {}),
@@ -399,7 +396,7 @@ function renderHeader() {
 
 /* ── 导航 ─────────────────────────────────────────────── */
 function renderNav() {
-  $('#nav').innerHTML = NAV.filter(n => !(n.dshOnly && IS_STANDALONE)).map(n =>
+  $('#nav').innerHTML = NAV.map(n =>
     '<a href="#' + n.id + '" data-tab="' + n.id + '" class="' + (App.tab === n.id ? 'on' : '') + '">' + n.icon + ' ' + esc(n.title) + '</a>'
   ).join('');
   $$('#nav a').forEach(a => a.onclick = (e) => {
@@ -1071,10 +1068,6 @@ async function saveField(k, v) {
 /* ── 表情包 ───────────────────────────────────────────── */
 async function renderStickerExtra() {
   const box = $('#sticker-extra'); if (!box) return;
-  // 独立模式：「模型接口」页被隐藏了（provider 路由归 DSH），
-  // 所以把「生图接口」的配置挪到这个页面 —— 用户自己接入生图 API。
-  let imgCfg = null
-  if (IS_STANDALONE) { try { imgCfg = (await api('/image')).config } catch { imgCfg = null } }
   box.innerHTML = `<div class="section"><div class="hd">🖼 图库</div>
     <div class="row"><button class="btn" id="btn-stickers">加载图库</button>
       <input id="pick-text" type="text" placeholder="试挑：一句语境" style="flex:1;min-width:180px">
@@ -1089,7 +1082,7 @@ async function renderStickerExtra() {
         <button class="btn primary" id="btn-gen">生成</button>
       </div>
       <div class="small muted" style="margin-top:8px">生成会调用图生图，可能排队。发送需要选一个群。</div>
-      <div id="gen-result" class="small mono" style="margin-top:8px"></div></div>${imgCfg ? '<h3>生图接口</h3>' + imageConfigHTML(imgCfg) : ''}`;
+      <div id="gen-result" class="small mono" style="margin-top:8px"></div></div>`;
   fillRoomSelect($('#gen-room'), true);
   ensureBridgeRooms().then(() => fillRoomSelect($('#gen-room'), true));
   $('#btn-stickers').onclick = loadStickers;
@@ -1118,8 +1111,6 @@ async function renderStickerExtra() {
     } catch (e) { toast('生成失败：' + e.message, 'err'); }
     finally { btn.disabled = false; btn.textContent = '生成'; }
   };
-  // 独立模式：生图接口表单的事件（保存后刷新本页）
-  if (imgCfg) bindImageEvents(() => renderStickerExtra());
 }
 
 async function loadStickers() {
