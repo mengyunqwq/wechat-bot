@@ -191,7 +191,7 @@ function writeConfig(patch) {
   const cur = readConfig()
   const next = { ...cur, ...patch }
   // 写之前先备份一份，避免手滑把配置写坏
-  try { if (existsSync(AGENT_CONFIG)) writeFileSync(AGENT_CONFIG + '.bak', readFileSync(AGENT_CONFIG)) } catch {}
+  try { if (existsSync(AGENT_CONFIG)) writeFileSync(AGENT_CONFIG + '.bak-' + Date.now(), readFileSync(AGENT_CONFIG)) } catch {}
   writeFileSync(AGENT_CONFIG, JSON.stringify(next, null, 2), 'utf8')
   return next
 }
@@ -307,7 +307,12 @@ async function buildState() {
     bridgeRooms,
     // 插件侧的实时统计独立版没有，但面板顶栏会拼 stats.replied + '/' + stats.msgIn，
     // 给 null 会显示成 undefined/undefined，所以给一组 0。
-    stats: { msgIn: 0, replied: 0, skipped: 0, llmCalls: 0, llmErrors: 0, sentText: 0, sentSticker: 0, sentVoice: 0, sentPat: 0 },
+    // 桥的 counters 有 msgsIn（收到），但「回复/跳过/LLM 调用」只有插件在算 → 那几项只能 0
+    stats: {
+      msgIn: (bridgeStatus && bridgeStatus.counters && bridgeStatus.counters.msgsIn) || 0,
+      replied: 0, skipped: 0, llmCalls: 0, llmErrors: 0,
+      sentText: 0, sentSticker: 0, sentVoice: 0, sentPat: 0,
+    },
     health: null,       // 插件侧体检独立版没有
     // 顶栏读 S.route 显示「模型 provider/model」。独立模式拿不到 DSH 的实时路由，
     // 就用 config 里配的那对（也就是插件实际会用的那对）。
@@ -457,7 +462,7 @@ function saveImageConfig(body) {
     else delete next.apiKey
   }
   mkdirSync(dirname(IMAGE_CFG_FILE), { recursive: true })
-  try { if (existsSync(IMAGE_CFG_FILE)) writeFileSync(IMAGE_CFG_FILE + '.bak', readFileSync(IMAGE_CFG_FILE)) } catch {}
+  try { if (existsSync(IMAGE_CFG_FILE)) writeFileSync(IMAGE_CFG_FILE + '.bak-' + Date.now(), readFileSync(IMAGE_CFG_FILE)) } catch {}
   writeFileSync(IMAGE_CFG_FILE, JSON.stringify(next, null, 2), 'utf8')
   return readImageConfig()
 }
@@ -976,7 +981,7 @@ const LOCAL_OPS = {
         today: all.filter((x) => x.at > todayMs.getTime()).length,
         // 面板还会读这三个：yesterday / lastAt / lastMB，缺了就显示成「上次 一，0MB」
         yesterday: all.filter((x) => x.at > ydayMs && x.at <= todayMs.getTime()).length,
-        lastAt: last ? last.at : 0,
+        lastAt: last ? Math.round(last.at) : 0,
         lastMB: last ? +(last.kb / 1024).toFixed(1) : 0,
         latest: all.slice(0, 5),
       }
