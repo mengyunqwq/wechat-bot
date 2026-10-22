@@ -110,6 +110,42 @@ http://127.0.0.1:3080/wechat-bot
 pwsh -ExecutionPolicy Bypass -File .\一键部署.ps1
 ```
 
+### 控制面板：两种跑法
+
+**① 独立模式（推荐给只想看状态的人）**
+
+不需要 DSH，只连桥：
+
+```powershell
+node wechat-group-agent/standalone-panel.mjs
+# → http://127.0.0.1:8741
+
+# 换端口 / 暴露到局域网（局域网必须给 token，否则脚本拒绝启动）
+node wechat-group-agent/standalone-panel.mjs --port 8080
+node wechat-group-agent/standalone-panel.mjs --host 0.0.0.0 --token 一串足够长的随机字符
+```
+
+独立模式能做的事：
+
+| 能 | 不能（会明确告诉你为什么） |
+|---|---|
+| 看群 / 消息 / 表情包 / 语音 | 拖入 zip 装眼睛（要文件上传通道） |
+| 发消息 / 表情 / 拍一拍 / 语音 | 提炼长期记忆（要跑 LLM） |
+| 改 101 项配置（人设、概率、模型…）| 一键更新（覆盖代码后要安全重启自己）|
+| 记忆增删查、成员名字 | |
+| 眼睛状态/目录/开关/清理、DLL 能力检测 | |
+| 自检 7 项、诊断（崩溃/数据库/磁盘）| |
+| 用量统计、检查更新 | |
+
+**② DSH 插件模式（功能最全）**
+
+```powershell
+npx @deepseek-ai/dsh web --port 3080
+# → http://127.0.0.1:3080/wechat-bot
+```
+
+面板挂在 DSH 的 webServer 上，复用 DSH 登录态。上面「不能」的三项只有这个模式支持。
+
 **可选参数**
 
 ```powershell
