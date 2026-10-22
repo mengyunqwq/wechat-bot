@@ -1836,48 +1836,59 @@ function renderManual() {
 
   // ── 微信客户端电源开关 ────────────────────────────────────────────
   //  关闭 = 杀进程；打开 = 启动 + 自动点「进入微信」+ 等 hook 就绪
+  //
+  //  ⚠️ 不要在操作期间设 input.disabled —— 面板的 CSS 给 .sw input:disabled 配了
+  //     `cursor:not-allowed`，而 start 要等 UIA 点进主界面 + hook 就绪（实测 48 秒，
+  //     最长 2 分钟）。那段时间鼠标一直显示「不允许」，用户以为坏了。
+  //     改用 wxBusy 标记防重复点击，视觉反馈靠文字。
+  let wxBusy = false
+  const setWxLabel = (txt, color) => {
+    const lab = $('#wx-power-label')
+    if (!lab) return
+    lab.textContent = txt
+    lab.style.color = color || ''
+  }
   const refreshWxPower = async () => {
+    if (wxBusy) return
     try {
-      const j = await api('/action', { method: 'POST', body: JSON.stringify({ op: 'wechatPower', args: { action: 'status' } }) });
-      const r = (j && j.result) || {};
-      const on = !!r.running;
-      const cb = $('#wx-power');
-      if (cb) cb.checked = on;
-      const lab = $('#wx-power-label');
-      if (lab) {
-        lab.textContent = on
-          ? ('运行中（' + (r.procs || 0) + ' 进程' + (r.isLogin ? '，已登录' : '，未登录') + '）')
-          : '已停止';
-        lab.style.color = on ? 'var(--ok)' : 'var(--muted)';
-      }
-    } catch {
-      const lab = $('#wx-power-label');
-      if (lab) lab.textContent = '状态读取失败（桥没连上？）';
+      const j = await api('/action', { method: 'POST', body: JSON.stringify({ op: 'wechatPower', args: { action: 'status' } }) })
+      const r = (j && j.result) || {}
+      const on = !!r.running
+      const cb = $('#wx-power')
+      if (cb) cb.checked = on
+      setWxLabel(
+        on ? ('运行中（' + (r.procs || 0) + ' 进程' + (r.isLogin ? '，已登录' : '，未登录') + '）') : '已停止',
+        on ? 'var(--ok)' : 'var(--muted)'
+      )
+    } catch (e) {
+      // 读不到状态时不要卡住开关：让用户仍能点（可能是桥刚重启）
+      setWxLabel('状态读取失败：' + String((e && e.message) || e).slice(0, 40), 'var(--warn)')
     }
-  };
-  refreshWxPower();
-  const wxCb = $('#wx-power');
+  }
+  refreshWxPower()
+  const wxCb = $('#wx-power')
   if (wxCb) {
     wxCb.onchange = async (e) => {
-      const want = e.target.checked;
-      const act = want ? 'start' : 'kill';
-      const lab = $('#wx-power-label');
-      const res = $('#wx-power-result');
-      e.target.disabled = true;
-      if (lab) lab.textContent = want ? '启动中…（最长 2 分钟，不要关页面）' : '正在退出…';
-      if (res) res.textContent = '';
+      const cb = e.target
+      const want = cb.checked
+      if (wxBusy) { cb.checked = !want; return }   // 上一次还没结束
+      const act = want ? 'start' : 'kill'
+      const res = $('#wx-power-result')
+      wxBusy = true
+      if (res) res.textContent = ''
+      setWxLabel(want ? '启动中…（约 1 分钟，最长 2 分钟）' : '正在退出…', 'var(--muted)')
       try {
-        const j = await api('/action', { method: 'POST', body: JSON.stringify({ op: 'wechatPower', args: { action: act } }) });
-        const r = (j && j.result) || {};
-        if (res) res.textContent = JSON.stringify(r, null, 1);
-        if (!r.ok) toast(r.error || '操作失败', 'err');
-        else toast(want ? '已启动' : '已关闭', 'ok');
+        const j = await api('/action', { method: 'POST', body: JSON.stringify({ op: 'wechatPower', args: { action: act } }) })
+        const r = (j && j.result) || {}
+        if (res) res.textContent = JSON.stringify(r, null, 1)
+        if (!r.ok) toast(r.error || '操作失败', 'err')
+        else toast(want ? '已启动' : '已关闭', 'ok')
       } catch (err) {
-        toast(err.message, 'err');
-        if (res) res.textContent = String(err.message || err);
+        toast(String(err.message || err), 'err')
+        if (res) res.textContent = String(err.message || err)
       } finally {
-        e.target.disabled = false;
-        await refreshWxPower();
+        wxBusy = false
+        await refreshWxPower()
       }
     };
   }
