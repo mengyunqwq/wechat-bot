@@ -1,5 +1,5 @@
 {
-  "version": "1.1.5",
-  "notes": "修复热重载后桥连接恒为 0：connect() 原来被 closed 标志永久挡住（旧实例被 close 后连重试都不发生），现在显式 connect() 会重置该标志；另加连接诊断日志（能区分「没调用 connect」和「WebSocket 静默挂起」）。",
+  "version": "1.1.6",
+  "notes": "修三个真 bug：① 群成员昵称读不到（微信实际用 open16 开库，之前只挂了 open_v2/open(v1)，补上后 registrations 从 2 涨到 38）；② 高频查 contact.db 崩溃（safeDbName 里的野指针解引用全在 SEH 外，且 trusted 分级判据让它高频执行，现把整个字符串读取包进 SEH 读到栈缓冲区）；③ 自己发的消息被记两次导致面板显示两遍（发送时本地记一条、轮询又从库读回同一条，push 加两层去重）。另修轮询硬停后 resume 不真正重启轮询、补丁漏 xdb/db_mgr.h 声明。",
   "releasedAt": "2026-10-22"
 }
