@@ -132,7 +132,11 @@ export function setupPanel(ctx, api) {
     mounted = true
     try {
       ctx.effect(() => ws.register({ kind: 'prefix', path: '/wechat-bot', handler: handle }), 'dsh-wechat-bot: panel route')
+      // 端口是用户启动 `dsh web --port N` 时自己定的，插件拿不到，
+      // 所以只打印路径 + 教用户怎么拼完整地址（避免文档写死 3080 误导）。
       api.log('面板已挂载：/wechat-bot')
+      api.log('  → 完整地址 = 你的 DSH 地址 + /wechat-bot')
+      api.log('  → DSH 地址看 dsh web 启动时的输出，或浏览器地址栏')
     } catch (e) {
       mounted = false
       api.log('面板挂载失败：' + String(e?.message || e))
