@@ -694,16 +694,25 @@ export class WeChatHookBridge {
       } catch (e) {
         this.log('数据库轮询启动失败（第 ' + attempt + ' 次）：' + String(e?.message || e).slice(0, 90))
         // message_0.db 是**懒加载**的：微信只有在收发消息之后才会打开它。
-        // 所以"失败就放弃"是错的 —— 必须一直重试，等群里来消息（或自己发一条）后自然就绪。
+        // 所以"失败就放弃"是错的 —— 要重试，等群里来消息后自然就绪。
         // 连续失败到第 4 次 → 请上层"唤醒"一下数据库（让机器人自己发条消息，
         // 微信就会写库、打开 message_0.db，轮询随即恢复）。这样**不用重启客户端**，
         // 也就不会触发"要手机确认登录"那一步。
+        // 但**必须设上限**：无限重试每 15 秒戳一次 hook，
+        // 而 hook 那侧句柄可能已经不正 → 反复 prepare → 野指针 → 微信崩
+        // （实测 2026-10-22 20:13:08 就是这个模式）。所以 6 次（约 90 秒）后硬停。
         if ((attempt === 4 || attempt % 10 === 0) && typeof this.onNeedWake === 'function') {
           try { this.onNeedWake() } catch { /* ignore */ }
         }
+        if (attempt >= 6) {
+          try { if (this.poller) this.poller._hardGiveUp = true } catch { /* ignore */ }
+          this.log('数据库轮询硬停（init 连续失败 ' + attempt + ' 次）—— 不再自动重试，'
+            + '避免反复探测把微信搞崩。恢复方式：微信重新登录 / POST /api/pollResume / 重启桥')
+          return
+        }
         const wait = attempt <= 5 ? 15000 : 60000
-        if (attempt <= 3 || attempt % 10 === 0) {
-          this.log('数据库轮询等待中就绪（第 ' + attempt + ' 次，' + (wait / 1000) + 's 后重试）：' + String(e?.message || e).slice(0, 70))
+        if (attempt <= 3 || attempt === 5) {
+          this.log('数据库轮询等待中就绪（第 ' + attempt + ' 次，' + (wait / 1000) + 's 后重试，最多 6 次）：' + String(e?.message || e).slice(0, 70))
         }
         setTimeout(() => { void startPoller(attempt + 1) }, 15000)
       }
