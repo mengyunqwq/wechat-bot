@@ -1,4 +1,4 @@
-﻿# 一键部署（Windows 10/11 x64）
+# 一键部署（Windows 10/11 x64）
 #
 # 把 DEPLOY.md 里的 8 个步骤串起来，一条命令从头装到能说话：
 #   ① 环境检查（Node / Python / Git / MSBuild）
@@ -302,16 +302,11 @@ if ($hookSource) {
   }
   Copy-Item $hookSource $dst -Force
   $sha = (Get-FileHash $dst -Algorithm SHA256).Hash.Substring(0, 8)
-  Ok "已部署：$dst（$([math]::Round((Get-Item $dst).Length/1KB,0)) KB, $sha）"
-  # 能力自检：DLL 里有没有 CDN 重放相关的字符串（眼睛能力）
-  $hasEyes = $false
-  try {
-    $bytes = [System.IO.File]::ReadAllBytes($dst)
-    $txt = [System.Text.Encoding]::ASCII.GetString($bytes)
-    $hasEyes = $txt.Contains('StartC2CDownload')
-  } catch {}
-  if ($hasEyes) { Ok 'DLL 含 CDN 重放 → 眼睛（原图/视频整片）可用' }
-  else { Warn 'DLL 不含 CDN 重放 → 眼睛不可用（识图退化为缩略图、视频退化为封面）' }
+  $sizeKB = [math]::Round((Get-Item $dst).Length / 1KB, 0)
+  Ok "已部署：$dst（$sizeKB KB, $sha）"
+  # 只提示去哪确认，不在脚本里校验具体实现细节（那些不公开）
+  Say '  眼睛能力（原图 / 视频整片）是否可用，到控制面板「👁 眼睛」页看：' 'Gray'
+  Say '    · CDN 重放 ✅ = 可用    ❌ = 该 DLL 不含此能力（识图退化为缩略图、视频退化为封面）' 'Gray'
 } else {
   Warn '跳过部署（没有可用的 DLL）'
 }
