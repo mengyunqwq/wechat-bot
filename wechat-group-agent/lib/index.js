@@ -4135,6 +4135,119 @@ let res = await callLlm(route, sys, usr, undefined)
     switch (op) {
       case 'status':
         return await client.call('status', {}, 8000)
+      case 'eyesUpload': {
+        // 面板拖入 zip → 上传 → 存到临时目录并做预检（不安装）
+        const b64 = String(a.b64 || '')
+        const name = String(a.name || 'eyes.zip').replace(/[^\w.\-\u4e00-\u9fa5]/g, '_')
+        if (!b64) return { ok: false, error: '没有收到文件内容' }
+        let buf
+        try { buf = Buffer.from(b64, 'base64') } catch { return { ok: false, error: 'base64 解码失败' } }
+        if (!buf.length) return { ok: false, error: '文件为空' }
+        if (buf.length > 32 * 1024 * 1024) return { ok: false, error: '文件太大（>32MB）' }
+        const dir = join(process.env.TEMP || 'C:\\Windows\\Temp', 'dsh-eyes-' + Date.now())
+        mkdirSync(dir, { recursive: true })
+        const zipPath = join(dir, name)
+        writeFileSync(zipPath, buf)
+        // 解压
+        try {
+          const ps = `Expand-Archive -LiteralPath '${zipPath.replace(/'/g, "''")}' -DestinationPath '${dir.replace(/'/g, "''")}' -Force`
+          execFileSync('powershell', ['-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden', '-Command', ps],
+            { stdio: 'pipe', timeout: 120000, windowsHide: true })
+        } catch (e) {
+          return { ok: false, error: '解压失败：' + String(e?.message || e).slice(0, 120) }
+        }
+        // 找 version.dll
+        let dll = null
+        const walk = (d, depth) => {
+          if (depth > 4 || dll) return
+          let ents = []
+          try { ents = readdirSync(d, { withFileTypes: true }) } catch { return }
+          for (const ent of ents) {
+            const p = join(d, ent.name)
+            if (ent.isDirectory()) walk(p, depth + 1)
+            else if (/^version.*\.dll$/i.test(ent.name) && !dll) dll = p
+          }
+        }
+        walk(dir, 0)
+        if (!dll) return { ok: false, error: '压缩包里没找到 version.dll' }
+        // 预检：DLL 能力
+        const dllBuf = readFileSync(dll)
+        const hasReplay = dllBuf.includes(Buffer.from('StartC2CDownload'))
+        const hasVideo = dllBuf.includes(Buffer.from('hdvideo'))
+        const { createHash } = await import('node:crypto')
+        const sha256 = createHash('sha256').update(dllBuf).digest('hex')
+        // 找文档（可选）
+        const docs = []
+        const collectDocs = (d, depth) => {
+          if (depth > 4) return
+          let ents = []
+          try { ents = readdirSync(d, { withFileTypes: true }) } catch { return }
+          for (const ent of ents) {
+            const p = join(d, ent.name)
+            if (ent.isDirectory()) collectDocs(p, depth + 1)
+            else if (/\.(md|txt)$/i.test(ent.name) && docs.length < 8) docs.push(ent.name)
+          }
+        }
+        collectDocs(dir, 0)
+        App._eyesPkg = { dir, zipPath, dll, sha256 }
+        return {
+          ok: true, zipMB: +(buf.length / 1048576).toFixed(2), sha256,
+          dllKB: Math.round(dllBuf.length / 1024),
+          hasReplay, hasVideo, usable: hasReplay && hasVideo,
+          docs, workDir: dir,
+        }
+      }
+      case 'eyesInstall': {
+        // 安装：微信必须已退出（DLL 被锁就换不了）
+        const pkg = App._eyesPkg
+        if (!pkg || !existsSync(pkg.dll)) return { ok: false, error: '没有待安装的包（先拖入 zip）' }
+        const targetDll = process.env.WECHAT_DLL || 'D:\\wxhook\\wx4110\\version.dll'
+        const targetDir = pkg.dll.replace(/\\[^\\]+$/, '')
+        // ① 微信在跑？DLL 会被锁
+        const wxRunning = (() => {
+          try {
+            const out = execFileSync('powershell', ['-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden', '-Command',
+              "(Get-Process -Name Weixin -EA SilentlyContinue | Measure-Object).Count"], { encoding: 'utf8', timeout: 15000, windowsHide: true })
+            return parseInt(String(out).trim(), 10) > 0
+          } catch { return false }
+        })()
+        if (wxRunning) return { ok: false, error: '微信还在运行 —— 请先完全退出微信（托盘右键 → 退出微信），再点安装', needExit: true }
+        // ② 备份旧 DLL
+        let backup = ''
+        if (existsSync(targetDll)) {
+          backup = targetDll + '.bak-' + new Date().toISOString().replace(/[:T]/g, '-').slice(0, 19)
+          try { copyFileSync(targetDll, backup) } catch (e) { return { ok: false, error: '备份旧 DLL 失败：' + String(e?.message || e).slice(0, 100) } }
+        }
+        // ③ 复制新 DLL
+        try { copyFileSync(pkg.dll, targetDll) } catch (e) {
+          return { ok: false, error: '写 DLL 失败（文件被占用？）：' + String(e?.message || e).slice(0, 120), backup }
+        }
+        // ④ 写重放配置（目录 = 用 DLL 所在目录下的 cdndl-replay，或沿用已有的）
+        const dirFile = process.env.WECHAT_REPLAY_DIR_FILE || join(targetDir, 'hook-cdn-replay.dir')
+        const switchFile = process.env.WECHAT_REPLAY_SWITCH_FILE || join(targetDir, 'hook-cdn-replay.on')
+        let replayDir = 'D:\\cdndl-replay'
+        try { const s = readFileSync(dirFile, 'utf8').trim(); if (s) replayDir = s } catch { /* 用默认 */ }
+        try { mkdirSync(replayDir, { recursive: true }); writeFileSync(dirFile, replayDir, 'utf8') } catch { /* ignore */ }
+        try { writeFileSync(switchFile, '', 'utf8') } catch { /* ignore */ }
+        // ⑤ 清理临时目录
+        const workDir = pkg.workDir
+        App._eyesPkg = null
+        log('[eyes] 安装完成：' + pkg.sha256.slice(0, 16) + ' → ' + targetDll)
+        return {
+          ok: true, installedTo: targetDll, backup, replayDir, dirFile, switchFile, sha256: pkg.sha256,
+          hint: 'DLL 已装好，重放已开启。现在启动微信（登录窗口按回车）即可。',
+        }
+      }
+      case 'eyesCheck': {
+        // 只检查微信是否已退出（供面板"我退出了，继续"按钮用）
+        let running = false
+        try {
+          const out = execFileSync('powershell', ['-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden', '-Command',
+            "(Get-Process -Name Weixin -EA SilentlyContinue | Measure-Object).Count"], { encoding: 'utf8', timeout: 15000, windowsHide: true })
+          running = parseInt(String(out).trim(), 10) > 0
+        } catch { /* ignore */ }
+        return { ok: true, wechatRunning: running, hasPkg: !!(App._eyesPkg && existsSync(App._eyesPkg.dll)) }
+      }
       case 'eyesInfo': {
         // 眼睛（hires provider）状态：DLL 能力 / 目录 / 开关 / 文件情况
         const dllPath = process.env.WECHAT_DLL || 'D:\\wxhook\\wx4110\\version.dll'

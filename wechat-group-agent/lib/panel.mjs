@@ -27,6 +27,7 @@ const ALLOWED_OPS = new Set([
   // 2026-10-22 新增：用量统计 / 环境诊断 / 自动更新
   'usage', 'diag', 'diagCleanHires',
   'eyesInfo', 'eyesSetDir', 'eyesToggle', 'eyesClean',
+  'eyesUpload', 'eyesInstall', 'eyesCheck',
   'checkUpdate', 'updateInfo', 'applyUpdate',
 ])
 
@@ -59,7 +60,7 @@ function html(res, body, status = 200) {
   res.end(body)
 }
 
-function readBody(req, limit = 1024 * 1024) {
+function readBody(req, limit = 24 * 1024 * 1024) {
   return new Promise((resolve, reject) => {
     let size = 0
     const chunks = []
