@@ -1,5 +1,5 @@
 {
-  "version": "1.1.2",
-  "notes": "修复轮询探测的两个 bug：① 暂停到点后硬编码探测 message_0.db（很多机器只有 message_1.db）→ 必然失败形成死循环，且会污染 hook 的句柄缓存；改成走 resolveShard 先问真实分片。② 两处退避封顶从 5 分钟统一到 10 分钟。",
-  "releasedAt": "2026-10-22"
+  "releasedAt": "2026-10-22",
+  "notes": "修复自动更新 404：readRepoVersion 把 contents API 返回的【文件 blob sha】当成了 commit sha，而 codeload.github.com/<repo>/zip/<blob sha> 只会返回 404。现在额外查 commits/main 拿真正的 commit sha，并加了格式校验与空值兜底。",
+  "version": "1.1.3"
 }

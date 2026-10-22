@@ -3909,11 +3909,20 @@ let res = await callLlm(route, sys, usr, undefined)
     const r = await ghJson(`/repos/${UPDATE_REPO}/contents/version.json`)
     const txt = Buffer.from(String(r.content || '').replace(/\n/g, ''), 'base64').toString('utf8')
     const j = JSON.parse(txt) || {}
+    // ★ 2026-10-22：r.sha 是**文件内容的 blob sha**，不能拿去 codeload 下载 zip
+    //   （codeload.github.com/<repo>/zip/<blob sha> → HTTP 404，实测 14 字节的 404 响应）。
+    //   下载必须用 **commit sha**，所以这里额外查一次 commits/main。
+    //   这是 v1.1.2 及以前「点更新就 404」的根因。
+    let sha = ''
+    try {
+      const head = await ghJson(`/repos/${UPDATE_REPO}/commits/main`)
+      sha = String(head?.sha || '')
+    } catch { /* 拿不到就留空，downloadAndExtract 里会再取一次 */ }
     return {
       version: String(j.version || '0.0.0'),
       notes: String(j.notes || ''),
       releasedAt: String(j.releasedAt || ''),
-      sha: String(r.sha || ''),
+      sha,
     }
   }
   /** semver 比较（容忍 v 前缀和位数不同）：a>b 返回 1 */
@@ -3960,6 +3969,12 @@ let res = await callLlm(route, sys, usr, undefined)
   }
   /** 下载 zip 并解压到临时目录。返回解压后的根目录 */
   async function downloadAndExtract(sha) {
+    // ★ 2026-10-22：如果传进来的 sha 为空，现取 commits/main（绝不能拿 blob sha 去 codeload）
+    if (!sha) {
+      const head = await ghJson(`/repos/${UPDATE_REPO}/commits/main`)
+      sha = String(head?.sha || '')
+    }
+    if (!/^[0-9a-f]{40}$/i.test(String(sha))) throw new Error('要下载的 commit sha 不合法：' + sha)
     const tmp = join((process.env.TEMP || process.env.TMP || 'C:\\Windows\\Temp'), 'dsh-wb-update-' + Date.now())
     mkdirSync(tmp, { recursive: true })
     const zipPath = join(tmp, 'src.zip')
