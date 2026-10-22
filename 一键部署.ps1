@@ -26,6 +26,7 @@ param(
   [string]$Dir       = '',        # 项目目录（默认=脚本所在目录）
   [string]$WeChatDir = '',        # 独立微信目录（默认识别/询问）
   [string]$HookDll   = '',        # 已有的 version.dll（给了就跳过编译）
+  [int]$DshPort      = 3080,      # DSH 的 web 端口；写进 panelUrl，插件靠它自动打开面板
   [string]$WorkDir   = '',        # hook 源码工作目录（默认 %USERPROFILE%\wxhook-src）
   [switch]$SkipHook,              # 跳过 Hook 环节（只装代码）
   [switch]$NoStart,               # 装完不启动
@@ -334,8 +335,23 @@ if (-not $cfg) {
 $exePath = Join-Path $WeChatDir 'Weixin.exe'
 if ($cfg.PSObject.Properties.Name -contains 'wechatExe') { $cfg.wechatExe = $exePath }
 else { $cfg | Add-Member -NotePropertyName wechatExe -NotePropertyValue $exePath -Force }
-$cfg | ConvertTo-Json -Depth 10 | Set-Content $cfgPath -Encoding UTF8
 Ok "wechatExe = $exePath"
+
+# 填控制面板地址 —— 这是「桥连上微信后自动打开面板」用的地址。
+# 端口必须和 `dsh web --port N` 一致。不确定就留默认 3080：
+# 插件还有一层兜底（从面板请求的 Host 头里学），写错了打开过一次也能自愈。
+$panelUrl = "http://127.0.0.1:$DshPort/wechat-bot"
+if ($cfg.PSObject.Properties.Name -contains 'panelUrl') { $cfg.panelUrl = $panelUrl }
+else { $cfg | Add-Member -NotePropertyName panelUrl -NotePropertyValue $panelUrl -Force }
+if (-not ($cfg.PSObject.Properties.Name -contains 'autoOpenPanel')) {
+  $cfg | Add-Member -NotePropertyName autoOpenPanel -NotePropertyValue $true -Force
+}
+Ok "panelUrl = $panelUrl（桥连上微信时自动打开这个地址）"
+if ($DshPort -ne 3080) {
+  Say "  [i]  你用了非默认端口 $DshPort —— 记得启动 DSH 时也给同样的端口：npx @deepseek-ai/dsh web --port $DshPort" 'Gray'
+}
+
+$cfg | ConvertTo-Json -Depth 10 | Set-Content $cfgPath -Encoding UTF8
 
 # ── 7. 启动 ─────────────────────────────────────────────────
 Step '[7/8] 启动'

@@ -376,8 +376,13 @@ AI 拿到这段指令后会自己：查环境 → 装依赖 → 复制独立微�
 ```powershell
 Copy-Item config.example.json config.json   # cmd 里也可以： copy config.example.json config.json
 notepad config.json
+```
+
 | 字段名 | 默认值（仓库实际值） | 要不要改 | 改成什么 | 不改会怎样 |
+|---|---|---|---|---|
 | `wechatExe` | `"D:\\wxhook\\wx4110\\Weixin.exe"` | **要改**（除非你正好用这个路径） | 你复制的机器人专用 `Weixin.exe` 的绝对路径 | ⚠️ **当前 wx-bridge 不读 `config.json`**，这个字段填了也不生效（只是给一键脚本/人类看的模板）。真正生效的是环境变量 `WECHAT_EXE` |
+| `panelUrl` | `"http://127.0.0.1:3080/wechat-bot"` | **建议改** | 你实际启动 DSH 的端口，例如 `"http://127.0.0.1:8080/wechat-bot"` | 插件「桥连上微信后自动打开面板」会按 3080 打开；端口不对就打不开那个页面（但打开过一次面板后插件能学到真实 host，自愈） |
+| `autoOpenPanel` | `true` | 按需 | 不想每次自动弹浏览器就设 `false` | 每次桥连上微信都会弹一个面板标签页 |
 | `apiPort` | `30001` | 一般不改 | Hook 的 HTTP 端口 | 若与其它程序冲突，改这里并同步 `WECHAT_HOOK_PORT` |
 | `cbPort` | `18998` | 一般不改 | Hook 回调端口 | 冲突时同步 `WECHAT_CB_PORT` |
 | `bridgePort` | `17300` | 一般不改 | 接入层端口（插件/MCP 连这个） | 冲突时同步 `WECHAT_BOT_PORT` |
@@ -516,8 +521,21 @@ memoryDir, logFile, dryRun
 ### 7.2 三个控制入口（各一句话 + 一个例子）
 | 入口 | 一句话 | 例子 |
 | **DSH 插件工具** | 在 DSH 里直接调工具，最完整（含自检、记忆、表情包、识图） | `wechat_bot_say(room="测试群", text="大家好，我来了")` |
+| **控制面板** | 浏览器里的图形界面，**不用敲命令** | `http://127.0.0.1:<DSH端口>/wechat-bot` —— 桥连上微信时会自动弹出来 |
 | **MCP** | 在支持 MCP 的 AI 客户端里用自然语言驱动 | 对 Claude/Cursor 说："用 wechat MCP 往测试群发一条：我上线了" |
 | **REST API** | 任何能发 HTTP 请求的脚本/程序 | `curl -X POST http://127.0.0.1:17300/api/send -H "content-type: application/json" -d "{\"room\":\"测试群\",\"text\":\"大家好\"}"` |
+
+> **给部署 AI 的硬要求（别漏）**：面板地址是 `http://127.0.0.1:<DSH端口>/wechat-bot`，
+> 端口由 `dsh web --port N` 决定，**不能写死 3080**。
+> 部署时请把实际端口写进 `config.json`：
+>
+> ```json
+> { "panelUrl": "http://127.0.0.1:<实际端口>/wechat-bot", "autoOpenPanel": true }
+> ```
+>
+> 写对了 → 微信登录成功后插件会自动打开面板；写错了 → 插件还有一层兜底
+> （用户打开过一次面板后，它会从请求的 Host 头里学真实地址）。
+> 完全不想自动弹就把 `autoOpenPanel` 设成 `false`。
 **DSH 插件工具一览**（`wechat_bot_*`）：
 | 工具 | 作用 |
 | `wechat_bot_selfcheck` | 一键全链路只读体检（12 项 ✅❌⚠️ + 修复建议） |

@@ -132,6 +132,22 @@ npx @deepseek-ai/dsh web --port 3080
 > 换了端口（比如 8080）就是 `http://127.0.0.1:8080/wechat-bot`。
 > **打开面板后，左上角会显示它自己的完整地址，点一下就能复制**，方便发给别人。
 
+**桥连上微信时自动打开面板**
+
+微信登录成功（桥连上）后，插件会用系统默认浏览器自动打开面板 —— 不用每次自己找地址。
+
+```
+地址从哪来（按优先级）：
+  ① 配置项 panelUrl        ← 一键部署会按 -DshPort 自动写好
+  ② 配置项 panelHost
+  ③ 面板自己学到的 host    ← 你打开过一次面板，它就把 Host 头记住了
+  ④ http://127.0.0.1:3080/wechat-bot（兜底）
+```
+
+**一键部署会自动写 `panelUrl`**：`-DshPort` 给多少就写多少（默认 3080）。
+
+不想弹的话，面板「🔧 高级/接入」页把 **「桥连上时自动打开面板」** 关掉即可。
+
 **它覆盖的功能**：
 
 | 能做的事 |
@@ -152,6 +168,9 @@ pwsh -ExecutionPolicy Bypass -File .\一键部署.ps1 -HookDll "D:\my-version.dl
 
 # 只装代码和依赖，不碰微信、不启动
 pwsh -ExecutionPolicy Bypass -File .\一键部署.ps1 -SkipHook -NoStart
+
+# DSH 不是跑在 3080 上？把这个端口告诉部署脚本
+pwsh -ExecutionPolicy Bypass -File .\一键部署.ps1 -DshPort 8080
 
 # 指定微信目录（不给就自动找）
 pwsh -ExecutionPolicy Bypass -File .\一键部署.ps1 -WeChatDir "D:\wxhook\wx4110"

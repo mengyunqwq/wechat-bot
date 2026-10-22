@@ -10,11 +10,19 @@
     "enabled": false,
     "webhookUrl": "",
     "botName": "蓝色大肥鱼",
-    "aliases": ["大肥鱼", "肥鱼"],
+    "aliases": [
+      "大肥鱼",
+      "肥鱼"
+    ],
     "replyProbability": 0.8,
     "minReplyGapMs": 6000,
     "maxRepliesPer10Min": 15,
     "quietHours": "23:00-08:00",
-    "quietAllow": ["at", "name"]
-  }
+    "quietAllow": [
+      "at",
+      "name"
+    ]
+  },
+  "panelUrl": "http://127.0.0.1:3080/wechat-bot",
+  "autoOpenPanel": true
 }
