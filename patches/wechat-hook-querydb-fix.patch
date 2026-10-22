@@ -802,10 +802,10 @@ index 0000000..dc4ad0f
 +}
 diff --git a/src/VoiceUploadProbe.cpp b/src/VoiceUploadProbe.cpp
 new file mode 100644
-index 0000000..a7196be
+index 0000000..99fd47d
 --- /dev/null
 +++ b/src/VoiceUploadProbe.cpp
-@@ -0,0 +1,593 @@
+@@ -0,0 +1,883 @@
 +// ─────────────────────────────────────────────────────────────────────────────
 +// VoiceUploadProbe.cpp — READ-ONLY probes on the WeChat 4.1.10.27 voice upload
 +//                        candidate call sites (found by static analysis).
@@ -818,15 +818,22 @@ index 0000000..a7196be
 +//   * no message is sent, no client state is written.
 +//
 +// Hooked RVAs (4.1.10.27, Weixin.dll):
-+//   0x???????  mars::cdn::CdnManager::StartC2CUpload            (this, param)
-+//   0x???????  CoCgiSendRequest  /cgi-bin/micromsg-bin/uploadvoice
-+//   0x???????  caller of the above (fills UploadVoiceRequest)
-+//   0x???????  caller of the above (2nd site)
-+//   0x???????  CoCgiSendRequest  /cgi-bin/micromsg-bin/uploadvoicefortrans
-+//   0x???????  voice message factory  (new 0x778, outer vt 0x????????)
-+//   0x???????  voice message inner ctor (inner vt 0x????????)
-+//   0x???????  voice send path that calls the factory
++//   0x0D84530  mars::cdn::CdnManager::StartC2CUpload            (this, param)
++//   0x52F4990  CoCgiSendRequest  /cgi-bin/micromsg-bin/uploadvoice
++//   0x52F3420  caller of the above (fills UploadVoiceRequest)
++//   0x52F73B0  caller of the above (2nd site)
++//   0x52DD5C0  CoCgiSendRequest  /cgi-bin/micromsg-bin/uploadvoicefortrans
++//   0x619A190  voice message factory  (new 0x778, outer vt 0x8DCFF98)
++//   0x619B3B0  voice message inner ctor (inner vt 0x8DD0028)
++//   0x54B02A0  voice send path that calls the factory
 +// ─────────────────────────────────────────────────────────────────────────────
++// ─────────────────────────────────────────────────────────────────────────────
++// 公开版构建（/DPUBLIC_BUILD）下整个文件为空：
++//   探针（VUPROBE）与 CDN 下载重放属于本项目自己加的扩展，公开版不包含。
++//   头文件里已提供空实现，所以调用点无需改动。
++// ─────────────────────────────────────────────────────────────────────────────
++#ifndef PUBLIC_BUILD
++
 +#include "VoiceUploadProbe.h"
 +
 +#include <windows.h>
@@ -844,9 +851,9 @@ index 0000000..a7196be
 +{
 +    // ── tuning ──────────────────────────────────────────────────────────────
 +    static const int kMaxEventsPerHook = 40;   // stop dumping after N hits
-+    static const size_t kMaxBytesPerEvent = 6144;
-+    static const size_t kRegionBytes = 0x400;  // raw hex window per argument
-+    static const size_t kHexBytes = 0x60;      // hex-dumped prefix
++    static const size_t kMaxBytesPerEvent = 65536;   // 2026-10-21: 6144 太小，a1 一个大结构体就把额度吃光，看不到 a2 后半段
++    static const size_t kRegionBytes = 0x400;  // raw hex window per argument（StartC2CDownload 的 param 有 0x3A0，够用）
++    static const size_t kHexBytes = 0x400;     // 2026-10-21: 0x60 太小，看不到 param+0x380 的 std::string（filekey）
 +    static const int kMaxPtrFollow = 24;       // 1-level pointer chase budget
 +
 +    // ── state ───────────────────────────────────────────────────────────────
@@ -1130,7 +1137,12 @@ index 0000000..a7196be
 +                if (utf16.find(".silk") != std::string::npos || utf16.find('\\') != std::string::npos
 +                    || utf16.find(".amr") != std::string::npos) interesting = true;
 +                if (ascii.find("voice") != std::string::npos || utf16.find("voice") != std::string::npos) interesting = true;
-+                if (!interesting) continue;
++                // ★ 2026-10-21：原来只打「含反斜杠/含 .silk/voice」的指针，
++                //   导致 CDN 下载 param 里的 194 字符 blob / 37 字符 filekey / 32 字符 aeskey 被跳过。
++                //   现在：任何 >=16 字符的可打印内容也打印。
++                if (!interesting && ascii.size() < 16 && utf16.size() < 16) continue;
++                // 原规则保留在下面（作为「必定打印」的判定）：
++                // if (!interesting) continue;
 +
 +                ++followed;
 +                char b[640];
@@ -1192,6 +1204,9 @@ index 0000000..a7196be
 +    }
 +
 +    // ── paths ───────────────────────────────────────────────────────────────
++    static char g_replayMarker[MAX_PATH] = { 0 };
++    static char g_replayDir[MAX_PATH] = { 0 };
++
 +    static void initPaths()
 +    {
 +        if (g_pathsReady) return;
@@ -1201,8 +1216,239 @@ index 0000000..a7196be
 +        if (slash) *(slash + 1) = 0; else exe[0] = 0;
 +        _snprintf_s(g_logPath, sizeof(g_logPath), _TRUNCATE, "%svoice-upload-probe.log", exe);
 +        _snprintf_s(g_markerPath, sizeof(g_markerPath), _TRUNCATE, "%shook-vuprobe.on", exe);
++        _snprintf_s(g_replayMarker, sizeof(g_replayMarker), _TRUNCATE, "%shook-cdn-replay.on", exe);
++        _snprintf_s(g_replayDir, sizeof(g_replayDir), _TRUNCATE, "D:\\cdndl-replay");
++        char dirFile[MAX_PATH] = { 0 };
++        _snprintf_s(dirFile, sizeof(dirFile), _TRUNCATE, "%shook-cdn-replay.dir", exe);
++        HANDLE h = CreateFileA(dirFile, GENERIC_READ, FILE_SHARE_READ, nullptr,
++                               OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
++        if (h != INVALID_HANDLE_VALUE) {
++            char buf[MAX_PATH] = { 0 };
++            DWORD rd = 0;
++            ReadFile(h, buf, sizeof(buf) - 1, &rd, nullptr);
++            CloseHandle(h);
++            if (rd > 0) {
++                for (DWORD i = 0; i < rd; ++i) if (buf[i] == '\r' || buf[i] == '\n') { buf[i] = 0; break; }
++                if (buf[0]) _snprintf_s(g_replayDir, sizeof(g_replayDir), _TRUNCATE, "%s", buf);
++            }
++        }
++        CreateDirectoryA(g_replayDir, nullptr);
 +        g_pathsReady = true;
 +    }
++
++    // ── CDN download replay（搭便车：微信自己下载时，用同一份活 param 再调一次）──
++    static bool replayEnabled()
++    {
++        if (g_replayMarker[0] == 0) return false;
++        DWORD a = GetFileAttributesA(g_replayMarker);
++        return a != INVALID_FILE_ATTRIBUTES;
++    }
++
++    static const int kReplaySlots = 8;
++    static char g_replayParam[kReplaySlots][0x400];
++    static char g_replayPath[kReplaySlots][512];
++    static std::atomic<int> g_replaySeq{ 0 };
++    typedef uint64_t (*CdnDl_t)(uint64_t, uint64_t, uint64_t, uint64_t,
++                                uint64_t, uint64_t, uint64_t, uint64_t);
++    static CdnDl_t g_origDl = nullptr;      // 原始 StartC2CDownload（在 installHooks 里赋值）
++
++    // ★ 原地重放：不复制 param，只在原对象上临时改「输出路径」，调一次，再恢复。
++    //   为什么：上一次「复制 param」重放触发 0xC0000005（副本里的回调对象指针失效）。
++    //   原地修改时其它字段全是调用方活着的对象，安全得多。
++    // ── 安全版重放（R14）：只对新消息、每图一次、限流、去重、有冷却 ──────────────
++    static uint64_t g_lastReplayTick = 0;
++    static int      g_replayBurst = 0;
++    static uint64_t g_burstStart = 0;
++    static uint64_t g_cooldownUntil = 0;
++    static char     g_lastName[192] = { 0 };
++    static uint64_t g_lastNameAt = 0;
++
++    static long long nowUnixSafe()
++    {
++        FILETIME ft; GetSystemTimeAsFileTime(&ft);
++        ULARGE_INTEGER u; u.LowPart = ft.dwLowDateTime; u.HighPart = ft.dwHighDateTime;
++        return (long long)((u.QuadPart / 10000000ULL) - 11644473600ULL);
++    }
++
++    static void replayInline(uint64_t thisp, uint64_t param, uint64_t a3,
++                             uint64_t a4, uint64_t a5, uint64_t a6, uint64_t a7, uint64_t a8)
++    {
++        if (!replayEnabled()) return;
++        if (param < 0x10000 || !readable((const void*)param, 0x100)) return;
++        if (!g_origDl) return;
++
++        // ── 从任务名尾部解析时间戳：<roomId>_<unix秒>_<localId>_<seq> ──
++        char name[192] = { 0 };
++        const char* pname = *(const char**)(param + 0x50);
++        size_t nlen = *(const size_t*)(param + 0x60);
++        if (!pname || nlen == 0 || nlen >= sizeof(name) - 1 || !readable(pname, 1)) return;
++        for (size_t i = 0; i < nlen; ++i) {
++            char c = pname[i];
++            if (c == '\\' || c == '/' || c == ':' || c == '*' || c == '?' || c == '"' || c == '<' || c == '>' || c == '|') c = '_';
++            if (!c) { name[i] = 0; break; }
++            name[i] = c;
++        }
++        name[nlen] = 0;
++
++        char work[192];
++        _snprintf_s(work, sizeof(work), _TRUNCATE, "%s", name);
++        char* pSeq = strrchr(work, '_');   if (!pSeq) return;
++        *pSeq = 0;
++        char* pLoc = strrchr(work, '_');   if (!pLoc) return;
++        *pLoc = 0;
++        char* pTs = strrchr(work, '_');    if (!pTs) return;
++        long long msgTs = _strtoi64(pTs + 1, nullptr, 10);
++
++        // ① 只对新消息生效（登录/刷新会重下历史图，必须放过）
++        long long now = nowUnixSafe();
++        if (msgTs <= 0) { return; }
++        if (now - msgTs > 60) {
++            { char m[512]; _snprintf_s(m, sizeof(m), _TRUNCATE, "[VUPROBE] replay skip(old %llds) %s\n", now - msgTs, name); rawWrite(m, strlen(m)); }
++            return;
++        }
++
++        // ② 判别图片 / 视频，决定目标档位
++        //    实测语义：图片 3=缩略图 / 2=原图；视频 3=封面 / 4=整段视频
++        uint32_t saveType = *(uint32_t*)(param + 0xD0);
++        char origPath[512] = { 0 };
++        {
++            const char* pp = *(const char**)(param + 0xB0);
++            size_t np = *(const size_t*)(param + 0xC0);
++            if (pp && np > 0 && np < sizeof(origPath) - 1 && readable(pp, 1)) {
++                size_t c = np < sizeof(origPath) - 1 ? np : sizeof(origPath) - 1;
++                memcpy(origPath, pp, c); origPath[c] = 0;
++            }
++        }
++        bool isVideo = (strstr(origPath, "\\Video") != nullptr) || (strstr(origPath, "\\video") != nullptr);
++        uint32_t targetType = isVideo ? 4u : 2u;
++        if (saveType == targetType) return;   // 客户端已在取目标档位
++
++        // ③ 限流 / 去重 / 冷却
++        uint64_t t = GetTickCount64();
++        if (t < g_cooldownUntil) { return; }
++        if (t - g_burstStart > 60000ULL) { g_replayBurst = 0; g_burstStart = t; }
++        if (g_replayBurst >= 10) {
++            g_cooldownUntil = t + 60000ULL;
++            { char m[512]; _snprintf_s(m, sizeof(m), _TRUNCATE, "[VUPROBE] replay cooldown(1min) burst=%d %s\n", g_replayBurst, name); rawWrite(m, strlen(m)); }
++            g_replayBurst = 0;
++            return;
++        }
++        if (t - g_lastReplayTick < 2000ULL) return;                       // 2 秒内最多一次
++        if (g_lastName[0] && strcmp(g_lastName, name) == 0 && t - g_lastNameAt < 60000ULL) return; // 同一条消息只补一次
++
++        // ④ 执行：只补一次 type=2（原图档）
++        g_lastReplayTick = t;
++        g_replayBurst++;
++        _snprintf_s(g_lastName, sizeof(g_lastName), _TRUNCATE, "%s", name);
++        g_lastNameAt = t;
++
++        uint64_t savePath = *(uint64_t*)(param + 0xB0);
++        uint64_t saveSize = *(uint64_t*)(param + 0xC0);
++        uint64_t saveCap = *(uint64_t*)(param + 0xC8);
++
++        int slot = g_replaySeq.fetch_add(1) % kReplaySlots;
++        char* path = g_replayPath[slot];
++        _snprintf_s(path, 512, _TRUNCATE, "%s\\%s_%s_s%d.dat", g_replayDir, name, isVideo ? "hdvideo" : "hd", slot);
++
++        *(uint64_t*)(param + 0xB0) = (uint64_t)path;
++        *(uint64_t*)(param + 0xC0) = (uint64_t)strlen(path);
++        *(uint64_t*)(param + 0xC8) = (uint64_t)strlen(path);
++        *(uint32_t*)(param + 0xD0) = targetType;
++
++        DWORD exc = 0;
++        __try {
++            g_origDl(thisp, param, a3, a4, a5, a6, a7, a8);
++        }
++        __except (EXCEPTION_EXECUTE_HANDLER) {
++            exc = GetExceptionCode();
++        }
++
++        *(uint64_t*)(param + 0xB0) = savePath;
++        *(uint64_t*)(param + 0xC0) = saveSize;
++        *(uint64_t*)(param + 0xC8) = saveCap;
++        *(uint32_t*)(param + 0xD0) = saveType;
++
++        { char m[512]; _snprintf_s(m, sizeof(m), _TRUNCATE, "[VUPROBE] replay ok(type=%u%s exc=0x%08X) %s\n", (unsigned)targetType, isVideo ? " video" : "", (unsigned)exc, path); rawWrite(m, strlen(m)); }
++    }
++
++    static void doReplay(uint64_t thisp, uint64_t param, uint64_t a3)
++    {
++        {
++            char dbg[256];
++            _snprintf_s(dbg, sizeof(dbg), _TRUNCATE,
++                        "[VUPROBE] replay-check enabled=%d this=0x%llX param=0x%llX dir=%s\n",
++                        replayEnabled() ? 1 : 0, (unsigned long long)thisp,
++                        (unsigned long long)param, g_replayDir);
++            rawWrite(dbg, strlen(dbg));
++        }
++        char step[256];
++        if (!replayEnabled()) return;
++        if (param < 0x10000) return;
++        bool rdo = readable((const void*)param, 1);
++        _snprintf_s(step, sizeof(step), _TRUNCATE, "[VUPROBE] step1 readable=%d origDl=%p\n", rdo ? 1 : 0, (void*)g_origDl);
++        rawWrite(step, strlen(step));
++        if (!rdo) return;
++
++        int slot = g_replaySeq.fetch_add(1) % kReplaySlots;
++        char* pb = g_replayParam[slot];
++        bool cok = sehCopy((const unsigned char*)param, (unsigned char*)pb, 0x400);
++        _snprintf_s(step, sizeof(step), _TRUNCATE, "[VUPROBE] step2 slot=%d copy=%d\n", slot, cok ? 1 : 0);
++        rawWrite(step, strlen(step));
++        if (!cok) return;
++
++        char name[160] = { 0 };
++        const char* pname = *(const char**)(pb + 0x50);
++        size_t nlen = *(const size_t*)(pb + 0x60);
++        if (pname && nlen > 0 && nlen < 150 && readable(pname, 1)) {
++            size_t i = 0;
++            for (; i < nlen; ++i) {
++                char c = pname[i];
++                if (c == '\\' || c == '/' || c == ':' || c == '*' || c == '?' || c == '"' || c == '<' || c == '>' || c == '|') c = '_';
++                name[i] = c;
++            }
++            name[i] = 0;
++        }
++        if (name[0] == 0) _snprintf_s(name, sizeof(name), _TRUNCATE, "cdn_%llu", (unsigned long long)GetTickCount64());
++
++        int type = *(const int*)(pb + 0xD0);
++        // ★ 任务名必须唯一：用微信自己的名字会冲突（CDN 框架按名字登记任务），追加 _r<seq>
++        int seqNo = g_replaySeq.load();
++        char uniq[200];
++        _snprintf_s(uniq, sizeof(uniq), _TRUNCATE, "%s_r%d", name, seqNo);
++        static char s_nameBuf[kReplaySlots][256];
++        char* nb = s_nameBuf[slot];
++        _snprintf_s(nb, 256, _TRUNCATE, "%s", uniq);
++        // 替换 +0x50 的 std::string（ptr/size/cap）
++        *(char**)(pb + 0x50) = nb;
++        *(size_t*)(pb + 0x60) = strlen(nb);
++        *(size_t*)(pb + 0x68) = strlen(nb);
++
++        char* path = g_replayPath[slot];
++        _snprintf_s(path, 512, _TRUNCATE, "%s\\%s_t%d_s%d.dat", g_replayDir, name, type, slot);
++
++        // 替换输出路径 std::string at +0xB0（ptr / size / capacity）
++        *(char**)(pb + 0xB0) = path;
++        *(size_t*)(pb + 0xC0) = strlen(path);
++        *(size_t*)(pb + 0xC8) = strlen(path);
++
++        _snprintf_s(step, sizeof(step), _TRUNCATE,
++                    "[VUPROBE] step3 name=%s type=%d path=%s\n", name, type, path);
++        rawWrite(step, strlen(step));
++        if (g_origDl) {
++            DWORD exc = 0;
++            __try {
++                g_origDl(thisp, (uint64_t)pb, a3, 0, 0, 0, 0, 0);
++            }
++            __except (EXCEPTION_EXECUTE_HANDLER) {
++                exc = GetExceptionCode();
++            }
++            char msg[512];
++            _snprintf_s(msg, sizeof(msg), _TRUNCATE,
++                        "[VUPROBE] CDN replay → type=%d exc=0x%08X name=%s\n", type, exc, nb);
++            rawWrite(msg, strlen(msg));
++        }
++    }
++
 +
 +    // ── probe bodies (NO __try here: these may use C++ objects) ─────────────
 +    static void probeEnter(int idx, const char* name,
@@ -1270,20 +1516,47 @@ index 0000000..a7196be
 +    VU_DEF_HOOK(5, "VoiceMsgFactory",      false, true)
 +    VU_DEF_HOOK(6, "VoiceInnerCtor",       false, true)
 +    VU_DEF_HOOK(7, "VoiceSendPath",        true,  false)
++    // ★ 2026-10-21 自定义 detour：StartC2CDownload（探测 + 可选「搭便车重放」）
++    //   先让微信自己的调用照常执行，再（若开启 hook-cdn-replay.on）用同一份活 param 换个输出路径再调一次。
++    static uint64_t detour_8(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4,
++                             uint64_t a5, uint64_t a6, uint64_t a7, uint64_t a8)
++    {
++        bool probeOn = enabled();
++        bool replayOn = replayEnabled();
++        if (!probeOn && !replayOn) {
++            return g_o[8] ? g_o[8](a1, a2, a3, a4, a5, a6, a7, a8) : 0;
++        }
++        if (probeOn) {
++            bool slot = takeSlot(8);
++            if (slot) {
++                __try { probeEnter(8, "StartC2CDownload ENTER", a1, a2, a3, a4, a5); }
++                __except (EXCEPTION_EXECUTE_HANDLER) {
++                    OutputDebugStringA("[VUPROBE] StartC2CDownload ENTER probe exception\n");
++                }
++            }
++        }
++        // ★ 原地重放：先改路径调一次（落我们目录），再恢复原值走微信自己的调用
++        if (replayOn) {
++            __try { replayInline(a1, a2, a3, a4, a5, a6, a7, a8); }
++            __except (EXCEPTION_EXECUTE_HANDLER) {
++                OutputDebugStringA("[VUPROBE] CDN replayInline exception\n");
++            }
++        }
++        uint64_t ret = g_o[8] ? g_o[8](a1, a2, a3, a4, a5, a6, a7, a8) : 0;
++        return ret;
++    }
 +
 +    struct HookDef { int idx; const char* name; uint64_t rva; void* detour; };
-+    // 注意：这里的 RVA 是【按微信 4.1.10.27 实测得到】的值，属于使用者需要自己解析的部分。
-+    // 本补丁不提供这些地址（避免绑定特定版本）；填 0 表示"该 hook 不安装"，
-+    // 探针会打印 FAILED 但不影响任何功能。/Debug/VuProbe 属于调试探针，可整体忽略。
 +    static const HookDef kHooks[] = {
 +        { 0, "StartC2CUpload",        0ULL, (void*)&detour_0 },
 +        { 1, "CgiUploadVoice",        0ULL, (void*)&detour_1 },
-+        { 2, "CgiUploadVoicePrep",    0ULL, (void*)&detour_2 },
-+        { 3, "CgiUploadVoicePrep2",   0ULL, (void*)&detour_3 },
-+        { 4, "CgiUploadVoiceForTrans",0ULL, (void*)&detour_4 },
-+        { 5, "VoiceMsgFactory",       0ULL, (void*)&detour_5 },
++        { 2, "CgiUploadVoicePrep",        0ULL, (void*)&detour_2 },
++        { 3, "CgiUploadVoicePrep2",        0ULL, (void*)&detour_3 },
++        { 4, "CgiUploadVoiceForTrans",        0ULL, (void*)&detour_4 },
++        { 5, "VoiceMsgFactory",        0ULL, (void*)&detour_5 },
 +        { 6, "VoiceInnerCtor",        0ULL, (void*)&detour_6 },
-+        { 7, "VoiceSendPath",         0ULL, (void*)&detour_7 },
++        { 7, "VoiceSendPath",        0ULL, (void*)&detour_7 },
++        { 8, "StartC2CDownload",        0ULL, (void*)&detour_8 },
 +    };
 +
 +    static void installHooks()
@@ -1300,9 +1573,24 @@ index 0000000..a7196be
 +        std::string line = "[VUPROBE] installing read-only probes:\n";
 +        for (int i = 0; i < g_hookCount; ++i) {
 +            const HookDef& h = kHooks[i];
++
++            // ★ 2026-10-22：RVA == 0 表示这条 hook 在**公开版补丁里被刻意清零**（黑盒边界，
++            //   kHooks 表里那些 0ULL 就是）。绝不能拿 0 去算地址 —— 那是 PE 头（"MZ"），
++            //   MinHook 可能真的在那里下钩子，之后微信执行到就崩。
++            //   直接跳过并标出来，让自行编译的人知道这是"故意关掉的"，不是安装失败。
++            if (h.rva == 0) {
++                line += "    ";
++                line += h.name;
++                line += "  (disabled in public build)\n";
++                continue;
++            }
++
 +            void* target = (void*)((uintptr_t)g_hWeixinDll + h.rva);
 +            MH_STATUS c = MH_CreateHook(target, h.detour, (LPVOID*)&g_o[h.idx]);
 +            MH_STATUS e = (c == MH_OK) ? MH_EnableHook(target) : c;
++            if (c == MH_OK && e == MH_OK && h.idx == 8) {
++                g_origDl = (CdnDl_t)g_o[8];      // 供 doReplay 调用原始函数
++            }
 +            char b[192];
 +            _snprintf_s(b, sizeof(b), _TRUNCATE, "    %-22s Weixin.dll+0x%llX  %s\n",
 +                        h.name, (unsigned long long)h.rva,
@@ -1399,6 +1687,9 @@ index 0000000..a7196be
 +        return j;
 +    }
 +}
++
++#endif // !PUBLIC_BUILD
+
 diff --git a/src/http_routes.cpp b/src/http_routes.cpp
 index 829de9b..8dd58a4 100644
 --- a/src/http_routes.cpp
@@ -3903,7 +4194,7 @@ index 037b10d..1f9d4ae 100644
 -</Project>
 +</Project>
 diff --git a/xdb/db_mgr.cpp b/xdb/db_mgr.cpp
-index 60bf5ba..74b30d4 100644
+index 60bf5ba..ea3ae8e 100644
 --- a/xdb/db_mgr.cpp
 +++ b/xdb/db_mgr.cpp
 @@ -1,8 +1,1615 @@
@@ -5636,7 +5927,7 @@ index 60bf5ba..74b30d4 100644
  		rdata = execute((sqlite3*)dbHandle, sql);
  		return rdata;
  	}
-@@ -182,72 +1850,367 @@ namespace xmgr {
+@@ -182,72 +1850,382 @@ namespace xmgr {
  		return backup(pExistDbHandle, out_path);
  	}
  
@@ -5831,8 +6122,23 @@ index 60bf5ba..74b30d4 100644
 +			db_registry::Entry e;
 +			bool trusted = false;
 +			if (db_registry::entryByHandle((void*)h, e)) {
-+				// 可信 = 没连续失败过 且 最近 5 分钟有活动（tick 新鲜说明它真在被用）
-+				trusted = (e.fail < 2) && (db_registry::nowMs() - e.tick < 300000);
++				// ★ 2026-10-22 修（第二次）：tick 是「open/prepare 入口时间」，**不是**
++				//   「上次成功读的时间」。低频访问的库（contact.db / contact_fts.db 只在
++				//   微信启动时 open 一次、或插件每 5 分钟读一次）tick 必然老化到 5 分钟，
++				//   于是被判成"死句柄" → retireHandle 立墓碑 → 该库**永久**读不到，
++				//   直到微信重新 open。实测：open(v1) hook 只是让它"第一次能登记"，
++				//   救不了后续被判死（22:41 又报 get database handle contact.db failed）。
++				//
++				//   新判据（分两级）：
++				//     · fail 计数是硬条件（连续真失败 ≥2 就真的不可信）
++				//     · tick 老化时**不直接判死**，先 SEH 验名字：
++				//       verifyName → safeDbName → sehDbFilename，全程有 SEH，
++				//       对已释放的野指针只会返回 false，绝不会崩。
++				//   这样既能挡住真野指针，又不会误杀活着的冷门库。
++				trusted = (e.fail < 2);
++				if (trusted && (db_registry::nowMs() - e.tick >= 300000)) {
++					trusted = db_registry::verifyName((void*)h, dbname);
++				}
 +			}
 +			if (trusted) {
 +				db_registry::g_hitRegistry.fetch_add(1, std::memory_order_relaxed);
@@ -6051,6 +6357,7 @@ index 60bf5ba..74b30d4 100644
 +
 +
 +}
+
 diff --git a/xdb/db_mgr.h b/xdb/db_mgr.h
 index 76c9d07..de796fb 100644
 --- a/xdb/db_mgr.h

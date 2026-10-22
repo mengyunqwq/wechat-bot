@@ -635,7 +635,7 @@ const namesFile = join(dirname(memoryDir), 'members.json')
   let namesLogged = ''
 
   async function refreshNameCaches() {
-    if ((roomNameCache.size || contactNameCache.size) && Date.now() - namesAt < 5 * 60_000) return roomNameCache
+    if ((roomNameCache.size || contactNameCache.size) && Date.now() - namesAt < 2 * 60_000) return roomNameCache
     if (namesFailAt && Date.now() - namesFailAt < 60_000) return roomNameCache
     try {
       const ac = new AbortController()

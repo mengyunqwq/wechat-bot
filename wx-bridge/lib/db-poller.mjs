@@ -402,7 +402,12 @@ export class DbPoller {
     // 日志还显示"就绪"，但一条消息都收不到（实测踩过）。
     {
       const now = Date.now()
-      if (!this._lastReinitAt || now - this._lastReinitAt > 300000) {
+      // ★ 2026-10-22：5 分钟 → 2 分钟。
+        // 为什么：DLL 的 trusted 判断以前拿 tick（open 时间）判死，冷门库
+        // （contact.db 只在这里被读）tick 老化到 5 分钟就被 retire → 永久失效。
+        // DLL 侧已改成"tick 老化先 SEH 验名字"，但保活仍然必要：
+        // 让 tick 永远新鲜，连 verifyName 那次开销都省掉。
+        if (!this._lastReinitAt || now - this._lastReinitAt > 120000) {
         this._lastReinitAt = now
         const oldIds = new Map()
         for (const [t, info] of this.tables) oldIds.set(t, info.lastId)
