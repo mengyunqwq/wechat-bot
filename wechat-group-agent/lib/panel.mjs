@@ -10,7 +10,7 @@
  *
  * 前端是 panel/index.html 单文件（内联 CSS/JS，零构建）；本文件只做路由 + JSON API。
  */
-import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, readSync, statSync } from 'node:fs'
+import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, readSync, renameSync, statSync, unlinkSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -143,14 +143,34 @@ export function setupPanel(ctx, api) {
     }
   }
 
+  // 审计日志轮转：超 5MB 滚一份，留 2 份（panel-audit.log.1/.2）。
+  // 这个文件以前无上限增长（实测到过 1.7MB 且没人清理）。
+  const AUDIT_MAX_BYTES = 5 * 1024 * 1024
+  const AUDIT_KEEP = 2
+  let auditBytes = -1
   const audit = (req, op, detail) => {
     try {
       const file = join(dirname(api.configFile), 'panel-audit.log')
       mkdirSync(dirname(file), { recursive: true })
-      appendFileSync(file, JSON.stringify({
+      if (auditBytes < 0) { try { auditBytes = statSync(file).size } catch { auditBytes = 0 } }
+      if (auditBytes >= AUDIT_MAX_BYTES) {
+        for (let i = AUDIT_KEEP; i >= 1; i--) {
+          const src = i === 1 ? file : file + '.' + (i - 1)
+          const dst = file + '.' + i
+          try {
+            if (!existsSync(src)) continue
+            if (i === AUDIT_KEEP && existsSync(dst)) unlinkSync(dst)
+            renameSync(src, dst)
+          } catch { /* ignore */ }
+        }
+        auditBytes = 0
+      }
+      const line = JSON.stringify({
         at: new Date().toISOString(), ip: maskIp(req), ua: String(req.headers['user-agent'] || '').slice(0, 120),
         op, detail,
-      }) + '\n')
+      }) + '\n'
+      appendFileSync(file, line)
+      auditBytes += Buffer.byteLength(line, 'utf8')
     } catch { /* ignore */ }
   }
 

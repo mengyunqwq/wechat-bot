@@ -574,11 +574,37 @@ const namesFile = join(dirname(memoryDir), 'members.json')
     let lastTextRoute = null
   let stopped = false
 
+  // 日志轮转：超过 5MB 就滚一份，最多留 3 份（plugin.log.1 ~ .3，更老的删掉）。
+  // 为什么必须做：这个文件之前无上限增长，历史上有过 370MB 的桥日志没人管。
+  const LOG_MAX_BYTES = 5 * 1024 * 1024
+  const LOG_KEEP = 3
+  let logBytes = -1               // -1 = 还没测过；第一次写日志时 stat 一次真实大小
+  function rotateLogIfNeeded() {
+    try {
+      if (logBytes < 0) {
+        try { logBytes = statSync(logFile).size } catch { logBytes = 0 }
+      }
+      if (logBytes < LOG_MAX_BYTES) return
+      for (let i = LOG_KEEP; i >= 1; i--) {
+        const src = i === 1 ? logFile : logFile + '.' + (i - 1)
+        const dst = logFile + '.' + i
+        try {
+          if (!existsSync(src)) continue
+          if (i === LOG_KEEP && existsSync(dst)) unlinkSync(dst)   // 最老的那份丢掉
+          renameSync(src, dst)
+        } catch { /* 单个失败不影响继续 */ }
+      }
+      logBytes = 0
+    } catch { /* ignore */ }
+  }
+
   function log(...args) {
     const line = '[' + new Date().toISOString() + '] ' + args.map(String).join(' ')
     try {
       mkdirSync(dirname(logFile), { recursive: true })
+      rotateLogIfNeeded()
       appendFileSync(logFile, line + '\n')
+      logBytes += Buffer.byteLength(line, 'utf8') + 1
     } catch { /* ignore */ }
     try { ctx.logger?.info?.(`[${SHORT}] ` + args.map(String).join(' ')) } catch { /* ignore */ }
   }
