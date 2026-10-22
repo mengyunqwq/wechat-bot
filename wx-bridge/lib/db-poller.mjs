@@ -77,10 +77,40 @@ export class DbPoller {
     this._pauseMs = 0           // 本次暂停时长（日志用）
     this._backoffMs = 60000     // 下次暂停时长（60s → 120s → 240s → 300s 封顶）
     this._lastReadErr = ''
+    // ── 硬闸：探测连续失败到一定轮数就彻底停，不再自己重试 ──────────────
+    //  为什么必须加：DLL 的 trusted-handle 判断会把手柄 retire 掉，
+    //  之后 searchDatabases 重扫又可能拿到不正的句柄 → 桥反复探测 → 野指针 → 微信崩。
+    //  实测 2026-10-22 20:13:08 就是这么崩的（和 16:43 同款）。
+    //  放下硬闸后只接受这几种恢复：
+    //    · 微信重新登录（login 事件 → resume()）
+    //    · 手动 resume()（POST /api/pollResume）
+    //    · 重启桥
+    this._hardGiveUp = false    // true = 已彻底停探测，一次都不碰微信
+    this._probeFailRounds = 0   // 连续"暂停到点后探测仍失败"的轮数
   }
 
-  /** 当前是否处于"暂停轮询"窗口 */
-  paused() { return this._pauseUntil > 0 && Date.now() < this._pauseUntil }
+  /** 硬闸是否已放下 */
+  hardStopped() { return this._hardGiveUp }
+
+  /**
+   * 手动/事件恢复：清掉硬闸和所有退避状态。
+   * 调用方：login 事件、POST /api/pollResume。
+   */
+  resume(reason = '') {
+    const was = this._hardGiveUp
+    this._hardGiveUp = false
+    this._probeFailRounds = 0
+    this._consecFail = 0
+    this._pauseUntil = 0
+    this._pauseMs = 0
+    this._backoffMs = 60000
+    this._lastReinitAt = 0      // 强制下一轮重扫会话表
+    if (was) this.log('轮询恢复（' + (reason || '手动') + '）—— 硬闸已解除，下一轮重新探测')
+    else if (reason) this.log('轮询状态重置（' + reason + '）')
+  }
+
+  /** 当前是否处于"暂停轮询"窗口（含硬闸） */
+  paused() { return this._hardGiveUp || (this._pauseUntil > 0 && Date.now() < this._pauseUntil) }
 
   /** 暂停剩余秒数（0 = 没暂停） */
   pauseLeftSec() { return this.paused() ? Math.ceil((this._pauseUntil - Date.now()) / 1000) : 0 }
@@ -345,11 +375,23 @@ export class DbPoller {
         if (!shard) throw new Error('消息库分片暂不可用')
         this._noteReadOk()                       // 会打"轮询恢复"
       } catch (e) {
+        // 探测又失败：累计轮数，到 3 轮就放硬闸 —— 彻底不再碰微信
+        this._probeFailRounds++
+        if (this._probeFailRounds >= 3) {
+          this._hardGiveUp = true
+          this._pauseUntil = 0
+          this.stats.pauses++
+          this.log('轮询彻底停止（探测连续失败 ' + this._probeFailRounds + ' 轮）'
+            + ' —— 不再自动重试，避免反复探测把微信搞崩。'
+            + '恢复方式：微信重新登录 / POST /api/pollResume / 重启桥。最后错误：'
+            + String(e?.message || e).slice(0, 120))
+          return 0
+        }
         this._pauseMs = this._backoffMs
         this._pauseUntil = Date.now() + this._pauseMs
         this._backoffMs = Math.min(this._backoffMs * 2, 600000)
         this.stats.pauses++
-        this.log(`轮询暂停（探测仍失败，${Math.round(this._pauseMs / 1000)} 秒后重试）：`
+        this.log(`轮询暂停（探测仍失败 ${this._probeFailRounds}/3，${Math.round(this._pauseMs / 1000)} 秒后重试）：`
           + String(e?.message || e).slice(0, 120))
         return 0
       }

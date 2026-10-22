@@ -140,7 +140,13 @@ let ensureWcf = () => {}
 
 const events = {
   started: (p) => { log('started', JSON.stringify(p)); broadcast({ t: 'started', ...p }) },
-  login: (p) => { log('login self=' + p.self); broadcast({ t: 'login', ...p }) },
+  login: (p) => {
+    log('login self=' + p.self)
+    // 微信刚登录 → 客户端是新起的，DB 句柄状态全变了。
+    // 如果之前因为探测失败放下了硬闸，这里解除（否则会永远收不到消息）。
+    try { bridge.poller?.resume?.('微信重新登录') } catch { /* ignore */ }
+    broadcast({ t: 'login', ...p })
+  },
   logout: (p) => {
     log('logout')
     broadcast({ t: 'logout', ...p })
@@ -373,6 +379,12 @@ async function handle(op, a = {}) {
   switch (op) {
     case 'status':
       return { ...bridge.status(), startedAt, counters, uptimeSec: Math.round((Date.now() - startedAt) / 1000) }
+    case 'pollResume': {
+      // 手动解除轮询硬闸（探测连续失败 3 轮后会自己停，防把微信探测崩）
+      try { bridge.poller?.resume?.('手动 /api/pollResume') } catch { /* ignore */ }
+      const p = bridge.poller
+      return { ok: true, hardStopped: typeof p?.hardStopped === 'function' ? p.hardStopped() : false }
+    }
     case 'rooms':
       return bridge.rooms()
     case 'members': {
