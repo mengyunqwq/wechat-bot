@@ -815,7 +815,11 @@ const namesFile = join(dirname(memoryDir), 'members.json')
   /** 面板每次收到请求时把自己的 host 报回来，这样端口不是 3080 也能猜对 */
   function notePanelHost(host) {
     const h = String(host || '').trim()
-    if (h && h !== panelHostSeen) panelHostSeen = h
+    if (h && h !== panelHostSeen) {
+      panelHostSeen = h
+      // 打一条日志，方便验证「端口不是 3080 时能不能自愈」这条链路
+      log('面板 host 已记录：' + h + '（下次自动打开面板会用它）')
+    }
   }
   async function maybeOpenPanel() {
     if (panelAutoOpened) return
