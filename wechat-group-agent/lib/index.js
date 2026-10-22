@@ -776,6 +776,40 @@ const namesFile = join(dirname(memoryDir), 'members.json')
     globalThis.__WECHAT_BOT_CLIENT__ = client
   } catch { /* ignore */ }
 
+  // ── 桥连上微信 → 自动打开控制面板 ─────────────────────────────
+  // 用户要求：「桥开了自动打开面板」。
+  // 为什么放插件里而不是桥里：桥不知道 DSH 的端口（那是 dsh web --port N 的参数），
+  // 而插件自己就跑在 DSH 进程里，至少知道面板挂在 /wechat-bot 这个路径上。
+  // 地址优先级：config.panelUrl > config.panelHost / 面板学到的 host > 默认 127.0.0.1:3080
+  let panelAutoOpened = false
+  let panelHostSeen = ''
+  /** 面板每次收到请求时把自己的 host 报回来，这样端口不是 3080 也能猜对 */
+  function notePanelHost(host) {
+    const h = String(host || '').trim()
+    if (h && h !== panelHostSeen) panelHostSeen = h
+  }
+  async function maybeOpenPanel() {
+    if (panelAutoOpened) return
+    if (config.autoOpenPanel === false) return
+    panelAutoOpened = true
+    let url = String(config.panelUrl || '').trim()
+    if (!url) {
+      const host = String(config.panelHost || panelHostSeen || '').trim()
+      url = host
+        ? ('http://' + host + '/wechat-bot')
+        : ('http://127.0.0.1:' + (Number(config.panelPort) || 3080) + '/wechat-bot')
+    }
+    log('自动打开控制面板：' + url)
+    try {
+      const { execFile } = await import('node:child_process')
+      // Windows 的 start 要把 URL 当第三个参数（第二个是窗口标题，传空字符串占位）
+      const isWin = process.platform === 'win32'
+      execFile(isWin ? 'cmd' : (process.platform === 'darwin' ? 'open' : 'xdg-open'),
+        isWin ? ['/c', 'start', '', url] : [url],
+        { windowsHide: true }, () => {})
+    } catch (e) { log('打开面板失败：' + String(e?.message || e)) }
+  }
+
   function onBridgeEvent(evt) {
     switch (evt.t) {
       case 'ws-open':
@@ -789,10 +823,14 @@ const namesFile = join(dirname(memoryDir), 'members.json')
         bridge = evt
         if (evt.status) log('bridge 状态：模式=' + (evt.mock ? 'mock' : '真实') + '｜登录=' + evt.status.loggedIn + '｜自己=' + evt.status.self + '｜表情包=' + (evt.status.stickers?.count ?? 0))
         if (evt.status?.self) bridgeSelf = evt.status.self
+        // 插件后起来时桥可能早就登录了（没有 login 事件）→ 这里补一次
+        if (evt.status?.loggedIn) void maybeOpenPanel().catch(() => {})
         break
       case 'login': {
         log('微信登录成功 self=' + evt.self)
         if (evt.self) bridgeSelf = evt.self
+        // 桥连上微信 → 自动打开控制面板（用户要求「桥开了自动打开面板」）
+        void maybeOpenPanel().catch(() => {})
         // 客户端（重）启动过 → 轮询有短暂空窗，期间的消息不会进上下文 → 主动回补
         void backfillAfterLogin().catch((e) => log('回补上下文异常：' + String(e?.message || e)))
         break
@@ -5127,6 +5165,8 @@ let res = await callLlm(route, sys, usr, undefined)
       try { return !!(ctx.get?.('attachments') ?? ctx.attachments) } catch { return false }
     },
     handleAction: handlePanelAction,
+    // 面板每次收到请求时报回自己的 host，插件用它拼自动打开面板的地址
+    notePanelHost,
     providersState: panelProvidersState,
     refreshRoomNames: refreshNameCaches,
     roomName: (roomId) => roomNameCache.get(roomId) || '',

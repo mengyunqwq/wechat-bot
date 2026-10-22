@@ -405,6 +405,14 @@ export const CONFIG_META = {
     group: 'advanced', label: '桥 WebSocket 地址', type: 'text', restart: 'plugin',
     help: '改完保存到配置，但需要重载插件才生效。',
   },
+  autoOpenPanel: {
+    group: 'advanced', label: '桥连上时自动打开面板', type: 'bool', def: true,
+    help: '微信登录成功（桥连上）后自动用默认浏览器打开控制面板。关掉就不弹。',
+  },
+  panelUrl: {
+    group: 'advanced', label: '控制面板地址（留空=自动）', type: 'text',
+    help: '自动打开时用这个地址。留空则用「面板自己学到的 host」，再不行用 127.0.0.1:3080/wechat-bot。',
+  },
   logFile: {
     group: 'advanced', label: '插件日志文件', type: 'text', readonly: true,
   },

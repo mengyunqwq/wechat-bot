@@ -161,6 +161,10 @@ export function setupPanel(ctx, api) {
     try { pathname = new URL(req.url || '/', 'http://x').pathname } catch { /* ignore */ }
     const apiPath = isApi(pathname)
 
+    // 把面板自己的 host 报回插件 —— 用户端口不是 3080 时，
+    // 「桥连上自动打开面板」才能拼出正确地址（见 index.js 的 notePanelHost）
+    try { if (req.headers.host) api.notePanelHost?.(req.headers.host) } catch { /* ignore */ }
+
     // ① DSH 登录/同源栅栏（面板不自己搞一套账号）
     const conn = getConn()
     if (conn && typeof conn.requestRejection === 'function') {
