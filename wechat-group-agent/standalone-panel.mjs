@@ -305,9 +305,13 @@ async function buildState() {
     // renderOverview 会自动 fallback 到 bridgeRooms
     rooms: [],
     bridgeRooms,
-    stats: {},          // 插件侧统计（收/回/跳过）独立版没有
+    // 插件侧的实时统计独立版没有，但面板顶栏会拼 stats.replied + '/' + stats.msgIn，
+    // 给 null 会显示成 undefined/undefined，所以给一组 0。
+    stats: { msgIn: 0, replied: 0, skipped: 0, llmCalls: 0, llmErrors: 0, sentText: 0, sentSticker: 0, sentVoice: 0, sentPat: 0 },
     health: null,       // 插件侧体检独立版没有
-    route: null,
+    // 顶栏读 S.route 显示「模型 provider/model」。独立模式拿不到 DSH 的实时路由，
+    // 就用 config 里配的那对（也就是插件实际会用的那对）。
+    route: (cfg.provider && cfg.model) ? { provider: String(cfg.provider), model: String(cfg.model) } : null,
     config: cfg,
     meta: publicMeta(),
     defaults: {},
@@ -963,7 +967,19 @@ const LOCAL_OPS = {
       const all = existsSync(dir) ? readdirSync(dir).map((f) => { try { const s = statSync(join(dir, f)); return { name: f, at: s.mtimeMs, kb: Math.round(s.size / 1024) } } catch { return null } }).filter(Boolean) : []
       all.sort((a, b) => b.at - a.at)
       const today = new Date(); today.setHours(0, 0, 0, 0)
-      out.crash = { dir, total: all.length, today: all.filter((x) => x.at > today.getTime()).length, latest: all.slice(0, 5) }
+      const todayMs = new Date(); todayMs.setHours(0, 0, 0, 0)
+      const ydayMs = todayMs.getTime() - 86400000
+      const last = all[0] || null
+      out.crash = {
+        dir,
+        total: all.length,
+        today: all.filter((x) => x.at > todayMs.getTime()).length,
+        // 面板还会读这三个：yesterday / lastAt / lastMB，缺了就显示成「上次 一，0MB」
+        yesterday: all.filter((x) => x.at > ydayMs && x.at <= todayMs.getTime()).length,
+        lastAt: last ? last.at : 0,
+        lastMB: last ? +(last.kb / 1024).toFixed(1) : 0,
+        latest: all.slice(0, 5),
+      }
     } catch (e) { out.crash = { error: String(e?.message || e) } }
     // 数据库
     try {
