@@ -143,8 +143,11 @@ const events = {
   login: (p) => {
     log('login self=' + p.self)
     // 微信刚登录 → 客户端是新起的，DB 句柄状态全变了。
-    // 如果之前因为探测失败放下了硬闸，这里解除（否则会永远收不到消息）。
-    try { bridge.poller?.resume?.('微信重新登录') } catch { /* ignore */ }
+    // 如果之前因为探测失败放下了硬闸，这里要解除**并且真的把轮询拉起来**。
+    // ⚠️ 只 resume() 不够：resume 只清 _hardGiveUp / 退避状态，不会重新调 startPoller，
+    //    结果就是「暂停已解除但轮询没在跑」——能读库、msgsIn 永远 0、机器人静默失聪。
+    //    实测 2026-10-22 15:02 硬停 → 15:05 重登 → 卡了 6 分钟才靠手动重启桥恢复。
+    void bridge.restartPoller?.('微信重新登录')
     broadcast({ t: 'login', ...p })
   },
   logout: (p) => {

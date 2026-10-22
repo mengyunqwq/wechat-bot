@@ -717,9 +717,37 @@ export class WeChatHookBridge {
         setTimeout(() => { void startPoller(attempt + 1) }, 15000)
       }
     }
+    // ★ 2026-10-22：把 startPoller 挂到实例上。
+    //  为什么：硬闸（init 连续失败 6 次 → _hardGiveUp=true）触发后，
+    //  只有 poller.resume() 会被 login 事件调用清状态，但**没有任何人重新启动轮询**。
+    //  实测 15:02 硬停 → 15:05 微信重登 → resume 清了硬闸 → 但 startPoller 再没被调
+    //  → 状态看着是「暂停已解除」，实际轮询根本没在跑 → 能读库但 msgsIn 永远 0。
+    //  必须留个引用，让 login / /api/pollResume 能把轮询真的拉起来。
+    this._startPoller = startPoller
     void startPoller()
     this.emit('started', { port: this.apiPort, loggedIn: this.loggedIn, self: this.selfWxid, transport: 'wechat-hook' })
     return true
+  }
+
+  /**
+   * 解除硬闸并**真正重启**轮询。
+   * login 事件、POST /api/pollResume 都走这里 —— 只 resume() 是不够的（见 _startPoller 注释）。
+   * @returns {Promise<boolean>} 是否成功重新启动
+   */
+  async restartPoller(reason = '') {
+    try { this.poller?.resume?.(reason) } catch { /* ignore */ }
+    if (typeof this._startPoller !== 'function') {
+      this.log('restartPoller：startPoller 引用不存在（桥还没 start()？）')
+      return false
+    }
+    try {
+      await this._startPoller(1)
+      this.log('轮询已重启（' + (reason || '手动') + '）')
+      return true
+    } catch (e) {
+      this.log('轮询重启失败：' + String(e?.message || e).slice(0, 90))
+      return false
+    }
   }
 
   /**
