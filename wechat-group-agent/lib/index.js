@@ -3839,10 +3839,11 @@ let res = await callLlm(route, sys, usr, undefined)
   const UPDATE_REPO = process.env.WECHAT_UPDATE_REPO || 'mengyunqwq/wechat-bot'
   const UPDATE_STATE_FILE = join(dirname(memoryDir), 'update-state.json')
   const UPDATE_BACKUP_DIR = join(dirname(memoryDir), 'backups')
-  const updateState = { commit: '', checkedAt: 0, latest: null, history: [] }
+  const updateState = { commit: '', version: '', checkedAt: 0, latest: null, history: [] }
   try {
     const u = JSON.parse(readFileSync(UPDATE_STATE_FILE, 'utf8')) || {}
     updateState.commit = String(u.commit || '')
+    updateState.version = String(u.version || '')
     updateState.checkedAt = Number(u.checkedAt) || 0
     updateState.latest = u.latest || null
     updateState.history = Array.isArray(u.history) ? u.history.slice(0, 20) : []
@@ -3882,43 +3883,73 @@ let res = await callLlm(route, sys, usr, undefined)
     try { return JSON.parse(text) } catch { throw new Error('响应不是 JSON：' + text.slice(0, 80)) }
   }
   /** 检查更新：返回 { available, local, remote, behind, commits[] } */
-  async function checkUpdate() {
-    const head = await ghJson(`/repos/${UPDATE_REPO}/commits/main`)
-    const remoteSha = String(head.sha || '')
-    const remoteShort = remoteSha.slice(0, 7)
-    const remoteMsg = String(head.commit?.message || '').split('\n')[0]
-    const remoteDate = head.commit?.author?.date || ''
-    let local = updateState.commit
-    // 首次运行：以当前远程为基线，不提示更新（否则第一次打开就弹窗）
-    if (!local) {
-      updateState.commit = remoteSha
-      updateState.checkedAt = Date.now()
-      updateState.latest = { sha: remoteSha, short: remoteShort, msg: remoteMsg, date: remoteDate }
-      saveUpdateState()
-      return { available: false, firstRun: true, local: remoteSha, remote: remoteSha, behind: 0, commits: [] }
+  // ── 版本号（2026-10-22 改）──────────────────────────────────────
+  //   为什么用版本号而不是 commit sha：
+  //     · commit 每次 push 都变 → 开发者自己改代码/提交，部署方就会看到"有更新"（误报）
+  //     · 版本号只在"发版"时升 → 改代码不升版本 = 不提示（开发场景正确）
+  //   发版流程：改代码 → 改仓库 version.json 的 version → push
+  const LOCAL_VERSION_FILE = join(process.env.WECHAT_BOT_HOME || 'D:\\微信deepseek', 'version.json')
+  function readLocalVersion() {
+    try {
+      const j = JSON.parse(readFileSync(LOCAL_VERSION_FILE, 'utf8')) || {}
+      return {
+        version: String(j.version || '0.0.0'),
+        notes: String(j.notes || ''),
+        releasedAt: String(j.releasedAt || ''),
+      }
+    } catch { return { version: '0.0.0', notes: '', releasedAt: '' } }
+  }
+  async function readRepoVersion() {
+    const r = await ghJson(`/repos/${UPDATE_REPO}/contents/version.json`)
+    const txt = Buffer.from(String(r.content || '').replace(/\n/g, ''), 'base64').toString('utf8')
+    const j = JSON.parse(txt) || {}
+    return {
+      version: String(j.version || '0.0.0'),
+      notes: String(j.notes || ''),
+      releasedAt: String(j.releasedAt || ''),
+      sha: String(r.sha || ''),
     }
+  }
+  /** semver 比较（容忍 v 前缀和位数不同）：a>b 返回 1 */
+  function cmpSemver(a, b) {
+    const pa = String(a).replace(/^v/i, '').split('.').map((n) => parseInt(n, 10) || 0)
+    const pb = String(b).replace(/^v/i, '').split('.').map((n) => parseInt(n, 10) || 0)
+    for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+      const x = pa[i] || 0
+      const y = pb[i] || 0
+      if (x > y) return 1
+      if (x < y) return -1
+    }
+    return 0
+  }
+  /** 检查更新：比较本地 version.json 与仓库 version.json */
+  async function checkUpdate() {
+    const local = readLocalVersion()
+    const remote = await readRepoVersion()
+    const available = cmpSemver(remote.version, local.version) > 0
     updateState.checkedAt = Date.now()
-    updateState.latest = { sha: remoteSha, short: remoteShort, msg: remoteMsg, date: remoteDate }
+    updateState.version = local.version
+    updateState.latest = {
+      version: remote.version, notes: remote.notes, releasedAt: remote.releasedAt, sha: remote.sha,
+    }
     saveUpdateState()
-    const available = local !== remoteSha
-    log('[update] 本地=' + local.slice(0, 7) + ' 远程=' + remoteShort + ' → ' + (available ? '有更新' : '最新'))
     let commits = []
     if (available) {
       try {
-        const list = await ghJson(`/repos/${UPDATE_REPO}/commits?per_page=15`)
+        const list = await ghJson(`/repos/${UPDATE_REPO}/commits?per_page=10`)
         commits = (Array.isArray(list) ? list : []).map((c) => ({
           sha: String(c.sha || '').slice(0, 7),
           msg: String(c.commit?.message || '').split('\n')[0],
           date: c.commit?.author?.date || '',
         }))
-        // 只保留"本地之后"的提交（到遇到本地 sha 为止）
-        const idx = commits.findIndex((c) => local.startsWith(c.sha) || c.sha === local.slice(0, 7))
-        if (idx >= 0) commits = commits.slice(0, idx)
-      } catch { /* 公告拿不到不影响更新 */ }
+      } catch { /* 提交列表拿不到不影响 */ }
     }
+    log('[update] 本地 v' + local.version + ' 远程 v' + remote.version + ' → ' + (available ? '有更新' : '已是最新'))
     return {
-      available, local, remote: remoteSha, remoteShort, remoteMsg, remoteDate,
-      behind: commits.length, commits,
+      available,
+      localVersion: local.version, remoteVersion: remote.version,
+      localNotes: local.notes, notes: remote.notes, releasedAt: remote.releasedAt,
+      commits,
     }
   }
   /** 下载 zip 并解压到临时目录。返回解压后的根目录 */
@@ -4386,6 +4417,7 @@ let res = await callLlm(route, sys, usr, undefined)
           // 记录新版本
           const oldCommit = updateState.commit
           updateState.commit = target
+          try { const vj = JSON.parse(readFileSync(join(tmpRoot, '..', 'version.json'), 'utf8')); updateState.version = String(vj.version || updateState.version) } catch { /* ignore */ }
           updateState.history.unshift({ at: Date.now(), from: oldCommit.slice(0, 7), to: target.slice(0, 7) })
           updateState.history = updateState.history.slice(0, 20)
           updateState.latest = null

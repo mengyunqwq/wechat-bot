@@ -281,7 +281,7 @@ function renderHeader() {
   const up = App.upd
   if (up && up.available) {
     ub.className = 'banner warn show'
-    ub.innerHTML = '🆕 有新版本 <b>' + esc(up.remoteShort || '') + '</b>（' + (up.behind || 0) + ' 个提交） · <a href="#" id="upd-link">查看并更新</a>'
+    ub.innerHTML = '🆕 有新版本 <b>' + esc('v' + (up.remoteVersion || '')) + '</b>（' + (up.behind || 0) + ' 个提交） · <a href="#" id="upd-link">查看并更新</a>'
     setTimeout(() => { const l = document.getElementById('upd-link'); if (l) l.onclick = (ev) => { ev.preventDefault(); App.tab = 'update'; localStorage.setItem('wb:tab', 'update'); renderNav(); renderActive({}) } }, 0)
   } else { ub.className = 'banner' }
 }
@@ -1455,18 +1455,20 @@ function renderUpdate() {
   const has = u && u.available;
   view.innerHTML = `<h2>更新 <span class="muted small">从 GitHub 拉最新代码</span></h2>
 
-    <div class="section"><div class="hd">📦 当前版本</div>
+    <div class="section"><div class="hd">📦 版本</div>
       <table class="table"><tbody>
-        <tr><td class="muted">本地</td><td class="mono">${esc((u && u.local) || info.local || '未知')}</td></tr>
-        <tr><td class="muted">远程最新</td><td class="mono">${esc((u && u.remote) || (info.latest && info.latest.sha) || '未知')}</td></tr>
-        <tr><td class="muted">远程提交</td><td>${esc((u && u.remoteMsg) || (info.latest && info.latest.msg) || '')}</td></tr>
-        <tr><td class="muted">仓库</td><td class="mono">${esc(info.repo || '')}</td></tr>
+        <tr><td class="muted">本地</td><td class="mono"><b>${esc('v' + ((u && u.localVersion) || info.version || '?'))}</b></td></tr>
+        <tr><td class="muted">仓库最新</td><td class="mono"><b>${esc('v' + ((u && u.remoteVersion) || (info.latest && info.latest.version) || '?'))}</b></td></tr>
+        <tr><td class="muted">发布说明</td><td>${esc((u && u.notes) || (info.latest && info.latest.notes) || '—')}</td></tr>
+        <tr><td class="muted">仓库</td><td class="mono">${esc(info.repo || u && u.repo || '')}</td></tr>
         <tr><td class="muted">上次检查</td><td>${(u && u.checkedAt) || info.checkedAt ? esc(ago((u && u.checkedAt) || info.checkedAt)) : '从未'}</td></tr>
       </tbody></table>
       <div class="row" style="margin-top:10px">
         <button class="btn primary" id="upd-check">检查更新</button>
         <span id="upd-msg" class="small"></span>
       </div>
+      <div class="small muted" style="margin-top:8px">版本号只在「发版」时才升 —— 开发过程中改代码、提交都不会提示更新。</div>
+    </div>
     </div>
 
     ${has ? `<div class="section" style="border:1px solid var(--warn)"><div class="hd">🆕 发现新版本
