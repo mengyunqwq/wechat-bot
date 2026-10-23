@@ -431,13 +431,18 @@ async function handle(op, a = {}) {
     case 'members': {
       // 缓存：群成员查询要走数据库（较慢），20 秒内重复调用直接返回缓存。
       // 注意**不要**返回空列表 —— 那会让调用方以为"群里没人"。
+      // ★ 2026-10-23 修：缓存必须**按 roomId 分桶**。原来是全局一条
+      //   （globalThis.__membersCache），切换群后 20 秒内再拉，返回的还是上一个群的成员
+      //   （用户报过：改完群聊再点「从桥拉成员」，列表纹丝不动）。
+      const roomId = a.roomId
       {
         const now = Date.now()
-        if (globalThis.__membersCache && now - globalThis.__membersCacheAt < 20000) {
-          return { ...globalThis.__membersCache, source: (globalThis.__membersCache.source || '') + '+cached' }
+        const bucket = globalThis.__membersCacheByRoom || (globalThis.__membersCacheByRoom = new Map())
+        const hit = bucket.get(roomId)
+        if (hit && now - hit.at < 20000) {
+          return { ...hit.data, source: (hit.data.source || '') + '+cached' }
         }
       }
-      const roomId = a.roomId
       // 修好 hook 的 QueryDB 后，优先走数据库拿真实昵称（备注优先）
       if (typeof bridge.groupMembers === 'function') {
         try {
@@ -446,8 +451,7 @@ async function handle(op, a = {}) {
             const nameMap = {}
             for (const m of list) nameMap[m.wxid] = m.name || m.nick || m.wxid
             const out = { members: list, nameMap, selfWxid: bridge.selfWxid, source: 'contact.db' }
-            globalThis.__membersCache = out
-            globalThis.__membersCacheAt = Date.now()
+            globalThis.__membersCacheByRoom.set(roomId, { data: out, at: Date.now() })
             return out
           }
         } catch (e) { log('数据库取群成员失败，回退旧路径：' + String(e?.message || e)) }

@@ -31,7 +31,7 @@ const styleM = html.match(/<style>([\s\S]*?)<\/style>/)
 if (!styleM) { console.error('✗ 没找到 <style> 段'); process.exit(1) }
 const css = styleM[1]
 
-const bodyM = html.match(/<body>([\s\S]*?)<\/body>/)
+const bodyM = html.match(/<body[^>]*>([\s\S]*?)<\/body>/)
 if (!bodyM) { console.error('✗ 没找到 <body> 段'); process.exit(1) }
 // DOM = body 里去掉 <script>
 const dom = bodyM[1].replace(/<script>[\s\S]*?<\/script>/, '')
@@ -95,17 +95,25 @@ const out = `window.__ModuleLoader__.load({
 \t\t\t\t}
 \t\t\t\t// 关闭按钮：只有嵌进 DSH 时才显示（独立打开无需关闭）
 \t\t\t\tconst closeBtn = root.querySelector("#btn-close-panel");
-\t\t\t\tif (closeBtn) {
-\t\t\t\t\tcloseBtn.style.display = "";
-\t\t\t\t\tcloseBtn.onclick = (ev) => {
-\t\t\t\t\t\ttry { ev.preventDefault(); } catch (e) { }
-\t\t\t\t\t\ttry { if (onClose) onClose(); } catch (e) { console.error("[wechat-bot client] close:", e); }
-\t\t\t\t\t};
-\t\t\t\t}
+\t\t\t\tif (closeBtn) closeBtn.style.display = "";
+\t\t\t\t// 用 document 级捕获监听（而不是直接绑在按钮上）：
+\t\t\t\t// 面板脚本可能重绘 header，直接绑会丢；捕获阶段也不会被内部 stopPropagation 挡住
+\t\t\t\tconst onDocClick = (ev) => {
+\t\t\t\t\tconst t = ev.target;
+\t\t\t\t\tconst hit = t && t.closest ? t.closest("#btn-close-panel") : null;
+\t\t\t\t\tif (!hit) return;
+\t\t\t\t\tev.preventDefault();
+\t\t\t\t\ttry { if (onClose) onClose(); } catch (e) { console.error("[wechat-bot client] close:", e); }
+\t\t\t\t};
+\t\t\t\tdocument.addEventListener("click", onDocClick, true);
+\t\t\t\t// 调试/兜底：控制台可手动调
+\t\t\t\ttry { window.__wxClosePanel = () => { try { onClose && onClose(); } catch (e) { console.error(e); } }; } catch (e) { }
 \t\t\t\treturn () => {
 \t\t\t\t\t// React 卸载：停掉面板自己的轮询 timer + 移除注入的样式 + 还宿主 body 原样
 \t\t\t\t\ttry { (window.__wxpanelTimers || []).forEach(clearInterval); } catch { }
 \t\t\t\t\twindow.__wxpanelTimers = [];
+\t\t\t\t\ttry { document.removeEventListener("click", onDocClick, true); } catch { }
+\t\t\t\t\ttry { delete window.__wxClosePanel; } catch { }
 \t\t\t\t\ttry { if (styleEl.parentNode) styleEl.parentNode.removeChild(styleEl); } catch { }
 \t\t\t\t\ttry { document.body.classList.remove("wx-embed-host"); } catch { }
 \t\t\t\t};
@@ -116,18 +124,20 @@ const out = `window.__ModuleLoader__.load({
 \t\t//#region src/client/apply.ts —— 注册进 DSH 界面
 \t\tfunction apply(ctx) {
 \t\t\t// 关闭面板 = 把主视图切回默认（layout.selectPanel(null) → 渲染 conversation）。
-\t\t\t// 优先 ctx.layout（ui-sidebar 就是这么用的），拿不到再 ctx.get('layout') 兜底。
+\t\t\t// 优先 ctx.layout（ui-sidebar 就是这么用的），拿不到再 ctx.get('layout') 兜底；
+\t\t\t// 两者都没有（不同版本的宿主服务名不同）→ 退化成整页刷新，也能回到对话视图。
 \t\t\tconst closePanel = () => {
 \t\t\t\ttry {
 \t\t\t\t\tconst layout = (ctx && ctx.layout) || (ctx.get && ctx.get("layout"));
-\t\t\t\t\tif (!layout || typeof layout.selectPanel !== "function") {
-\t\t\t\t\t\tconsole.warn("[wechat-bot client] 找不到 layout 服务，无法关闭面板");
+\t\t\t\t\tif (layout && typeof layout.selectPanel === "function") {
+\t\t\t\t\t\tlayout.selectPanel(null);
 \t\t\t\t\t\treturn;
 \t\t\t\t\t}
-\t\t\t\t\tlayout.selectPanel(null);
+\t\t\t\t\tconsole.warn("[wechat-bot client] 没有 layout 服务，改用整页刷新关闭面板");
 \t\t\t\t} catch (e) {
 \t\t\t\t\tconsole.error("[wechat-bot client] layout.selectPanel:", e);
 \t\t\t\t}
+\t\t\t\ttry { window.location.reload(); } catch (e) { console.error("[wechat-bot client] reload:", e); }
 \t\t\t};
 \t\t\t// ① 整页主视图（schedule 面板同款：main 槽 + key）
 \t\t\tctx.effect(() => ctx.slots.inject("main", () => ctx.slots.register({

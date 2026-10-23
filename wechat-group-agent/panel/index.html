@@ -7,7 +7,7 @@
 <title>微信机器人控制台</title>
 <style>
   /* ── GitHub 式层次：灰底 + 白卡片 + 蓝强调（不刺眼、不疲劳）── */
-  :root{
+  #wx-panel{
     --bg:#F6F7F9;          /* 浅灰底，眼睛有落点 */
     --bg-deep:#EEF0F3;     /* 更深的底（表头/hover） */
     --card:#FFFFFF;        /* 白卡片浮起来 */
@@ -30,7 +30,7 @@
     --radius:6px;
   }
   @media (prefers-color-scheme: dark){
-    :root{
+    #wx-panel{
       --bg:#0D1117;        /* GitHub dark 底 */
       --bg-deep:#161B22;
       --card:#161B22;
@@ -52,9 +52,10 @@
       --shadow-md:0 3px 12px rgba(0,0,0,.4);
     }
   }
-  *{box-sizing:border-box}
+  #wx-panel,#wx-panel *{box-sizing:border-box}
   html,body{margin:0;padding:0}
-  body{background:var(--bg);color:var(--text);
+  #wx-panel{height:100%;flex:1 1 auto;min-height:0;display:flex;flex-direction:column;overflow:hidden;
+    background:var(--bg);color:var(--text);
     font:14px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI","Microsoft YaHei",system-ui,sans-serif;
     font-feature-settings:"tnum" 1;-webkit-font-smoothing:antialiased;
     -moz-osx-font-smoothing:grayscale}
@@ -62,13 +63,13 @@
      嵌进 DSH 原生界面时 body 会被加上 .wx-embed-host —— 这时绝不能改宿主页面的
      body 布局（flex/overflow 会把整个 DSH 界面改坏），只重置背景。 */
   html{height:100%}
-  body:not(.wx-embed-host){height:100%;display:flex;flex-direction:column;overflow:hidden}
-  body.wx-embed-host{background:transparent}
-  button,input,select,textarea{font:inherit;color:inherit}
-  a{color:var(--accent);text-underline-offset:3px}
-  a:hover{text-decoration:underline}
+  body:not(.wx-embed-host){height:100%;overflow:hidden}
 
-  header{position:static;z-index:20;display:flex;align-items:center;gap:14px;flex-wrap:wrap;flex:0 0 auto;
+  #wx-panel button,#wx-panel input,#wx-panel select,#wx-panel textarea{font:inherit;color:inherit}
+  #wx-panel a{color:var(--accent);text-underline-offset:3px}
+  #wx-panel a:hover{text-decoration:underline}
+
+  #wx-panel header{position:static;z-index:20;display:flex;align-items:center;gap:14px;flex-wrap:wrap;flex:0 0 auto;
     padding:0 20px;height:52px;background:var(--card);border-bottom:1px solid var(--line)}
   .brand{font-weight:600;font-size:14px;white-space:nowrap;letter-spacing:-.01em}
   .brand small{color:var(--muted);font-weight:400;margin-left:6px;font-size:12px}
@@ -80,15 +81,15 @@
   .dot.ok{background:var(--ok)} .dot.warn{background:var(--warn)} .dot.bad{background:var(--bad)}
   .hswitch{display:flex;align-items:center;gap:7px;font-size:12px;color:var(--muted);white-space:nowrap}
 
-  .shell{display:flex;flex:1 1 auto;min-height:0}
+  #wx-panel .shell{display:flex;flex:1 1 auto;min-height:0}
   /* 侧栏用白底 + 内容区灰底 → 分区清楚 */
-  nav{width:200px;flex:0 0 200px;padding:14px 10px;border-right:1px solid var(--line);
+  #wx-panel nav{width:200px;flex:0 0 200px;padding:14px 10px;border-right:1px solid var(--line);
     background:var(--card);position:static;height:auto;overflow:auto}
-  nav a{display:flex;align-items:center;gap:9px;padding:7px 10px;border-radius:var(--radius);color:var(--text);
+  #wx-panel nav a{display:flex;align-items:center;gap:9px;padding:7px 10px;border-radius:var(--radius);color:var(--text);
     text-decoration:none;font-size:13.5px;margin-bottom:1px;transition:background .12s,color .12s}
-  nav a:hover{background:var(--bg-deep);text-decoration:none}
-  nav a.on{background:var(--accent-soft);color:var(--accent);font-weight:600}
-  main{flex:1;min-width:0;padding:24px 28px 72px;max-width:1160px;overflow:auto;min-height:0}
+  #wx-panel nav a:hover{background:var(--bg-deep);text-decoration:none}
+  #wx-panel nav a.on{background:var(--accent-soft);color:var(--accent);font-weight:600}
+  #wx-panel main{flex:1;min-width:0;padding:24px 28px 72px;max-width:1160px;overflow:auto;min-height:0}
 
   /* 嵌进 DSH 原生界面（lib/client.js 的 React 容器）时：
      外层高度固定，滚动必须交给我们自己的 flex 布局 */
@@ -104,9 +105,9 @@
   .banner.bad{background:var(--bad-soft);border-color:color-mix(in srgb,var(--bad) 35%,var(--line));color:var(--bad)}
   .banner.warn{background:var(--warn-soft);border-color:color-mix(in srgb,var(--warn) 35%,var(--line));color:var(--warn)}
 
-  h2{font-size:20px;margin:0 0 18px;font-weight:600;letter-spacing:-.02em}
-  h2 .muted{font-weight:400;font-size:13px;letter-spacing:0;color:var(--muted)}
-  h3{font-size:13px;margin:22px 0 10px;color:var(--muted);font-weight:500}
+  #wx-panel h2{font-size:20px;margin:0 0 18px;font-weight:600;letter-spacing:-.02em}
+  #wx-panel h2 .muted{font-weight:400;font-size:13px;letter-spacing:0;color:var(--muted)}
+  #wx-panel h3{font-size:13px;margin:22px 0 10px;color:var(--muted);font-weight:500}
 
   /* 指标卡：白卡浮在灰底上，左侧彩色条 = 一眼分类 */
   .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:12px}
@@ -164,19 +165,19 @@
   .field .help{grid-column:2;color:var(--muted);font-size:12px;margin-top:-4px;line-height:1.55}
   .field .ctl{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
 
-  input[type=text],input[type=number],input[type=password],select,textarea{
+  #wx-panel input[type=text],#wx-panel input[type=number],#wx-panel input[type=password],#wx-panel select,#wx-panel textarea{
     height:34px;background:var(--card);border:1px solid var(--line);border-radius:var(--radius);
     padding:0 11px;outline:none;min-width:0;font-size:13.5px;
     box-shadow:inset 0 1px 2px rgba(31,35,40,.04);
     transition:border-color .12s,box-shadow .12s}
-  input[type=text]:focus,input[type=number]:focus,input[type=password]:focus,select:focus,textarea:focus{
+  #wx-panel input[type=text]:focus,#wx-panel input[type=number]:focus,#wx-panel input[type=password]:focus,#wx-panel select:focus,#wx-panel textarea:focus{
     border-color:var(--accent);box-shadow:inset 0 1px 2px rgba(31,35,40,.03),0 0 0 3px color-mix(in srgb,var(--accent) 18%,transparent)}
-  input[type=text]::placeholder,textarea::placeholder{color:var(--muted)}
-  input[type=range]{accent-color:var(--accent);width:150px}
-  textarea{height:auto;min-height:240px;padding:10px 11px;resize:vertical;line-height:1.6;width:100%}
+  #wx-panel input[type=text]::placeholder,#wx-panel textarea::placeholder{color:var(--muted)}
+  #wx-panel input[type=range]{accent-color:var(--accent);width:150px}
+  #wx-panel textarea{height:auto;min-height:240px;padding:10px 11px;resize:vertical;line-height:1.6;width:100%}
   .field .ctl textarea{flex:1 1 100%;align-self:stretch}
   /* 人设很长，给足空间（用户反馈：原来太小看不清在写什么） */
-  textarea[data-k="persona"]{min-height:380px}
+  #wx-panel textarea[data-k="persona"]{min-height:380px}
   .num{width:96px}
   .unit{color:var(--muted);font-size:12px}
 
@@ -230,22 +231,23 @@
   #eyes-drop:hover{border-color:var(--teal) !important;background:color-mix(in srgb,var(--teal) 10%,var(--card)) !important}
 
   @media (max-width: 800px){
-    .shell{flex-direction:column;overflow:hidden}
-    nav{width:auto;flex:0 0 auto;position:static;border-right:0;border-bottom:1px solid var(--line);
+    #wx-panel .shell{flex-direction:column;overflow:hidden}
+    #wx-panel nav{width:auto;flex:0 0 auto;position:static;border-right:0;border-bottom:1px solid var(--line);
       display:flex;overflow-x:auto;overflow-y:hidden;gap:2px;padding:8px 10px;z-index:15}
-    nav a{margin:0;white-space:nowrap;padding:7px 11px}
-    main{flex:1 1 auto;min-height:0;overflow:auto;padding:18px 14px 64px}
-    .field{grid-template-columns:1fr}
-    .field .help{grid-column:1}
-    .pills{order:3;flex-basis:100%}
-    .card .k{font-size:24px}
-    h2{font-size:18px}
-    .section>.hd{margin:0 -14px 8px;padding:10px 14px}
+    #wx-panel nav a{margin:0;white-space:nowrap;padding:7px 11px}
+    #wx-panel main{flex:1 1 auto;min-height:0;overflow:auto;padding:18px 14px 64px}
+    #wx-panel .field{grid-template-columns:1fr}
+    #wx-panel .field .help{grid-column:1}
+    #wx-panel .pills{order:3;flex-basis:100%}
+    #wx-panel .card .k{font-size:24px}
+    #wx-panel h2{font-size:18px}
+    #wx-panel .section>.hd{margin:0 -14px 8px;padding:10px 14px}
   }
   @media (prefers-reduced-motion: reduce){*{transition:none !important;animation:none !important}}
 </style>
 </head>
-<body>
+<body class="wx-standalone">
+<div id="wx-panel">
 <header>
   <div class="brand">🐟 微信机器人控制台 <small id="ver"></small><small id="panel-url" title="点一下复制" style="cursor:pointer;margin-left:10px;font-family:ui-monospace,Consolas,monospace;font-size:11px;opacity:.7"></small></div>
   <div class="pills" id="pills"><span class="pill">加载中…</span></div>
@@ -415,7 +417,12 @@ function renderHeader() {
   else { b.className = 'banner'; b.textContent = ''; }
   // 🆕 有新版：顶部追加提示（不覆盖上面的停用/演练提示，用独立提示条）
   let ub = document.getElementById('update-banner')
-  if (!ub) { ub = document.createElement('div'); ub.id = 'update-banner'; ub.className = 'banner warn'; document.body.insertBefore(ub, document.body.firstChild.nextSibling) }
+  if (!ub) {
+    ub = document.createElement('div'); ub.id = 'update-banner'; ub.className = 'banner warn'
+    // 放进面板自己的根节点（#wx-panel）里 —— 以前插到 body 上，嵌进 DSH 后会跑到面板外面
+    const root = document.getElementById('wx-panel') || document.body
+    root.insertBefore(ub, root.firstChild ? root.firstChild.nextSibling : null)
+  }
   const up = App.upd
   if (up && up.available) {
     ub.className = 'banner warn show'
@@ -1912,5 +1919,6 @@ refresh();
 setInterval(() => refresh({ lite:true }), 10000);
 document.addEventListener('visibilitychange', () => { if (!document.hidden) refresh({ lite:true }); });
 </script>
+</div>
 </body>
 </html>
