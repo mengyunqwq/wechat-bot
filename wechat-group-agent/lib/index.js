@@ -317,6 +317,10 @@ const DEFAULT_CONFIG = {
   voiceAutoPrepare: true,         // 服务未就绪时自动触发模型准备（首次要下载约 239MB）
   voicePrepareWaitMs: 180_000,    // 等模型准备就绪的上限（超时就跳过本次，保留 [语音]）
 
+  // ── 面板自动打开（用户要求：后续不要每次都弹网页版）──────────────
+  // false = 桥连上/重载插件时**不再自动开浏览器标签**（面板仍可从 🐋 或 /wechat-bot 打开）
+  autoOpenPanel: false,
+  panelUrl: '',                  // 手动指定面板地址（留空=自动学 host）
   // ── 健康自检 / 失联监控（静默失联是这台机器最大的运维痛点）──────
   // 心跳每 healthCheckMs 只查最关键的几项（桥连接/登录/hook/轮询），避免频繁打 hook；
   // 连续 2 次异常（≈10 分钟）才告警；告警除写日志外，还会往 filehelper 发一句人话
