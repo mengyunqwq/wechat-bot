@@ -1,5 +1,5 @@
 {
-  "version": "1.2.0",
-  "notes": "控制面板升级成 DSH 原生插件 UI：除了 /wechat-bot 独立地址，面板现在注册进 DSH 界面本体 —— 左侧面板列表出现 🐋「微信机器人」，点开即完整面板（同一份代码，main 整页 + 侧栏图标）。实现：panel/index.html 由 build-client.mjs 打包成 lib/client.js（React 空壳 + 原 DOM，官方同款迁移法），package.json 声明 dsh.client + exports[\"./client\"]。注意：必须走官方装配（profile bundles / patch）并在装好后重启一次 dsh web，运行时注入的 hex entry 不会被客户端模块扫描到。另修复：面板「手动操作」页的电源开关下线（kill 从桥里调用会卡死）。",
+  "version": "1.3.0",
+  "notes": "桌宠联动：机器人和桌面上的蓝色大肥鱼（dsh-pet）打通了——群里有人说话她会做表情（默认「点击回应-害羞惊讶」），开始想怎么回时播「工作状态-思考冒泡」，回完话播「工作状态-雀跃庆祝」，出错/失联播「工作状态-垂头叹气冒汗」。走 dsh-pet 的 HTTP 接口（/dsh-pet-7340/anim、/broadcast、/work-status），全部静默失败、限频 2 秒，没装桌宠不影响机器人。面板新增「桌宠联动」配置组（开关 / 接口地址 / 桌宠 id / 显示端 / 四个动作名可改）。另：控制面板已是 DSH 原生插件 UI（1.2.0），左侧面板列表出现 🐋「微信机器人」。",
   "releasedAt": "2026-10-23"
 }
