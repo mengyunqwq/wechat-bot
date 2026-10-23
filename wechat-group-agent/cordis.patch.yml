@@ -1,0 +1,13 @@
+# @dsh-external/dsh-wechat-bot —— bundle 装配入口
+#
+# 作用：让 profile 的 dsh.profile.bundles 里的名字能真正变成一条 loader entry。
+# 没有这个文件（和 package.json 里的 dsh.bundle.patch 声明），重启后插件不会加载
+# —— 只有运行时 loader.create 注入的实例会活着（那批 entry 的 name 是随机 hex，
+# dsh-client-modules 扫描不到，原生 UI 也就出不来）。
+#
+# 注意：name 必须写完整包名（client-modules 用 entry.options.name 当 specifier
+# 去定位 package.json，写成短名会静默跳过）。
+- insert:
+    - id: dsh-wechat-bot
+      name: '@dsh-external/dsh-wechat-bot'
+      config: {}

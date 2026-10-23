@@ -73,11 +73,14 @@ const out = `window.__ModuleLoader__.load({
 \t\t\treturn react.createElement("span", { style: { fontSize: 16, lineHeight: 1 } }, "🐋");
 \t\t}
 \t\t/** 面板整页：React 空壳 + useEffect 里挂 DOM（super-injector 同款迁移法） */
-\t\tfunction WechatBotPanel() {
+\t\tfunction WechatBotPanel(props) {
+\t\t\tconst onClose = props && props.onClose;
 \t\t\tconst hostRef = react.useRef(null);
 \t\t\treact.useEffect(() => {
 \t\t\t\tconst root = hostRef.current;
 \t\t\t\tif (!root) return;
+\t\t\t\t// 告诉面板 CSS：「现在是被嵌进 DSH 的，别动宿主 body 布局」
+\t\t\t\tdocument.body.classList.add("wx-embed-host");
 \t\t\t\tconst styleEl = document.createElement("style");
 \t\t\t\tstyleEl.setAttribute("data-wxpanel", "1");
 \t\t\t\tstyleEl.textContent = PANEL_CSS;
@@ -88,26 +91,41 @@ const out = `window.__ModuleLoader__.load({
 \t\t\t\t} catch (e) {
 \t\t\t\t\tconsole.error("[wechat-bot client] 面板脚本执行失败:", e);
 \t\t\t\t\tconst msg = root.querySelector("#view");
-\t\t\t\t\tif (msg) msg.textContent = "面板脚本加载失败：\\" + e + \\"（原始页面仍可用：/wechat-bot）";
+\t\t\t\t\tif (msg) msg.textContent = "面板脚本加载失败：" + String(e) + "（原始页面仍可用：/wechat-bot）";
+\t\t\t\t}
+\t\t\t\t// 关闭按钮：只有嵌进 DSH 时才显示（独立打开无需关闭）
+\t\t\t\tconst closeBtn = root.querySelector("#btn-close-panel");
+\t\t\t\tif (closeBtn) {
+\t\t\t\t\tcloseBtn.style.display = "";
+\t\t\t\t\tcloseBtn.onclick = (ev) => {
+\t\t\t\t\t\ttry { ev.preventDefault(); } catch (e) { }
+\t\t\t\t\t\ttry { if (onClose) onClose(); } catch (e) { console.error("[wechat-bot client] close:", e); }
+\t\t\t\t\t};
 \t\t\t\t}
 \t\t\t\treturn () => {
-\t\t\t\t\t// React 卸载：停掉面板自己的轮询 timer + 移除注入的样式
+\t\t\t\t\t// React 卸载：停掉面板自己的轮询 timer + 移除注入的样式 + 还宿主 body 原样
 \t\t\t\t\ttry { (window.__wxpanelTimers || []).forEach(clearInterval); } catch { }
 \t\t\t\t\twindow.__wxpanelTimers = [];
 \t\t\t\t\ttry { if (styleEl.parentNode) styleEl.parentNode.removeChild(styleEl); } catch { }
+\t\t\t\t\ttry { document.body.classList.remove("wx-embed-host"); } catch { }
 \t\t\t\t};
 \t\t\t}, []);
-\t\t\treturn react.createElement("div", { ref: hostRef });
+\t\t\treturn react.createElement("div", { ref: hostRef, className: "wx-panel-embed" });
 \t\t}
 \t\t//#endregion
 \t\t//#region src/client/apply.ts —— 注册进 DSH 界面
 \t\tfunction apply(ctx) {
+\t\t\t// 关闭面板 = 把主视图切回默认（layout.selectPanel(null) → 渲染 conversation）
+\t\t\tconst closePanel = () => {
+\t\t\t\ttry { ctx.layout && ctx.layout.selectPanel && ctx.layout.selectPanel(null); }
+\t\t\t\tcatch (e) { console.error("[wechat-bot client] layout.selectPanel:", e); }
+\t\t\t};
 \t\t\t// ① 整页主视图（schedule 面板同款：main 槽 + key）
 \t\t\tctx.effect(() => ctx.slots.inject("main", () => ctx.slots.register({
 \t\t\t\tname: "main",
 \t\t\t\tkey: "wechatbot",
 \t\t\t\tinject: () => ({})
-\t\t\t}, WechatBotPanel)), "wechat-bot: main page");
+\t\t\t}, () => react.createElement(WechatBotPanel, { onClose: closePanel }))), "wechat-bot: main page");
 \t\t\t// ② 侧栏入口（sidebar.panellist = 主视图面板列表；order 越小越靠前）
 \t\t\tctx.effect(() => ctx.slots.inject("sidebar.panellist", () => ctx.slots.register({
 \t\t\t\tname: "sidebar.panellist",

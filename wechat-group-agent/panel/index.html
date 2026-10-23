@@ -58,11 +58,17 @@
     font:14px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI","Microsoft YaHei",system-ui,sans-serif;
     font-feature-settings:"tnum" 1;-webkit-font-smoothing:antialiased;
     -moz-osx-font-smoothing:grayscale}
+  /* 独立打开（/wechat-bot）：页面自己当滚动容器。
+     嵌进 DSH 原生界面时 body 会被加上 .wx-embed-host —— 这时绝不能改宿主页面的
+     body 布局（flex/overflow 会把整个 DSH 界面改坏），只重置背景。 */
+  html{height:100%}
+  body:not(.wx-embed-host){height:100%;display:flex;flex-direction:column;overflow:hidden}
+  body.wx-embed-host{background:transparent}
   button,input,select,textarea{font:inherit;color:inherit}
   a{color:var(--accent);text-underline-offset:3px}
   a:hover{text-decoration:underline}
 
-  header{position:sticky;top:0;z-index:20;display:flex;align-items:center;gap:14px;flex-wrap:wrap;
+  header{position:static;z-index:20;display:flex;align-items:center;gap:14px;flex-wrap:wrap;flex:0 0 auto;
     padding:0 20px;height:52px;background:var(--card);border-bottom:1px solid var(--line)}
   .brand{font-weight:600;font-size:14px;white-space:nowrap;letter-spacing:-.01em}
   .brand small{color:var(--muted);font-weight:400;margin-left:6px;font-size:12px}
@@ -74,15 +80,23 @@
   .dot.ok{background:var(--ok)} .dot.warn{background:var(--warn)} .dot.bad{background:var(--bad)}
   .hswitch{display:flex;align-items:center;gap:7px;font-size:12px;color:var(--muted);white-space:nowrap}
 
-  .shell{display:flex;min-height:calc(100vh - 52px)}
+  .shell{display:flex;flex:1 1 auto;min-height:0}
   /* 侧栏用白底 + 内容区灰底 → 分区清楚 */
   nav{width:200px;flex:0 0 200px;padding:14px 10px;border-right:1px solid var(--line);
-    background:var(--card);position:sticky;top:52px;height:calc(100vh - 52px);overflow:auto}
+    background:var(--card);position:static;height:auto;overflow:auto}
   nav a{display:flex;align-items:center;gap:9px;padding:7px 10px;border-radius:var(--radius);color:var(--text);
     text-decoration:none;font-size:13.5px;margin-bottom:1px;transition:background .12s,color .12s}
   nav a:hover{background:var(--bg-deep);text-decoration:none}
   nav a.on{background:var(--accent-soft);color:var(--accent);font-weight:600}
-  main{flex:1;min-width:0;padding:24px 28px 72px;max-width:1160px}
+  main{flex:1;min-width:0;padding:24px 28px 72px;max-width:1160px;overflow:auto;min-height:0}
+
+  /* 嵌进 DSH 原生界面（lib/client.js 的 React 容器）时：
+     外层高度固定，滚动必须交给我们自己的 flex 布局 */
+  .wx-panel-embed{height:100%;display:flex;flex-direction:column;min-height:0;overflow:hidden}
+  .wx-panel-embed header{position:static;flex:0 0 auto}
+  .wx-panel-embed .shell{flex:1 1 auto;min-height:0}
+  .wx-panel-embed nav{overflow:auto;height:auto}
+  .wx-panel-embed main{overflow:auto;min-height:0}
 
   .banner{display:none;padding:11px 14px;border-radius:var(--radius);margin-bottom:16px;font-size:13px;
     border:1px solid var(--line);background:var(--card);box-shadow:var(--shadow)}
@@ -159,7 +173,10 @@
     border-color:var(--accent);box-shadow:inset 0 1px 2px rgba(31,35,40,.03),0 0 0 3px color-mix(in srgb,var(--accent) 18%,transparent)}
   input[type=text]::placeholder,textarea::placeholder{color:var(--muted)}
   input[type=range]{accent-color:var(--accent);width:150px}
-  textarea{height:auto;min-height:120px;padding:10px 11px;resize:vertical;line-height:1.6}
+  textarea{height:auto;min-height:240px;padding:10px 11px;resize:vertical;line-height:1.6;width:100%}
+  .field .ctl textarea{flex:1 1 100%;align-self:stretch}
+  /* 人设很长，给足空间（用户反馈：原来太小看不清在写什么） */
+  textarea[data-k="persona"]{min-height:380px}
   .num{width:96px}
   .unit{color:var(--muted);font-size:12px}
 
@@ -213,11 +230,11 @@
   #eyes-drop:hover{border-color:var(--teal) !important;background:color-mix(in srgb,var(--teal) 10%,var(--card)) !important}
 
   @media (max-width: 800px){
-    .shell{display:block}
-    nav{width:auto;position:sticky;top:52px;height:auto;border-right:0;border-bottom:1px solid var(--line);
-      display:flex;overflow:auto;gap:2px;padding:8px 10px;z-index:15}
+    .shell{flex-direction:column;overflow:hidden}
+    nav{width:auto;flex:0 0 auto;position:static;border-right:0;border-bottom:1px solid var(--line);
+      display:flex;overflow-x:auto;overflow-y:hidden;gap:2px;padding:8px 10px;z-index:15}
     nav a{margin:0;white-space:nowrap;padding:7px 11px}
-    main{padding:18px 14px 64px}
+    main{flex:1 1 auto;min-height:0;overflow:auto;padding:18px 14px 64px}
     .field{grid-template-columns:1fr}
     .field .help{grid-column:1}
     .pills{order:3;flex-basis:100%}
@@ -234,6 +251,8 @@
   <div class="pills" id="pills"><span class="pill">加载中…</span></div>
   <label class="hswitch">总开关 <span class="sw"><input type="checkbox" id="m-enabled"><i></i></span></label>
   <label class="hswitch">演练 <span class="sw"><input type="checkbox" id="m-dry"><i></i></span></label>
+  <!-- 仅在嵌进 DSH 原生界面时显示（client.js 挂载后打开）：返回对话视图 -->
+  <button class="btn" id="btn-close-panel" style="display:none" title="关闭面板，返回对话">✕ 关闭</button>
 </header>
 
 <div class="shell">
@@ -277,7 +296,6 @@ const NAV = [
   {id:'voice', title:'语音', icon:'🎙', groups:['voiceIn','voiceOut'], special:'voice'},
   {id:'memory', title:'记忆', icon:'🧠', groups:['memory'], special:'memory'},
   {id:'identity', title:'群与人', icon:'👥', groups:['identity'], special:'members'},
-  {id:'providers', title:'模型接口', icon:'🧩'},
   {id:'model', title:'人设模型', icon:'🐟', groups:['model']},
   {id:'eyes', title:'眼睛', icon:'👁', special:'eyes'},
   {id:'diag', title:'诊断', icon:'🔬', special:'diag'},
@@ -426,7 +444,6 @@ function renderActive(opts) {
   if (!nav) { App.tab = 'overview'; return renderActive(opts); }
   if (nav.id === 'overview') return renderOverview();
   if (nav.id === 'features') return renderFeatures();
-  if (nav.id === 'providers') return renderProviders();
   if (nav.id === 'manual') return renderManual();
   if (nav.id === 'eyes') return renderEyes();
   if (nav.id === 'diag') return renderDiag();
@@ -513,17 +530,17 @@ function imageConfigHTML(img) {
         <button class="btn" data-image-preset="glm">智谱 GLM</button>
         <span class="muted small">预设只改地址/模型；key 仍需在下面填</span>
       </div>
-      <div class="field"><div class="lab">接口地址</div><div class="ctl"><input id="img-url" type="text" style="flex:1;min-width:300px" value="${'$'}{esc(img.apiUrl || '')}"></div></div>
-      <div class="field"><div class="lab">模型</div><div class="ctl"><input id="img-model" type="text" style="flex:1;min-width:220px" value="${'$'}{esc(img.model || '')}"></div></div>
-      <div class="field"><div class="lab">凭据引用</div><div class="ctl"><input id="img-keyref" type="text" style="flex:1;min-width:220px" value="${'$'}{esc(img.keyRef || '')}"></div></div>
-      <div class="field"><div class="lab">API Key</div><div class="ctl"><input id="img-key" type="password" placeholder="${'$'}{img.hasApiKey ? '文件里已有 key；留空=不改' : '只写不读'}" style="flex:1;min-width:260px"></div></div>
+      <div class="field"><div class="lab">接口地址</div><div class="ctl"><input id="img-url" type="text" style="flex:1;min-width:300px" value="${esc(img.apiUrl || '')}"></div></div>
+      <div class="field"><div class="lab">模型</div><div class="ctl"><input id="img-model" type="text" style="flex:1;min-width:220px" value="${esc(img.model || '')}"></div></div>
+      <div class="field"><div class="lab">凭据引用</div><div class="ctl"><input id="img-keyref" type="text" style="flex:1;min-width:220px" value="${esc(img.keyRef || '')}"></div></div>
+      <div class="field"><div class="lab">API Key</div><div class="ctl"><input id="img-key" type="password" placeholder="${img.hasApiKey ? '文件里已有 key；留空=不改' : '只写不读'}" style="flex:1;min-width:260px"></div></div>
       <div class="field"><div class="lab">模式</div><div class="ctl"><select id="img-mode">
-        <option value="i2i" ${'$'}{img.mode === 'i2i' ? 'selected' : ''}>i2i 图生图（角色最像；Agnes）</option>
-        <option value="t2i" ${'$'}{img.mode === 't2i' ? 'selected' : ''}>t2i 文生图（OpenAI/xAI/GLM）</option>
+        <option value="i2i" ${img.mode === 'i2i' ? 'selected' : ''}>i2i 图生图（角色最像；Agnes）</option>
+        <option value="t2i" ${img.mode === 't2i' ? 'selected' : ''}>t2i 文生图（OpenAI/xAI/GLM）</option>
       </select></div></div>
       <div class="field"><div class="lab">请求格式</div><div class="ctl"><select id="img-style">
-        <option value="agnes" ${'$'}{img.style === 'agnes' ? 'selected' : ''}>Agnes 自定义字段</option>
-        <option value="openai" ${'$'}{img.style === 'openai' ? 'selected' : ''}>OpenAI 兼容（images/generations）</option>
+        <option value="agnes" ${img.style === 'agnes' ? 'selected' : ''}>Agnes 自定义字段</option>
+        <option value="openai" ${img.style === 'openai' ? 'selected' : ''}>OpenAI 兼容（images/generations）</option>
       </select></div></div>
       <div class="row"><button class="btn primary" id="img-save">保存图像接口</button>
         <button class="btn" id="img-test">生成一张测试图</button><span id="img-msg" class="small"></span></div>
@@ -1086,7 +1103,7 @@ async function renderStickerExtra() {
       <button class="btn" id="btn-pick">试挑一张</button></div>
     <div id="sticker-list" class="muted small" style="margin-top:10px">点「加载图库」查看。</div></div>
 
-    <div class="section"><div class="hd">✨ 现场生成（Agnes）</div>
+    <div class="section"><div class="hd">✨ 现场生成（走下面的自定义生图接口）</div>
       <div class="row">
         <select id="gen-emotion">${(App.S.config.genEmotions||[]).map(e => `<option>${esc(e)}</option>`).join('')}</select>
         <input id="gen-bubble" type="text" placeholder="气泡文字（可空）" style="flex:1;min-width:160px">
@@ -1095,6 +1112,14 @@ async function renderStickerExtra() {
       </div>
       <div class="small muted" style="margin-top:8px">生成会调用图生图，可能排队。发送需要选一个群。</div>
       <div id="gen-result" class="small mono" style="margin-top:8px"></div></div>`;
+
+  // ★ 自定义生图接口（原「模型接口」页已下线，统一放这里）：
+  //   保存时由插件写 <wx-bridge>/data/image-gen.json；桥每次生成都重新读
+  //   （wx-bridge/lib/genimage.mjs：env > 文件 > 内置默认），
+  //   所以这里配置好之后，所有"模型生成图片"（表情包现场生成等）都统一走这个接口。
+  try { App.image = (await api('/image')).config } catch { App.image = App.image || null }
+  box.insertAdjacentHTML('beforeend', imageConfigHTML(App.image))
+  bindImageEvents(() => renderStickerExtra())
   fillRoomSelect($('#gen-room'), true);
   ensureBridgeRooms().then(() => fillRoomSelect($('#gen-room'), true));
   $('#btn-stickers').onclick = loadStickers;
