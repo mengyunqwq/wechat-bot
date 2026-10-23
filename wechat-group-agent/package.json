@@ -5,10 +5,24 @@
   "private": true,
   "type": "module",
   "main": "./lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client.js",
+    "./package.json": "./package.json"
+  },
   "files": [
     "lib",
     "panel"
   ],
+  "dsh": {
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-client-runtime",
+        "@deepseek-ai/dsh-client-ui-slots"
+      ],
+      "platform": "web"
+    }
+  },
   "license": "BSD-3-Clause",
   "peerDependencies": {
     "@deepseek-ai/dsh-llm": ">=0.0.1-rc <2",
