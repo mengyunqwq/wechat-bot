@@ -153,9 +153,7 @@ export const CONFIG_META = {
   laterMaxMinutes: {
     group: 'style', label: '[稍后:N] 分钟上限', type: 'number', min: 0, max: 120, step: 5, unit: '分钟', advanced: true,
   },
-  patChance: {
-    group: 'style', label: '被@时拍一拍概率', type: 'number', min: 0, max: 1, step: 0.01,
-  },
+
   allowAt: {
     group: 'style', label: '允许真 @ 别人', type: 'bool',
     help: '正文写 "@群昵称" 并把 wxid 传给桥填 atlist，对方才会收到红点提醒。',
@@ -478,7 +476,6 @@ export const FEATURES = [
   { id: 'voiceOut', icon: '🎙', title: '语音发送', key: 'voiceSay', kind: 'bool', desc: '把回复合成微信语音气泡', risk: 'warn', related: ['voiceSayProbability', 'voiceSayEmotion'] },
   { id: 'sticker', icon: '😄', title: '表情包', key: 'stickerChance', kind: 'chance', defaultChance: 0.22, desc: '文字后补一张图库表情', related: ['genStickerChance'] },
   { id: 'split', icon: '✂️', title: '拆句', key: 'splitChance', kind: 'chance', defaultChance: 0.3, desc: '像真人一样分两三条发', related: ['maxLines'] },
-  { id: 'pat', icon: '👉', title: '拍一拍', key: 'patChance', kind: 'chance', defaultChance: 0.03, desc: '被@时偶尔拍一拍对方', related: [] },
   { id: 'canned', icon: '💤', title: '敷衍回复', key: 'cannedChance', kind: 'chance', defaultChance: 0.1, desc: '少量"哈哈/确实/6"短句', related: [] },
   { id: 'proactive', icon: '🌱', title: '主动找话题', key: 'proactive', kind: 'bool', desc: '群里安静久了主动冒泡', related: ['proactiveChance', 'proactiveHours'] },
   { id: 'sleep', icon: '🌙', title: '睡前晚安/早安', key: 'sleepAnnounce', kind: 'bool', desc: '跨作息点说一句，每群每天一次', related: [] },

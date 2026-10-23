@@ -33,12 +33,12 @@ export function createPetBridge({ getConfig, log }) {
     return c.petSync !== false
   }
 
-  async function post(path, body, timeoutMs = 2500) {
+  async function post(path, body, { surface, timeoutMs = 2500 } = {}) {
     const c = cfg()
     const base = String(c.petSyncBaseUrl || 'http://127.0.0.1:3080').replace(/\/+$/, '')
     const pet = encodeURIComponent(String(c.petSyncPetId || 'main'))
-    const surface = encodeURIComponent(String(c.petSyncSurface || 'desktop'))
-    const url = `${base}${PET_ROUTE}${path}?pet=${pet}&surface=${surface}`
+    const surf = encodeURIComponent(String(surface || c.petSyncSurface || 'desktop'))
+    const url = `${base}${PET_ROUTE}${path}?pet=${pet}&surface=${surf}`
     const ac = new AbortController()
     const timer = setTimeout(() => ac.abort(), timeoutMs)
     try {
@@ -62,6 +62,27 @@ export function createPetBridge({ getConfig, log }) {
     }
   }
 
+  /**
+   * 带 surface 回退的投递：桌宠的 display 可能是 desktop 也可能是 web
+   * （用户在 dsh-pet 设置里切过）。写死一端会一直吃 pet-not-displayed，
+   * 所以被拒时自动换另一端重试一次。
+   */
+  async function postAny(path, body) {
+    const preferred = String(cfg().petSyncSurface || 'desktop')
+    const r1 = await post(path, body, { surface: preferred })
+    if (r1 && r1.ok === false && r1.reason === 'pet-not-displayed') {
+      const other = preferred === 'desktop' ? 'web' : 'desktop'
+      const r2 = await post(path, body, { surface: other })
+      if (r2 && r2.ok) {
+        // 记住这次成功的那一端，下次直接用
+        try { if (getConfig().petSyncSurface !== other) getConfig().petSyncSurface = other } catch (e) { }
+        return r2
+      }
+      return r2 || r1
+    }
+    return r1
+  }
+
   /** 播一段动作（name 是素材池里的名字，见 assets/webm） */
   async function anim(name, { force = false } = {}) {
     if (!name || !enabled()) return false
@@ -74,7 +95,7 @@ export function createPetBridge({ getConfig, log }) {
     }
     lastAnimAt = now
     lastAnimName = name
-    const r = await post('/anim', { name: String(name) })
+    const r = await postAny('/anim', { name: String(name) })
     return !!(r && r.ok)
   }
 
@@ -84,7 +105,7 @@ export function createPetBridge({ getConfig, log }) {
     if (!t || !enabled()) return false
     const body = { text: t.slice(0, 300), duration }
     if (image) body.image = String(image)
-    const r = await post('/broadcast', body)
+    const r = await postAny('/broadcast', body)
     return !!(r && r.ok)
   }
 
@@ -93,7 +114,7 @@ export function createPetBridge({ getConfig, log }) {
     if (!enabled() || !state) return false
     const body = { state: String(state) }
     if (task) body.task = String(task).slice(0, 120)
-    const r = await post('/work-status', body)
+    const r = await postAny('/work-status', body)
     return !!(r && r.ok)
   }
 

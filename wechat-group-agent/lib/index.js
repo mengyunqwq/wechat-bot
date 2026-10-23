@@ -3039,13 +3039,8 @@ let res = await callLlm(route, sys, usr, undefined)
       }
     }
 
-    // 被@时偶尔拍一拍对方（真人小动作）
-    if (priority === 'at' && trigger.sender && Math.random() < config.patChance) {
-      try {
-        await client.call('pat', { roomId, wxid: trigger.sender })
-        stats.sentPat++
-      } catch { /* 拍一拍失败无所谓 */ }
-    }
+    // 拍一拍：**暂不实现**。bridge.pat() 是空实现（hook 侧没有这条 CGI），
+    // 之前这里 3% 概率的调用只会静默返回 -1。用户要求先下线，等 hook 实现再说。
 
     r.policy.noteReplied(Date.now(), trigger.sender)
     // 防重复②：记下"这句话已经回过了"，以及"我刚说过什么"
