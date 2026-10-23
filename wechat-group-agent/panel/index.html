@@ -225,10 +225,6 @@
     border-radius:4px;padding:2px 5px;color:var(--muted)}
   .skel{color:var(--muted);padding:24px 0;text-align:center}
 
-  /* 眼睛拖放区：青色虚线 + 淡渐变（全页重笔） */
-  #eyes-drop{border-radius:var(--radius) !important;border:2px dashed color-mix(in srgb,var(--teal) 45%,var(--line)) !important;
-    background:linear-gradient(180deg,color-mix(in srgb,var(--teal) 7%,var(--card)),var(--card)) !important}
-  #eyes-drop:hover{border-color:var(--teal) !important;background:color-mix(in srgb,var(--teal) 10%,var(--card)) !important}
 
   @media (max-width: 800px){
     #wx-panel .shell{flex-direction:column;overflow:hidden}
@@ -298,7 +294,6 @@ const NAV = [
   {id:'memory', title:'记忆', icon:'🧠', groups:['memory'], special:'memory'},
   {id:'identity', title:'群与人', icon:'👥', groups:['identity'], special:'members'},
   {id:'model', title:'人设模型', icon:'🐟', groups:['model']},
-  {id:'eyes', title:'眼睛', icon:'👁', special:'eyes'},
   {id:'diag', title:'诊断', icon:'🔬', special:'diag'},
   {id:'update', title:'更新', icon:'📦', special:'update'},
   {id:'ops', title:'运维日志', icon:'🩺', groups:['health','selfheal','advanced'], special:'ops'},
@@ -359,7 +354,7 @@ async function refresh(opts) {
   }
 }
 
-/* ── 诊断（崩溃 / 数据库 / 眼睛 / 磁盘）──────────────────
+/* ── 诊断（崩溃 / 数据库 / 磁盘）──────────────────
    为什么单独拉：要连 hook 的三个诊断端点，慢（并发也有 6 秒上限），
    所以只在「诊断」页和总览的崩溃卡需要时才拉，拉完缓存 60 秒。 */
 async function loadDiag(force) {
@@ -451,7 +446,6 @@ function renderActive(opts) {
   if (nav.id === 'overview') return renderOverview();
   if (nav.id === 'features') return renderFeatures();
   if (nav.id === 'manual') return renderManual();
-  if (nav.id === 'eyes') return renderEyes();
   if (nav.id === 'diag') return renderDiag();
   if (nav.id === 'update') return renderUpdate();
   if (nav.groups) {
@@ -1433,185 +1427,6 @@ async function loadLogs() {
   } catch (e) { box.textContent = '读取失败：' + e.message; }
 }
 
-/* ── 眼睛：拖入 zip 一键配置（2026-10-22）───────────────── */
-function renderEyes() {
-  const e = App.eyes;
-  const pkg = App.eyesPkg;      // 上传预检结果
-  const inst = App.eyesInst;    // 安装结果
-  if (!e) {
-    view.innerHTML = `<h2>眼睛 <span class="muted small">原图 / 视频整片</span></h2><div class="empty">读取中…</div>`;
-    api('/action', { method: 'POST', body: JSON.stringify({ op: 'eyesInfo' }) })
-      .then(j => { App.eyes = (j && j.result) || {}; if (App.tab === 'eyes') renderActive({}); })
-      .catch(err => { App.eyes = { dllError: err.message }; if (App.tab === 'eyes') renderActive({}); });
-    return;
-  }
-  const ok = e.dllHasEyes;
-  view.innerHTML = `<h2>眼睛 <span class="muted small">把压缩包拖进来，自动配置好</span></h2>
-
-    <div class="section"><div class="hd">📊 能力状态 <span class="muted">它决定下面两个能力能不能用</span></div>
-      <div class="grid">
-        <div class="card"><div class="t">🖼 读图（原图）</div>
-          <div class="k" style="font-size:16px">${ok && e.enabled ? "✅ 已启用" : "❌ 未启用"}</div>
-          <div class="d">${ok ? (e.enabled ? "看到的是全分辨率原图" : "DLL 支持，但重放开关是关的") : "需要拖入「大肥鱼的眼睛.zip」"}</div></div>
-        <div class="card"><div class="t">🎬 读视频（整片）</div>
-          <div class="k" style="font-size:16px">${ok && e.enabled && e.dllHasVideo ? "✅ 已启用" : "❌ 未启用"}</div>
-          <div class="d">${ok ? (e.dllHasVideo ? "按每秒 1 帧抽帧理解全程" : "该 DLL 不含视频整片") : "需要拖入「大肥鱼的眼睛.zip」"}</div></div>
-      </div>
-    </div>
-
-    <div class="zone" id="eyes-drop" style="border:2px dashed ${pkg ? 'var(--ok)' : 'var(--line)'};border-radius:10px;padding:26px;text-align:center;margin-bottom:14px;cursor:pointer;transition:.15s">
-      <div style="font-size:28px">📦</div>
-      <div style="margin-top:6px"><b>把「大肥鱼的眼睛.zip」拖到这里</b></div>
-      <div class="muted small" style="margin-top:4px">或点这里选文件 · 会自动校验、配置重放目录、开启开关</div>
-      <input type="file" id="eyes-file" accept=".zip" style="display:none">
-      <div id="eyes-upload-msg" class="small" style="margin-top:8px"></div>
-    </div>
-
-    ${pkg ? `<div class="section" style="border:1px solid ${pkg.ok === false ? 'var(--bad)' : (pkg.usable ? 'var(--ok)' : 'var(--warn)')}">
-      <div class="hd">${pkg.ok === false ? '❌' : (pkg.usable ? '✅' : '⚠️')} 预检结果 ${pkg.zipMB ? `<span class="muted">${esc(pkg.zipMB)}MB 上传包</span>` : ''}</div>
-      ${pkg.ok === false ? `<div class="small" style="color:var(--bad);white-space:pre-wrap">预检失败：${esc(pkg.error || '未知错误')}</div>` : `
-      <table class="table"><tbody>
-        <tr><td class="muted">DLL</td><td>${pkg.dllKB}KB · <span class="mono">${esc((pkg.sha256 || '').slice(0, 16))}…</span></td></tr>
-        <tr><td class="muted">CDN 重放</td><td>${pkg.hasReplay ? '✅ 有' : '❌ 没有'}</td></tr>
-        <tr><td class="muted">视频整片</td><td>${pkg.hasVideo ? '✅ 有' : '❌ 没有'}</td></tr>
-      </tbody></table>
-      ${pkg.usable ? '' : '<div class="small" style="color:var(--bad);margin-top:6px">这个包里的 DLL 不含 CDN 重放 → 装了也没有原图。请用带「眼睛」的版本。</div>'}`}
-      <div class="row" style="margin-top:10px">
-        <button class="btn primary" id="eyes-install" ${pkg.usable ? '' : 'disabled'}>安装到微信目录</button>
-        <span class="muted small">需要先完全退出微信</span>
-      </div>
-      <div id="eyes-install-msg" class="small" style="margin-top:8px;white-space:pre-wrap"></div>
-    </div>` : ''}
-
-    ${inst ? `<div class="section" style="border:1px solid var(--ok)">
-      <div class="hd">🎉 安装完成</div>
-      <table class="table"><tbody>
-        <tr><td class="muted">装到</td><td class="mono">${esc(inst.installedTo || '')}</td></tr>
-        <tr><td class="muted">旧 DLL 备份</td><td class="mono">${esc(inst.backup || '（原来没有）')}</td></tr>
-        <tr><td class="muted">重放目录</td><td class="mono">${esc(inst.replayDir || '')}</td></tr>
-      </tbody></table>
-      <div class="small" style="margin-top:6px;color:var(--ok)">${esc(inst.hint || '现在启动微信即可。')}</div>
-      <div class="row" style="margin-top:8px"><button class="btn" id="eyes-after">刷新状态</button></div>
-    </div>` : ''}
-
-    <div class="section"><div class="hd">${ok ? '✅' : '❌'} 当前 DLL 状态</div>
-      ${e.dllError ? '<div class="small" style="color:var(--bad)">读不到 DLL：' + esc(e.dllError) + '</div>' : `
-      <table class="table"><tbody>
-        <tr><td class="muted">路径</td><td class="mono">${esc(e.dllPath || '')}（${e.dllSizeKB || 0}KB）</td></tr>
-        <tr><td class="muted">CDN 重放</td><td>${e.dllHasReplay ? '✅ 有' : '❌ 没有'}</td></tr>
-        <tr><td class="muted">视频整片</td><td>${e.dllHasVideo ? '✅ 有' : '❌ 没有'}</td></tr>
-      </tbody></table>`}
-    </div>
-
-    <div class="section"><div class="hd">📁 重放目录 <span class="muted">一般不用改</span></div>
-      <div class="row">
-        <input id="eyes-dir" type="text" value="${esc(e.dir || '')}" style="flex:1;min-width:300px">
-        <button class="btn" id="eyes-save">保存</button>
-        <button class="btn" id="eyes-clean">清空</button>
-      </div>
-      <div class="small muted" style="margin-top:6px">${e.dirExists ? '存在' : '不存在'} · ${e.fileCount || 0} 个文件 · ${e.mb || 0} MB${e.newestAt ? ' · 最近 ' + esc(ago(e.newestAt)) : ''}</div>
-    </div>
-
-    <div class="section"><div class="hd">🔘 重放开关</div>
-      <div class="row"><label class="hswitch">开启
-        <span class="sw"><input type="checkbox" id="eyes-on" ${e.enabled ? 'checked' : ''}><i></i></span></label>
-        <button class="btn" id="eyes-refresh">刷新</button>
-      </div>
-    </div>`;
-
-  // ── 拖放 / 选文件 ──
-  const drop = $('#eyes-drop');
-  const fileInput = $('#eyes-file');
-  const uploadMsg = $('#eyes-upload-msg');
-  const doUpload = async (file) => {
-    if (!file) return;
-    if (!/\.zip$/i.test(file.name)) return toast('请拖入 .zip 文件', 'err');
-    if (uploadMsg) uploadMsg.textContent = '上传中（' + (file.size / 1024 / 1024).toFixed(1) + 'MB）…';
-    try {
-      const b64 = await new Promise((res, rej) => {
-        const r = new FileReader();
-        r.onload = () => res(String(r.result).split(',')[1] || '');
-        r.onerror = () => rej(new Error('读文件失败'));
-        r.readAsDataURL(file);
-      });
-      const j = await api('/action', { method: 'POST', body: JSON.stringify({ op: 'eyesUpload', args: { name: file.name, b64 } }) });
-      App.eyesPkg = (j && j.result) || null;
-      App.eyesInst = null;
-      if (uploadMsg) uploadMsg.textContent = '';
-      toast(App.eyesPkg && App.eyesPkg.usable ? '预检通过，可以安装' : '预检不通过（看下面的原因）', App.eyesPkg && App.eyesPkg.usable ? 'ok' : 'err');
-      renderEyes();
-    } catch (err) {
-      if (uploadMsg) uploadMsg.textContent = '上传失败：' + err.message;
-      toast('上传失败：' + err.message, 'err');
-    }
-  };
-  if (drop) {
-    drop.ondragover = (ev) => { ev.preventDefault(); drop.style.background = 'rgba(120,180,255,.08)'; drop.style.borderColor = 'var(--ok)'; };
-    drop.ondragleave = () => { drop.style.background = ''; drop.style.borderColor = pkg ? 'var(--ok)' : 'var(--line)'; };
-    drop.ondrop = (ev) => {
-      ev.preventDefault();
-      drop.style.background = ''; drop.style.borderColor = pkg ? 'var(--ok)' : 'var(--line)';
-      const f = ev.dataTransfer && ev.dataTransfer.files && ev.dataTransfer.files[0];
-      void doUpload(f);
-    };
-    drop.onclick = () => { if (fileInput) fileInput.click(); };
-  }
-  if (fileInput) fileInput.onchange = () => { void doUpload(fileInput.files && fileInput.files[0]); };
-
-  // ── 安装 ──
-  const instBtn = $('#eyes-install');
-  if (instBtn) instBtn.onclick = async () => {
-    instBtn.disabled = true; instBtn.textContent = '安装中…';
-    const msg = $('#eyes-install-msg');
-    try {
-      const j = await api('/action', { method: 'POST', body: JSON.stringify({ op: 'eyesInstall' }) });
-      const r = (j && j.result) || {};
-      if (r.ok) {
-        App.eyesInst = r; App.eyesPkg = null; App.eyes = null;
-        toast('安装完成，启动微信即可', 'ok');
-        renderEyes();
-      } else {
-        msg.textContent = r.error || '安装失败';
-        if (r.needExit) msg.textContent += '\n\n退出微信后，再点一次「安装到微信目录」。';
-        toast(r.error || '安装失败', 'err');
-      }
-    } catch (err) { msg.textContent = err.message; toast('安装失败：' + err.message, 'err'); }
-    finally { if (instBtn) { instBtn.disabled = false; instBtn.textContent = '安装到微信目录'; } }
-  };
-  const after = $('#eyes-after');
-  if (after) after.onclick = () => { App.eyesInst = null; App.eyes = null; renderEyes(); };
-
-  // ── 目录 / 开关 ──
-  const save = $('#eyes-save');
-  if (save) save.onclick = async () => {
-    const dir = $('#eyes-dir').value.trim();
-    if (!dir) return toast('目录不能为空', 'err');
-    try {
-      await api('/action', { method: 'POST', body: JSON.stringify({ op: 'eyesSetDir', args: { dir } }) });
-      toast('已保存：' + dir, 'ok'); App.eyes = null; setTimeout(renderEyes, 200);
-    } catch (err) { toast('保存失败：' + err.message, 'err'); }
-  };
-  const clean = $('#eyes-clean');
-  if (clean) clean.onclick = async () => {
-    if (!confirm('清空重放目录里的缓存文件？')) return;
-    try {
-      const j = await api('/action', { method: 'POST', body: JSON.stringify({ op: 'eyesClean' }) });
-      toast('已清理 ' + ((j.result && j.result.removed) || 0) + ' 个文件', 'ok');
-      App.eyes = null; setTimeout(renderEyes, 200);
-    } catch (err) { toast('清理失败：' + err.message, 'err'); }
-  };
-  const on = $('#eyes-on');
-  if (on) on.onchange = async (ev) => {
-    try {
-      await api('/action', { method: 'POST', body: JSON.stringify({ op: 'eyesToggle', args: { on: ev.target.checked } }) });
-      toast(ev.target.checked ? '重放已开启' : '重放已关闭', 'ok'); App.eyes = null; setTimeout(renderEyes, 300);
-    } catch (err) { toast('切换失败：' + err.message, 'err'); ev.target.checked = !ev.target.checked; }
-  };
-  const ref = $('#eyes-refresh');
-  if (ref) ref.onclick = () => { App.eyes = null; renderEyes(); };
-}
-
-
 /* ── 更新（自动检查 GitHub main 分支）────────────────────── */
 function renderUpdate() {
   if (!App.updInfo) {
@@ -1706,7 +1521,7 @@ function renderUpdate() {
   };
 }
 
-/* ── 诊断（崩溃 / 数据库 / 眼睛 / 磁盘 / 路由）────────────── */
+/* ── 诊断（崩溃 / 数据库 / 磁盘 / 路由）────────────── */
 function renderDiag() {
   view.innerHTML = `<h2>诊断 <span class="muted small">环境与链路体检</span></h2>
     <div class="row" style="margin-bottom:10px">
@@ -1771,17 +1586,6 @@ function renderDiag() {
         </tbody></table>`}
       </div>
 
-      <div class="section"><div class="hd">👁 眼睛（高分辨率 media provider）</div>
-        ${hr.error ? '<div class="empty">读不到：' + esc(hr.error) + '</div>' : `
-        <table class="table"><tbody>
-          ${row('目录', hr.dir || '')}
-          ${row('文件数', String(hr.count || 0), (hr.count || 0) === 0)}
-          ${row('占用', (hr.mb || 0) + ' MB')}
-          ${row('最近写入', hr.newestAt ? fmtTime(hr.newestAt) + '（' + ago(hr.newestAt) + '）' : '无')}
-        </tbody></table>
-        <div class="row" style="margin-top:8px"><button class="btn" id="diag-hires-clean">清理该目录</button>
-          <span class="muted small">只删本机缓存的原图/整片，不影响微信</span></div>`}
-      </div>
 
       <div class="section"><div class="hd">💾 磁盘 / 路由</div>
         ${dk.error ? '<div class="empty">' + esc(dk.error) + '</div>' : `
