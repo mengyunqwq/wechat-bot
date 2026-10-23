@@ -127,7 +127,7 @@ http://127.0.0.1:3080/wechat-bot
 | 🩺 **运维日志** | 健康检查、自愈、高级接入配置与日志查看 |
 | 🕹 **手动操作** | 发文字 / 发语音（合成）/ 发表情包，选群发送 |
 
-**眼睛**：能力已包含在 Release 的 `version.dll` 里，装好 Hook 即生效；面板不再提供「眼睛」安装页（之前需要拖入 zip 的那一页已移除）。验证：`GET http://127.0.0.1:30001/Debug/VuProbe` 应返回 `hooksOk: 9/9`。
+**眼睛**：能力已内置在 `version.dll`（仓库 `release/` 与 Release 附件）里，装好 Hook 即生效；面板已移除「眼睛」安装页，不需要再拖 zip。验证：`GET http://127.0.0.1:30001/Debug/VuProbe` 应返回 `hooksOk: 9/9`。
 
 ---
 
@@ -137,26 +137,31 @@ http://127.0.0.1:3080/wechat-bot
 
 见上文 **[📦 成品包下载](#-成品包下载推荐不会编译也能装)**，完整流程见 [docs/安装流程.md](docs/安装流程.md)。
 
-### 方式二：从源码部署
+### 方式二：手动部署（或交给 AI 照文档做）
 
 ```powershell
 git clone https://github.com/mengyunqwq/wechat-bot.git wechat-bot
 cd wechat-bot
 
-# 一键部署：环境检查 → 装依赖 → 写配置 → 启动 → 健康检查
-pwsh -ExecutionPolicy Bypass -File .\一键部署.ps1 -HookDll "D:\path\to\version.dll"
+# 1) 装依赖
+cd wx-bridge; npm install; cd ..
+python -m pip install pycryptodome zstandard pilk imageio-ffmpeg Pillow edge-tts
+
+# 2) 配置
+copy config.example.json config.json      # 按 DEPLOY.md 第 3 节改字段
+
+# 3) 部署 Hook（release\version.dll → 独立微信目录，先完全退出微信）
+#    见 DEPLOY.md 第 1、2 节
+
+# 4) 启动桥
+node wx-bridge\server.mjs --transport=wechat-hook --api-port=30001 --cb-port=18998 `
+     --data-dir="D:\wechat-bot\data" --wechat="D:\wxhook\wx4110\Weixin.exe"
 ```
 
-| 参数 | 作用 |
-|---|---|
-| `-HookDll <路径>` | 已有 `version.dll` 时直接部署（最快，配合成品包使用）|
-| `-SkipHook` | 只装代码和依赖，不碰微信 |
-| `-NoStart` | 只准备，不启动 |
-| `-DshPort 8080` | 你的 DSH 不在 3080 时指定 |
-| `-WeChatDir "D:\wxhook\wx4110"` | 指定微信目录 |
+> **推荐做法**：把 **[docs/AI-一键部署.md](docs/AI-一键部署.md)** 整段发给 AI（豆包 / Claude / Cursor / DSH），
+> 它会照着手动步骤装完并逐项验证（这份文档是自包含的，不依赖任何一键脚本）。
 
-> 自行从**原版 Hook 源码**编译的完整步骤（含原版为什么不能直接用、桥依赖的接口契约）见
-> [docs/安装流程.md](docs/安装流程.md) 2.2 节。
+> 想从**原版 Hook 源码**自行编译，见 [docs/安装流程.md](docs/安装流程.md) 2.2 节。
 
 ---
 

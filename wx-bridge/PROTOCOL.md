@@ -39,7 +39,7 @@
 | `wechat_send_sticker` | 按语境挑一张发出去 |
 | `wechat_generate_sticker` | Agnes 现场生成表情包（题材 + 场景 + 文字气泡） |
 | `wechat_get_image` | 取群里最近一张图并**自动解密**，返回可读文件路径 |
-| `wechat_pat` | 拍一拍某人 |
+| `wechat_pat` | ⚠️ 拍一拍（未实现：hook 无对应接口，调用返回 -1）|
 
 > ⚠️ **节流归谁管**：MCP 工具是**直发**的（调 `wechat_send_text` 立刻发出去）。机器人自己的拟人节流（回复间隔、频率上限、作息、防重复）由 **DSH 插件** 或 **桥的托管模式** 负责。外部 agent 接入时请自行控制节奏，或改用托管模式。
 
@@ -108,7 +108,7 @@
 | `genSticker` | `emotion`,`extra?`,`bubble?`,`force?` | Agnes 生成表情包（题材/场景/气泡） |
 | `addBubble` | `file`,`text`,`pos?` | 给已有图加文字气泡 |
 | `fetchMedia` | `xml`,`type`,`roomId?`,`ts?` | 取媒体文件（图片会**自动解密**） |
-| `pat` | `roomId`,`wxid` | 拍一拍 |
+| `pat` | `roomId`,`wxid` | ⚠️ 拍一拍（未实现，返回 -1）|
 | `revoke` | `roomId`,`msgid` | 撤回 |
 | `forward` | `roomId`,`msgid` | 转发 |
 

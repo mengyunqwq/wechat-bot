@@ -70,7 +70,7 @@ README.txt / SHA256.txt
 
 > 想用一条命令走完部署：
 > ```powershell
-> pwsh -ExecutionPolicy Bypass -File .\一键部署.ps1 -HookDll "解压目录\version.dll"
+> 手动步骤见本文第 1~4 节；也可以把 [docs/AI-一键部署.md](docs/AI-一键部署.md) 整段交给 AI 代为执行。
 > ```
 
 ### 方案 B：自行编译（需要源码 + 补丁，不推荐新手）

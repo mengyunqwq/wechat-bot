@@ -208,13 +208,13 @@ AI 拿到这段指令后会自己：查环境 → 装依赖 → 复制独立微�
       maxConsecutiveTurns, repeatWindowMs, quietHours, quietAllow, quietAllowAt,
       sleepAnnounce, sleepAnnounceWindowMs, debounceMs,
       stickerChance, genActivities, genEmotions, genStickerChance, splitChance, maxLines,
-      partTargetLen, maxPartsLimit, splitHardMax, longBubbleMax, laterMaxMinutes, patChance,
+      maxPartsLimit, splitHardMax, longBubbleMax, laterMaxMinutes,
       proactive, proactiveQuietMs, proactiveMinGapMs, proactiveChance, proactiveMaxStreak,
       proactiveCheckMs, proactiveHours,
       contextMessages, historyLookup, historyLimit, historyScan, backfillLimit,
       memoryDir, logFile, dryRun
     工具描述里【列出的】只是其中一部分（enabled/dryRun/persona/replyProbability/minReplyGapMs/
-    maxRepliesPer10Min/quietHours/stickerChance/splitChance/patChance/botName/rooms/temperature/
+    maxRepliesPer10Min/quietHours/stickerChance/splitChance/botName/rooms/temperature/
     voiceOnVoice/voiceSay/voiceSayProbability/voiceSayOnVoiceProbability/voiceSayMaxChars/
     voiceSayEmotion/healthAlert/healthAlertQuietMs/healthCheckMs/videoDeleteAfterRead/
     videoUpgradeDelayMs/videoFrames），但实现上 DEFAULT_CONFIG 里的键都能改。
@@ -223,16 +223,9 @@ AI 拿到这段指令后会自己：查环境 → 装依赖 → 复制独立微�
       voiceSay      默认 false        → 发语音气泡总开关，默认关（还要配合 hook-voice-send.on）
       voiceOnVoice  默认 true         → 收语音自动转文字，默认开
 ═══ 阶段 5：启动与验证 ═══
-5.1 【先修一个已知缺陷，否则起不来】
-    本仓库的 wx-bridge/server.mjs 顶部静态 import 了两个【仓库里不存在的模块】：
-      ./lib/wcf.mjs  和  ./lib/wxhelper.mjs
-    Node 的静态 import 在模块求值前就解析，所以直接 `npm start` 会立刻
-    ERR_MODULE_NOT_FOUND 退出 —— 即使你只用 wechat-hook 这一条链路也一样。
-    绕过办法（在【仓库根目录】执行，只建两个最小占位模块，不改任何逻辑）：
-      node -e "const fs=require('fs');fs.writeFileSync('wx-bridge/lib/wcf.mjs','export class WcfBridge {}\n');fs.writeFileSync('wx-bridge/lib/wxhelper.mjs','export class WxhelperBridge {}\n');console.log('stub ok')"
-    并在报告里明确告诉人类：这是仓库缺文件，建议上游补回这两个模块或删掉那两行 import。
+5.1 启动前确认：`cd wx-bridge` 后已执行过 `npm install`（`node_modules` 存在）；不需要任何占位模块。
 5.2 启动（必须带 --transport=wechat-hook；不带会走 wxhelper 分支，那是另一套已废弃的 DLL 链路）：
-    # 在【仓库根目录】执行；下面的日志路径按仓库根算
+    # 在【wx-bridge 目录】执行（server.mjs 就在里面）
     node server.mjs --transport=wechat-hook --api-port=30001 --cb-port=18998 --data-dir=..\data --wechat="D:\wxhook\wx4110\Weixin.exe" > ..\data\logs\bridge-hook.out.log 2>&1
     （后台常驻用 PowerShell：
        Start-Process -FilePath node -ArgumentList 'server.mjs','--transport=wechat-hook','--api-port=30001','--cb-port=18998','--data-dir=..\data','--wechat=D:\wxhook\wx4110\Weixin.exe' -WorkingDirectory (Get-Location) -WindowStyle Hidden
@@ -470,7 +463,7 @@ maxRepliesPer10Min, cannedChance, conversationWindowMs, continuationChance,
 maxConsecutiveTurns, repeatWindowMs, quietHours, quietAllow, quietAllowAt,
 sleepAnnounce, sleepAnnounceWindowMs, debounceMs,
 stickerChance, genActivities, genEmotions, genStickerChance, splitChance, maxLines,
-partTargetLen, maxPartsLimit, splitHardMax, longBubbleMax, laterMaxMinutes, patChance,
+maxPartsLimit, splitHardMax, longBubbleMax, laterMaxMinutes,
 proactive, proactiveQuietMs, proactiveMinGapMs, proactiveChance, proactiveMaxStreak,
 proactiveCheckMs, proactiveHours,
 contextMessages, historyLookup, historyLimit, historyScan, backfillLimit,
@@ -482,7 +475,7 @@ memoryDir, logFile, dryRun
 | `voiceSay` | `false` | 发语音气泡**总开关默认关**；要"会说话"得先开它 + hook 侧 `hook-voice-send.on` |
 | `voiceOnVoice` | `true` | 收语音自动转文字默认开；不想转就设 `false` |
 > ⚠️ 工具描述里只列了 25 个键（`enabled/dryRun/persona/replyProbability/minReplyGapMs/
-> maxRepliesPer10Min/quietHours/stickerChance/splitChance/patChance/botName/rooms/temperature/
+> maxRepliesPer10Min/quietHours/stickerChance/splitChance/botName/rooms/temperature/
 > voiceOnVoice/voiceSay/voiceSayProbability/voiceSayOnVoiceProbability/voiceSayMaxChars/
 > voiceSayEmotion/healthAlert/healthAlertQuietMs/healthCheckMs/videoDeleteAfterRead/
 > videoUpgradeDelayMs/videoFrames`），但实现上 `DEFAULT_CONFIG` 的键都能改 —— 这是文档与实现的不一致。
@@ -586,7 +579,7 @@ memoryDir, logFile, dryRun
 | `POST /api/sticker/send` | 按语境挑一张表情包发出去 |
 | `POST /api/sticker/gen` | 现场生成表情包（`subject` 必填） |
 | `POST /api/image` | 取群里最近一张图并解密 |
-| `POST /api/pat` | 拍一拍 |
+| `POST /api/pat` | ⚠️ 拍一拍（Hook 侧无实现，调用返回失败；已从面板移除）|
 | `POST /api/revoke` | 撤回 |
 | `GET/POST /api/hosted` | 托管模式配置 |
 | `POST /api/policy/decide` | 只借用"该不该回"的判断 |
