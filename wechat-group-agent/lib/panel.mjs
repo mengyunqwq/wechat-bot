@@ -20,7 +20,7 @@ const PAGE_CANDIDATES = [join(HERE, '..', 'panel', 'index.html'), join(HERE, 'pa
 const HIGH_RISK_OPS = new Set(['genSticker', 'douyinBrush', 'selfheal', 'memory.clear', 'memory.clearAll', 'config.import'])
 const ALLOWED_OPS = new Set([
   'status', 'selfcheck', 'rooms', 'members', 'history', 'searchMessages',
-  'sendText', 'sayVoice', 'sendSticker', 'pickSticker', 'voiceSwitch', 'pat',
+  'sendText', 'sayVoice', 'sendSticker', 'pickSticker', 'voiceSwitch',
   'stickers', 'genSticker', 'genEmotions',
   'memory.list', 'memory.add', 'memory.clear', 'memory.extract',
   'names.set', 'names.add', 'names.refresh',

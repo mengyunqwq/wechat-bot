@@ -4815,12 +4815,7 @@ let res = await callLlm(route, sys, usr, undefined)
         return await client.call('pickSticker', { text: String(a.text || ''), minScore: 0 }, 8000)
       case 'voiceSwitch':
         return await client.call('voiceSwitch', a.on === undefined ? {} : { on: !!a.on }, 8000)
-      case 'pat': {
-        const room = await resolveRoom(a.room)
-        const res = await client.call('pat', { roomId: room.roomId, wxid: String(a.wxid || '') }, 8000)
-        stats.sentPat++
-        return res
-      }
+
       case 'stickers':
         return await client.call('stickers', { limit: Number(a.limit) || 30 }, 10_000)
       case 'genEmotions':
