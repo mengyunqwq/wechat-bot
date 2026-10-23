@@ -1103,11 +1103,29 @@ export class WeChatHookBridge {
     return ''
   }
 
-  /** 查/改 hook 的语音发送开关（内存态，优先级高于 .on 文件） */
+  /**
+   * 查/改 hook 的语音发送开关（内存态，优先级高于 .on 文件）。
+   *
+   * ★ 2026-10-23 修：面板切换原来只改 hook 运行时内存，**微信一重启就恢复关闭**，
+   *   用户会以为"面板开关不管用"。现在切换成功的同时**同步建/删标记文件**
+   *   <客户端目录>\hook-voice-send.on —— 这样重启微信后仍然是用户选的状态。
+   */
   async voiceSendSwitch(on) {
     try {
       const body = (on === undefined) ? {} : { on: !!on }
       const r = await this.api('/Debug/VoiceSend', body, 'POST', 8000)
+      if (on !== undefined && r) {
+        try {
+          const marker = join(this.clientDir, 'hook-voice-send.on')
+          if (on) {
+            if (!existsSync(marker)) writeFileSync(marker, '')
+          } else if (existsSync(marker)) {
+            unlinkSync(marker)
+          }
+        } catch (e) {
+          this.log('语音：同步标记文件失败：' + String(e?.message || e).slice(0, 120))
+        }
+      }
       return r || null
     } catch (e) {
       this.log('语音：调 /Debug/VoiceSend 失败：' + String(e?.message || e).slice(0, 120))
