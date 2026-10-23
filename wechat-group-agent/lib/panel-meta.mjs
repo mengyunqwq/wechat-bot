@@ -138,9 +138,6 @@ export const CONFIG_META = {
   maxLines: {
     group: 'style', label: '一条回复最多拆几条', type: 'number', min: 1, max: 10, step: 1, unit: '条',
   },
-  partTargetLen: {
-    group: 'style', label: '每段目标字数', type: 'number', min: 10, max: 500, step: 5, unit: '字', advanced: true,
-  },
   maxPartsLimit: {
     group: 'style', label: '长文本最多拆几条', type: 'number', min: 1, max: 20, step: 1, unit: '条', advanced: true,
   },

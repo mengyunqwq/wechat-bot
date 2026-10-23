@@ -795,7 +795,12 @@ const namesFile = join(dirname(memoryDir), 'members.json')
     if (!m.isSelf) r.proactiveStreak = 0
     // 带上 msgid：视频"延迟复查"升级内容时要能找回**这一条**的上下文副本（r.msgs 里是拷贝）
     const senderName = m.isSelf ? (m.senderName || '我') : nameOf(m.sender, m.senderName)
-    const text = String(m.text || '')
+    // ★ 入账文本统一走 textForLlm()：图片/表情/视频/语音的 m.text 是**原始 XML**，
+    //   以前直接存进记忆 → 上下文和面板历史里会看到 <msg><img ...> 这种鬼东西。
+    //   textForLlm 会给出 [图片]/[表情包]/[视频]/[语音] 或识别描述。
+    const text = (typeof m.textForLlm === 'function')
+      ? String(m.textForLlm() ?? '')
+      : sanitizeText(m.text)
     const ts = m.ts || Date.now()
 
     // ★ 2026-10-22 修：自己发的消息会被**记两次**，面板因此显示两遍。
@@ -1687,6 +1692,25 @@ let res = await callLlm(route, sys, usr, undefined)
   }
 
   function buildUser(r, batch, trigger, priority) {
+    /**
+     * 清洗消息正文：桥侧对某些类型（表情/图片/语音…）给的是**原始 XML**，
+     * 有时还带 "wxid_xxx:\n" 前缀。直接塞进上下文会让模型看到一堆 <msg><emoji…>。
+     * 这里统一转成人类可读的占位符。
+     */
+    function sanitizeText(raw) {
+      let s = String(raw || '')
+      // 去掉 "wxid_xxx:\n" / "123@chatroom:\n" 这种发送者前缀
+      s = s.replace(/^[A-Za-z0-9_@.\-]{3,}:\s*\r?\n/, '')
+      if (/<emoji\b/i.test(s)) return '[表情包]'
+      if (/<img\b|<img\s/i.test(s)) return '[图片]'
+      if (/<voicemsg\b|<voice\b/i.test(s)) return '[语音]'
+      if (/<videomsg\b/i.test(s)) return '[视频]'
+      if (/<appmsg\b/i.test(s)) return '[链接/卡片]'
+      if (/<sysmsg\b/i.test(s)) return '[系统消息]'
+      if (/<msg\b/i.test(s)) return '[消息]'
+      return s
+    }
+
     const showText = (m) => {
       // 视频：把"抽的几帧画面 + 音轨转写"如实拼出来（只有封面时也说明白）
       if (m.videoCover || m.videoSeconds || m.videoAudio || (m.typeName === 'video' && m.imageDesc)) {
@@ -1707,7 +1731,7 @@ let res = await callLlm(route, sys, usr, undefined)
       if (m.typeName === 'image') return '[图片]'
       if (m.typeName === 'video') return '[视频]'
       if (m.typeName === 'app') return '[链接/卡片]'
-      return m.text
+      return sanitizeText(m.text)
     }
     const lines = r.msgs.slice(-config.contextMessages).map((m) => `${m.isSelf ? '我' : m.senderName}: ${showText(m)}`)
     // ★ 时间观念：完整日期 + 星期 + 时段（不再只给 HH:MM）
@@ -2980,9 +3004,16 @@ let res = await callLlm(route, sys, usr, undefined)
         let stickerId = ''
         let how = ''
         // ① 只要情绪、没要场景 → 先用图库里现成的（秒发）
+        //   ★ genStickerChance：按这个概率**跳过图库、直接现场画**（让"现场生成概率"这个配置真的生效；
+        //     以前它只在配置表里躺着，代码完全没读）
         if (reply.emotion && !reply.scene) {
-          const lib = await client.call('pickSticker', { text: reply.emotion, roomId, minScore: 3, requireTag: true })
-          if (lib?.id) { stickerId = lib.id; how = `图库(情绪匹配 ${reply.emotion})` }
+          const genChance = Math.max(0, Math.min(1, Number(config.genStickerChance ?? 0.25)))
+          if (Math.random() >= genChance) {
+            const lib = await client.call('pickSticker', { text: reply.emotion, roomId, minScore: 3, requireTag: true })
+            if (lib?.id) { stickerId = lib.id; how = `图库(情绪匹配 ${reply.emotion})` }
+          } else {
+            log(`现场生成概率命中（${genChance}）→ 跳过图库，直接画「${reply.emotion}」`)
+          }
         }
         // ② 需要现场画（指定了场景，或图库没匹配上）→ **丢后台**，好了再补发；不阻塞本条回复
         if (!stickerId && reply.emotion) {
