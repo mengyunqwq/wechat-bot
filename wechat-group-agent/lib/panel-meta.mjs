@@ -33,6 +33,7 @@ export const GROUPS = [
   { id: 'model', title: '人设与模型', icon: '🐟', desc: '人格、模型、温度、长度' },
   { id: 'health', title: '健康告警', icon: '❤️', desc: '失联监控与告警' },
   { id: 'selfheal', title: '自愈（高危）', icon: '🚨', desc: '仅 hook 死锁时自动重启客户端' },
+  { id: 'pet', title: '桌宠联动', icon: '🐟', desc: '桌面上的大肥鱼跟着做动作' },
   { id: 'advanced', title: '高级/接入', icon: '🔧', desc: '桥地址、日志与记忆目录' },
 ]
 
@@ -219,6 +220,45 @@ export const CONFIG_META = {
   },
   videoUpgradeFollowUp: {
     group: 'vision', label: '升级后补一句', type: 'bool', advanced: true,
+  },
+
+  // ── 桌宠联动（dsh-pet：桌面上的蓝色大肥鱼）──────────────────────
+  //  她才是本体，微信只是她干活的手：收消息→表情，思考/回完→动作，出错→叹气。
+  petSync: {
+    group: 'pet', label: '桌宠联动开关', type: 'bool',
+    help: '开着时，桌面上的蓝色大肥鱼会跟着群里的事做表情/动作（需要装 dsh-pet 插件）。',
+  },
+  petSyncBaseUrl: {
+    group: 'pet', label: '桌宠接口地址', type: 'text', advanced: true,
+    help: '默认 http://127.0.0.1:3080 —— 即 DSH 网页端地址；改过端口就填新的。',
+  },
+  petSyncPetId: {
+    group: 'pet', label: '桌宠 id', type: 'text', advanced: true,
+    help: '默认 main（dsh-pet 配置里 pets[].id）',
+  },
+  petSyncSurface: {
+    group: 'pet', label: '显示端', type: 'enum', options: ['desktop', 'web', 'both', 'any'], advanced: true,
+    help: 'desktop = 桌面宠物（默认）；web = 网页里那只',
+  },
+  petSyncMinGapMs: {
+    group: 'pet', label: '动作最短间隔', type: 'number', min: 500, max: 60000, step: 100, unit: 'ms',
+    help: '防止群里连续几条消息时她疯狂抽搐',
+  },
+  petSyncAnimOnReceive: {
+    group: 'pet', label: '收到消息时', type: 'text',
+    help: '动作素材名（见 dsh-pet assets/webm），如：点击回应-害羞惊讶',
+  },
+  petSyncAnimOnThinking: {
+    group: 'pet', label: '思考时', type: 'text',
+    help: '如：工作状态-思考冒泡',
+  },
+  petSyncAnimOnSent: {
+    group: 'pet', label: '回复后', type: 'text',
+    help: '如：工作状态-雀跃庆祝',
+  },
+  petSyncAnimOnError: {
+    group: 'pet', label: '出错时', type: 'text',
+    help: '如：工作状态-垂头叹气冒汗',
   },
 
   // ── 链接视频 ────────────────────────────────────────────────

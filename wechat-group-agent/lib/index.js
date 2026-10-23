@@ -21,6 +21,7 @@ import { join, dirname } from 'node:path'
 import { homedir } from 'node:os'
 import { createHash, randomUUID } from 'node:crypto'
 import { BridgeClient } from './bridge-client.mjs'
+import { createPetBridge } from './pet-bridge.mjs'
 // 配置元数据先静态拿一份（校验用）；真正挂面板时会用带 cache-bust 的动态 import
 // 再加载一份最新的（热重载后改了 label/范围不用重启 DSH）。
 import { CONFIG_META as STATIC_CONFIG_META } from './panel-meta.mjs'
@@ -289,6 +290,21 @@ const DEFAULT_CONFIG = {
   visionModel: 'deepseek-v4-flash-vision-exp',
   imageReplyProbability: 0.5,    // 看到（识别出的）图片时回话的概率
 
+  // ── 桌宠联动（dsh-pet：桌面上的蓝色大肥鱼）──────────────────────────
+  // 她才是本体，微信只是她干活的手：收消息→表情，思考/回完→动作，出错→叹气。
+  // 走 dsh-pet 的 HTTP 接口（/dsh-pet-7340/*，不需要鉴权）；
+  // 没装/没开/端口变了都**静默跳过**，绝不影响机器人本体。
+  petSync: true,                                    // 总开关
+  petSyncBaseUrl: 'http://127.0.0.1:3080',          // DSH web 地址（桌宠接口挂在它上面）
+  petSyncPetId: 'main',                             // 桌宠 id（配置里的 pets[].id）
+  petSyncSurface: 'desktop',                        // web / desktop / both / any
+  petSyncMinGapMs: 2000,                            // 两次动作最短间隔（防刷屏）
+  petSyncAnimOnReceive: '点击回应-害羞惊讶',          // 群里有人说话 → 表情
+  petSyncAnimOnThinking: '工作状态-思考冒泡',         // 开始想怎么回 → 动作
+  petSyncAnimOnSent: '工作状态-雀跃庆祝',             // 回复发出去 → 动作
+  petSyncAnimOnError: '工作状态-垂头叹气冒汗',        // 出错/失联 → 表情
+
+
   // ── 语音识别（群里发语音 → 转成文字 → 当普通消息处理）────────────
   // 音频由桥侧定位并解码成 16k/单声道/PCM16 WAV（wx-bridge/lib/wechat-voice.mjs），
   // 事件里带 voiceWav 绝对路径；这里调 DSH 的 speechToText 服务转写（本地 SenseVoice，
@@ -406,6 +422,9 @@ const BUILD_VER = '2026-10-22.23'   // 抬版本：让新实例压过热重载�
       for (const [k, v] of Object.entries(saved)) { if (k in DEFAULT_CONFIG) config[k] = v }
     }
   } catch { /* 文件坏了用默认 */ }
+
+  // 桌宠联动实例（dsh-pet 的蓝色大肥鱼）：装饰层，任何失败都静默
+  const pet = createPetBridge({ getConfig: () => config, log })
 
   // ── 配置的单一写入口（面板 / wechat_bot_config 工具共用）──────────────
   // 以前工具里内联改值，面板再写一套就会漂移；现在统一走这里：
@@ -970,6 +989,10 @@ const namesFile = join(dirname(memoryDir), 'members.json')
     }
     r.policy.noteOther()
 
+    // 桌宠：群里有人说话 → 她先"看过来"（表情动作）
+    //   限频在 pet-bridge 里（默认 2s），连发多条不会疯狂抽搐
+    void pet.anim(config.petSyncAnimOnReceive)
+
     // 有人说话了 → 说明我刚问的问题被接了（或已经不重要了），别再追问同一件事
     if (r.pendingQuestion) {
       log(`对方接话了（${m.senderName}），清掉待答问题：${JSON.stringify(r.pendingQuestion.text.slice(0, 30))}`)
@@ -1449,11 +1472,15 @@ let res = await callLlm(route, sys, usr, undefined)
     }
 
     let reply
+    // 桌宠：开始动脑子想怎么回 → 思考动作（force：强信号，不受限频影响）
+    void pet.anim(config.petSyncAnimOnThinking, { force: true })
     try {
       reply = await generateReply(r, batch, trigger, priority)
     } catch (e) {
       stats.llmErrors++
       log('生成失败：' + String(e?.message || e))
+      // 桌宠：想不出来 / 调用失败 → 垂头叹气
+      void pet.anim(config.petSyncAnimOnError, { force: true })
       return
     }
     if (!reply?.text && !reply?.stickerOnly) {
@@ -3034,6 +3061,8 @@ let res = await callLlm(route, sys, usr, undefined)
       r.recentReplies.push({ text: reply.text, at: Date.now() })
       if (r.recentReplies.length > 10) r.recentReplies = r.recentReplies.slice(-10)
     }
+    // 桌宠：回完了 → 雀跃一下（她"干完活了"的样子）
+    void pet.anim(config.petSyncAnimOnSent)
     stats.replied++
     saveMemory(r)
   }
