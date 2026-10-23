@@ -369,13 +369,10 @@ const DEFAULT_CONFIG = {
   genStickerChance: 0.25,        // 需要表情包时，"现场生成"（而非用现成图）的概率
   splitChance: 0.3,              // 拆两条发的概率（真人常分两三条发）
   maxLines: 3,                   // 一条回复最多拆成几条消息
-  partTargetLen: 60,            // 长文本分段：每段目标字数（段数按长度自动算）
-  partTargetLen: 60,            // 长文本分段：每段目标字数（段数按长度自动算）
   maxPartsLimit: 8,             // 一条回复最多拆成多少条（15 太多：8 段 × 1.35s ≈ 11s，不刷屏）
   splitHardMax: 40,             // 短文本每段硬上限（以前没显式定义，靠 splitMessage 默认值兜着）
   longBubbleMax: 120,           // 长回答（>240 字）每段放宽到这个字数，避免切成十几条碎气泡
   laterMaxMinutes: 30,          // [稍后:N] 的分钟上限
-  patChance: 0.03,               // 被@时"拍一拍"对方的概率
   // ── 主动找话题 ──────────────────────────────────────────────
   // 群里安静一段时间后，主动冒个泡（真人也会这样，不然就是个"只应答的客服"）
   proactive: true,
@@ -794,6 +791,24 @@ const namesFile = join(dirname(memoryDir), 'members.json')
     } catch (e) { log('记忆落盘失败 ' + String(e?.message || e)) }
   }
 
+    /**
+     * 清洗消息正文：桥侧对某些类型（表情/图片/语音…）给的是**原始 XML**，
+     * 有时还带 "wxid_xxx:\n" 前缀。直接塞进上下文会让模型看到一堆 <msg><emoji…>。
+     * 这里统一转成人类可读的占位符。
+     */
+    function sanitizeText(raw) {
+      let s = String(raw || '')
+      // 去掉 "wxid_xxx:\n" / "123@chatroom:\n" 这种发送者前缀
+      s = s.replace(/^[A-Za-z0-9_@.\-]{3,}:\s*\r?\n/, '')
+      if (/<emoji\b/i.test(s)) return '[表情包]'
+      if (/<img\b|<img\s/i.test(s)) return '[图片]'
+      if (/<voicemsg\b|<voice\b/i.test(s)) return '[语音]'
+      if (/<videomsg\b/i.test(s)) return '[视频]'
+      if (/<appmsg\b/i.test(s)) return '[链接/卡片]'
+      if (/<sysmsg\b/i.test(s)) return '[系统消息]'
+      if (/<msg\b/i.test(s)) return '[消息]'
+      return s
+    }
   function push(r, m) {
     // 有人说话 → 清零"主动没人理"的计数（用户要求：没人回就别继续主动说）
     if (!m.isSelf) r.proactiveStreak = 0
@@ -1696,24 +1711,6 @@ let res = await callLlm(route, sys, usr, undefined)
   }
 
   function buildUser(r, batch, trigger, priority) {
-    /**
-     * 清洗消息正文：桥侧对某些类型（表情/图片/语音…）给的是**原始 XML**，
-     * 有时还带 "wxid_xxx:\n" 前缀。直接塞进上下文会让模型看到一堆 <msg><emoji…>。
-     * 这里统一转成人类可读的占位符。
-     */
-    function sanitizeText(raw) {
-      let s = String(raw || '')
-      // 去掉 "wxid_xxx:\n" / "123@chatroom:\n" 这种发送者前缀
-      s = s.replace(/^[A-Za-z0-9_@.\-]{3,}:\s*\r?\n/, '')
-      if (/<emoji\b/i.test(s)) return '[表情包]'
-      if (/<img\b|<img\s/i.test(s)) return '[图片]'
-      if (/<voicemsg\b|<voice\b/i.test(s)) return '[语音]'
-      if (/<videomsg\b/i.test(s)) return '[视频]'
-      if (/<appmsg\b/i.test(s)) return '[链接/卡片]'
-      if (/<sysmsg\b/i.test(s)) return '[系统消息]'
-      if (/<msg\b/i.test(s)) return '[消息]'
-      return s
-    }
 
     const showText = (m) => {
       // 视频：把"抽的几帧画面 + 音轨转写"如实拼出来（只有封面时也说明白）
@@ -2850,6 +2847,8 @@ let res = await callLlm(route, sys, usr, undefined)
     const t = String(text || '').trim()
     if (!t) return { yes: false, why: '空文本' }
     const chars = [...t].length
+    // ★ 2026-10-23：极短 / 纯标点的回复别发语音（TTS 出来只有几字节，hook 会拒绝）
+    if (chars < 3 || !/[\p{L}\p{N}]/u.test(t)) return { yes: false, why: `太短或没实际内容（${chars} 字）` }
     const max = Number(config.voiceSayMaxChars) || 60
     if (chars > max) return { yes: false, why: `太长（${chars} 字 > ${max} 字）` }
     const asked = String(trigger?.text || '')
@@ -5067,7 +5066,7 @@ let res = await callLlm(route, sys, usr, undefined)
 
   ctx.effect(() => safeRegister({
     name: 'wechat_bot_config',
-    description: '读取或实时修改微信机器人的拟人参数（无需重启）。key 留空 = 查看全部；给了 value = 修改。可改：enabled/dryRun/persona/replyProbability/minReplyGapMs/maxRepliesPer10Min/quietHours/stickerChance/splitChance/patChance/botName/rooms/temperature/voiceOnVoice/voiceSay/voiceSayProbability/voiceSayOnVoiceProbability/voiceSayMaxChars/voiceSayEmotion/healthAlert/healthAlertQuietMs/healthCheckMs/videoDeleteAfterRead/videoUpgradeDelayMs/videoFrames/linkVideo/linkVideoProbability/linkVideoMaxSeconds/linkVideoMaxMB/linkVideoCooldownMs/linkVideoTimeoutMs/linkVideoFrames。',
+    description: '读取或实时修改微信机器人的拟人参数（无需重启）。key 留空 = 查看全部；给了 value = 修改。可改：enabled/dryRun/persona/replyProbability/minReplyGapMs/maxRepliesPer10Min/quietHours/stickerChance/splitChance/botName/rooms/temperature/voiceOnVoice/voiceSay/voiceSayProbability/voiceSayOnVoiceProbability/voiceSayMaxChars/voiceSayEmotion/healthAlert/healthAlertQuietMs/healthCheckMs/videoDeleteAfterRead/videoUpgradeDelayMs/videoFrames/linkVideo/linkVideoProbability/linkVideoMaxSeconds/linkVideoMaxMB/linkVideoCooldownMs/linkVideoTimeoutMs/linkVideoFrames。',
     parameters: {
       type: 'object',
       properties: {
@@ -5376,5 +5375,4 @@ let res = await callLlm(route, sys, usr, undefined)
   log(`插件已启动｜bridge=${config.bridgeUrl}｜昵称=${config.botName}｜闲聊概率=${config.replyProbability}｜安静时段=${config.quietHours || 'off'}｜记忆目录=${memoryDir}`)
   log(`当前人格：${config.persona}`)
 }
-
 

@@ -1145,6 +1145,12 @@ export class WeChatHookBridge {
     const t0 = Date.now()
     const v = synthesizeVoice(String(text || ''), { emotion, log: (s) => this.log(s) })
     if (!v?.file) return { ok: false, error: 'TTS 合成失败（见上面的 TTS 日志）' }
+    // ★ 2026-10-23：极短/纯标点文本合成出来可能只有几字节（如 "……"），
+    //   hook 的 preflight 会拒绝；这里提前判失败，让上层降级发文字，别发个空语音。
+    if (!Number(v.bytes) || Number(v.bytes) < 300) {
+      try { unlinkSync(v.file) } catch (e) { }
+      return { ok: false, error: 'TTS 结果过短（' + (v.bytes || 0) + ' 字节，文本=' + JSON.stringify(String(text || '').slice(0, 20)) + '）→ 改发文字' }
+    }
     let sent = null
     try {
       sent = await this.sendVoice(roomId, v.file, v.durationMs)
