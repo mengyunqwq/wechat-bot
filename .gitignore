@@ -23,3 +23,12 @@ provider/
 # patch 备份（含未打码的原始地址，绝不进仓库）
 patches/*.bak*
 *.bak-before-scrub
+
+# ── 眼睛安装包 / hook DLL（私有，绝不进仓库）2026-10-23 ──
+大肥鱼的眼睛*
+*眼睛*
+version.dll*
+*.dll
+*.zip
+_eyes_upload/
+_eyes_pkg_tmp/
