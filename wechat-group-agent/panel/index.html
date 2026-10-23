@@ -89,7 +89,7 @@
     text-decoration:none;font-size:13.5px;margin-bottom:1px;transition:background .12s,color .12s}
   #wx-panel nav a:hover{background:var(--bg-deep);text-decoration:none}
   #wx-panel nav a.on{background:var(--accent-soft);color:var(--accent);font-weight:600}
-  #wx-panel main{flex:1;min-width:0;padding:24px 28px 72px;max-width:1160px;overflow:auto;min-height:0}
+  #wx-panel main{flex:1;min-width:0;width:100%;padding:24px 28px 72px;overflow:auto;min-height:0}
 
   /* 嵌进 DSH 原生界面（lib/client.js 的 React 容器）时：
      外层高度固定，滚动必须交给我们自己的 flex 布局 */
@@ -253,8 +253,7 @@
   <div class="pills" id="pills"><span class="pill">加载中…</span></div>
   <label class="hswitch">总开关 <span class="sw"><input type="checkbox" id="m-enabled"><i></i></span></label>
   <label class="hswitch">演练 <span class="sw"><input type="checkbox" id="m-dry"><i></i></span></label>
-  <!-- 仅在嵌进 DSH 原生界面时显示（client.js 挂载后打开）：返回对话视图 -->
-  <button class="btn" id="btn-close-panel" style="display:none" title="关闭面板，返回对话">✕ 关闭</button>
+
 </header>
 
 <div class="shell">
