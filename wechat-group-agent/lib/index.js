@@ -412,7 +412,7 @@ export function apply(ctx, rawConfig) {
 function applyInner(ctx, rawConfig) {
   const config = { ...DEFAULT_CONFIG, ...(rawConfig ?? {}) }
   const SHORT = 'dsh-wechat-bot'
-const BUILD_VER = '2026-10-22.23'   // 抬版本：让新实例压过热重载残留的旧实例   // 带版本号的实例才允许踢掉旧连接（旧代码没这个字段）
+const BUILD_VER = '2026-10-23.1'   // 抬版本：让新实例压过热重载残留的旧实例   // 带版本号的实例才允许踢掉旧连接（旧代码没这个字段）
   const dshHome = process.env.DSH_HOME || join(homedir(), '.dsh')
   // ★ 持久化：把 wechat_bot_config 改过的值存到文件，重载插件后自动读回来。
   //   （以前纯内存，重载/重启 DSH 就全部回落默认，每次都要重设一遍。）
@@ -4410,7 +4410,11 @@ let res = await callLlm(route, sys, usr, undefined)
         try { buf = Buffer.from(b64, 'base64') } catch { return { ok: false, error: 'base64 解码失败' } }
         if (!buf.length) return { ok: false, error: '文件为空' }
         if (buf.length > 32 * 1024 * 1024) return { ok: false, error: '文件太大（>32MB）' }
-        const dir = join(process.env.TEMP || 'C:\\Windows\\Temp', 'dsh-eyes-' + Date.now())
+        // ★ 2026-10-23 修：解压目录原来在 %TEMP%，Defender 会把里面的 version.dll 判可疑并删掉
+        //   → 上传后"解压目录里没有 DLL"。改成解压到微信目录下的暂存区（那里已验证可读写）。
+        let stagingRoot = process.env.TEMP || 'C:\\Windows\\Temp'
+        try { const wd = detectWechatDir(); if (wd) stagingRoot = join(wd, '_eyes_upload') } catch { }
+        const dir = join(stagingRoot, 'dsh-eyes-' + Date.now())
         mkdirSync(dir, { recursive: true })
         const zipPath = join(dir, name)
         writeFileSync(zipPath, buf)
@@ -4472,7 +4476,8 @@ let res = await callLlm(route, sys, usr, undefined)
         if (!pkg || !existsSync(pkg.dll)) return { ok: false, error: '没有待安装的包（先拖入 zip）' }
         if (!wxDir) return { ok: false, error: '检测不到微信安装目录 —— 请设环境变量 WECHAT_DIR', needWxDir: true }
         const targetDll = process.env.WECHAT_DLL || join(wxDir, 'version.dll')
-        const targetDir = pkg.dll.replace(/\\[^\\]+$/, '')
+        // ★ 2026-10-23 修：原来取的是临时解压目录（pkg.dll 所在），重放标记被写进 temp 又被第 ⑤ 步清理删掉 → 装完眼睛不工作。必须写到真正安装 DLL 的目录（微信目录）。
+        const targetDir = targetDll.replace(/\\[^\\]+$/, '')
         // ① 微信在跑？DLL 会被锁
         const wxRunning = (() => {
           try {
@@ -4499,12 +4504,15 @@ let res = await callLlm(route, sys, usr, undefined)
         try { const s = readFileSync(dirFile, 'utf8').trim(); if (s) replayDir = s } catch { /* 用默认 */ }
         try { mkdirSync(replayDir, { recursive: true }); writeFileSync(dirFile, replayDir, 'utf8') } catch { /* ignore */ }
         try { writeFileSync(switchFile, '', 'utf8') } catch { /* ignore */ }
+        // ④b 装完自检：标记必须真的落在微信目录里
+        const switchOk = existsSync(switchFile)
+        const dirOk = existsSync(dirFile)
         // ⑤ 清理临时目录
         const workDir = pkg.workDir
         eyesPkgCache = null
         log('[eyes] 安装完成：' + pkg.sha256.slice(0, 16) + ' → ' + targetDll)
         return {
-          ok: true, installedTo: targetDll, backup, replayDir, dirFile, switchFile, sha256: pkg.sha256,
+          ok: true, installedTo: targetDll, backup, replayDir, dirFile, switchFile, switchOk, dirOk, sha256: pkg.sha256,
           hint: 'DLL 已装好，重放已开启。现在启动微信（登录窗口按回车）即可。',
         }
       }
@@ -5375,4 +5383,3 @@ let res = await callLlm(route, sys, usr, undefined)
   log(`插件已启动｜bridge=${config.bridgeUrl}｜昵称=${config.botName}｜闲聊概率=${config.replyProbability}｜安静时段=${config.quietHours || 'off'}｜记忆目录=${memoryDir}`)
   log(`当前人格：${config.persona}`)
 }
-
