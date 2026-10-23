@@ -96,7 +96,7 @@ if ($already) {
   Warn "工作区已有改动，先重置到干净状态（丢弃本地改动）"
   git checkout -- . 2>$null
 }
-if (-not (Test-Path $patch)) { Bad "找不到补丁文件：$patch"; Pop-Location; exit 1 }
+if (-not (Test-Path $patch)) { Bad "找不到补丁文件：$patch`n`n  补丁不随本仓库发布（含 RVA 偏移，属私有资产）。`n  不会编译的话：直接用 GitHub Releases 的成品包（dafiyu-eyes-*.zip），无需源码。`n  编译路线与接口契约见 docs/安装流程.md 第 2.2 节。"; Pop-Location; exit 1 }
 git apply --check $patch 2>$null
 if ($LASTEXITCODE -ne 0) {
   Warn "直接 apply 失败，尝试 3-way 合并"

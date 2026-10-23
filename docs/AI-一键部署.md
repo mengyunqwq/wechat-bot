@@ -75,43 +75,46 @@ AI 拿到这段指令后会自己：查环境 → 装依赖 → 复制独立微�
     若版本不是 4.1.10.27：停止，告诉人类"Hook 只适配微信 4.1.10.27，请提供该版本的安装目录"。
     （微信 4.x 的客户端是"外壳 + 版本目录"结构，实际 DLL 在 4.1.10.27\ 里。）
 3.2 拿 Hook（两条路，二选一）：
-  ── 方案 A：预编译版（最快，但功能残缺）──
-    到 https://github.com/aixed/WeChat-Hook/releases 下载 version.dll，
-    放到 D:\wxhook\wx4110\version.dll
-    缺点（重要）：官方 release 的 QueryDB 是坏的 → 拿不到群成员昵称；
-    且公开源码里没有回调推送实现 → 收不到消息。只适合"先看个响"。
-    → 推荐直接用方案 B。
-  ── 方案 B：自己编译（推荐，功能完整）──
-    B1. 一键脚本（会自己装 VS Build Tools、克隆上游、打补丁、编译、部署）：
+  ── 方案 A：下载成品包（推荐，不用编译）──
+    到 https://github.com/mengyunqwq/wechat-bot/releases/latest
+    下载附件 dafiyu-eyes-v1.3.3.zip（即"大肥鱼的眼睛"成品包）
+    然后：
+      a) 完全退出微信（任务管理器里 Weixin.exe 进程数为 0）
+      b) 解压到任意目录（⚠️ 不要解压到 %TEMP%，Defender 可能删掉里面的 dll）
+      c) 运行 一键安装.ps1 —— 自动备份旧 dll、覆盖、配置重放开关
+      d) 启动微信：Weixin.exe StartPort=30001 RecvType=1 CallBackURL=http://127.0.0.1:18998/recv
+      e) 登录后【点一次左侧「通讯录」】—— 让 contact.db 打开，否则群成员/名字/@ 都会退化
+    成品包含：version.dll（含语音发送 + 数据库 late-arm 修复）、一键安装.ps1、一键回滚.ps1、SHA256
+  ── 方案 B：自己编译（需要源码 + 补丁；新手不推荐）──
+    前提：本机已有上游源码与本项目补丁（补丁不随仓库发布）。
+    只有原版源码时，务必先读 docs/安装流程.md 第 2.2 节 —— 原版是 3.9.x 的，
+    偏移与接口都对不上 4.1.10.27，编出来也接不上。
+    B1. 一键脚本（会自己装 VS Build Tools、克隆上游、编译、部署）：
         powershell -ExecutionPolicy Bypass -File .\scripts\build-hook.ps1
         （脚本参数 -TargetDir 默认就是 D:\wxhook\wx4110；不同就传 -TargetDir "<客户端目录>"）
     B2. 或者手动做（等价于脚本；脚本失败时用这条兜底）：
         # 装编译环境（约 2~6 GB，十几分钟）
-        winget install --id Microsoft.VisualStudio.2022.BuildTools --override "--quiet --wait --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended" --accept-package-agreements --accept-source-agreements
+        winget install --id Microsoft.VisualStudio.2022.BuildTools --override "--quiet --wait --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended"
         # 新开终端，确认 MSBuild 存在：
         & "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\MSBuild\Current\Bin\MSBuild.exe" -version
-        # 克隆上游并【锁定补丁基准提交】—— 不锁提交，git apply 必失败（补丁是针对该提交生成的）
+        # 克隆上游（补丁针对的基准提交见补丁说明）
         git clone https://github.com/aixed/WeChat-Hook.git C:\wxhook-src\WeChat-Hook
         cd C:\wxhook-src\WeChat-Hook
-        git checkout 5c92aab
-        # 应用本项目的补丁（修复 QueryDB + 加 /QueryDB/debug 调试路由 + 监听改回环 + 加 /SendVoiceMsg）
-        git apply --check "<本仓库>\patches\wechat-hook-querydb-fix.patch"
-        git apply         "<本仓库>\patches\wechat-hook-querydb-fix.patch"
-        （apply 失败就试：git apply --3way "<本仓库>\patches\wechat-hook-querydb-fix.patch"；
-          仍失败说明上游历史变了，需要重新适配补丁 —— 停下并报告。）
-        # 编译（补丁已把工具集改成 v143，适配 VS 2022）
+        git submodule update --init --recursive
+        # 应用本项目补丁（补丁需另行获取；不在本仓库内）
+        git apply --check "<补丁目录>\wechat-hook-querydb-fix.patch"
+        git apply         "<补丁目录>\wechat-hook-querydb-fix.patch"
+        # 编译
         & "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\MSBuild\Current\Bin\MSBuild.exe" `
           x64_Version_dll.vcxproj /m /t:Build /p:Configuration=Release /p:Platform=x64
         # 产物：C:\wxhook-src\WeChat-Hook\x64\Release\version.dll
         # 部署：先停掉该客户端和 bridge，再【备份后替换】（下面两条是 cmd 语法）
         copy /Y "D:\wxhook\wx4110\version.dll" "D:\wxhook\wx4110\version.dll.bak-manual"
         copy /Y "C:\wxhook-src\WeChat-Hook\x64\Release\version.dll" "D:\wxhook\wx4110\version.dll"
-        # PowerShell 里等价写法：
-        # Copy-Item -Force "D:\wxhook\wx4110\version.dll" "D:\wxhook\wx4110\version.dll.bak-manual"
-        # Copy-Item -Force "C:\wxhook-src\WeChat-Hook\x64\Release\version.dll" "D:\wxhook\wx4110\version.dll"
     B3. 验证 Hook 是否加载成功（需要客户端和 bridge 已启动，见阶段 5）：
         curl http://127.0.0.1:30001/QueryDB/debug
-        → 有 JSON 返回 = 加载的是【补丁版】（这条路由只有自编译版才有，官方 release 返回 404）
+        → 有 JSON 返回 = 加载的是【本项目构建版】（官方 release 返回 404）
+
 ═══ 阶段 4：改配置（逐项，一个都不要漏）═══
 4.1 生成配置模板（cmd）：
     copy config.example.json config.json

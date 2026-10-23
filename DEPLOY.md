@@ -46,45 +46,61 @@ robocopy "D:\Program Files\Tencent\Weixin" "D:\wxhook\wx4110" /E
 
 ---
 
-## 2. 获取微信 Hook（二选一）
+## 2. 获取微信 Hook（version.dll）
 
-### 方案 A：下载官方预编译版（最快，但没有群昵称）
+> ⚠️ **上游官方的预编译版不能用**：`QueryDB` 是坏的（`g_IsLogin` 恒为 0），也没有回调推送实现
+> → 收不到群消息、拿不到群昵称。必须用本项目构建的 DLL。
 
-1. 到 [aixed/WeChat-Hook Releases](https://github.com/aixed/WeChat-Hook/releases) 下载 `version.dll`
-2. 放到 `D:\wxhook\wx4110\version.dll`
+### 方案 A：下载成品包（推荐，不用编译）
 
-**优点**：省事。**缺点**：官方版 **`QueryDB` 是坏的**（上游 bug：`g_IsLogin` 永远是 0）→ **拿不到群成员昵称**、**收不到消息**（公开源码里没有回调推送实现）。
+1. 打开 **[Releases 页](https://github.com/mengyunqwq/wechat-bot/releases/latest)**，下载附件 `dafiyu-eyes-v1.3.3.zip`
+2. **完全退出微信**（任务管理器里 `Weixin.exe` 进程数为 0）
+3. 解压到任意目录（**不要解压到 `%TEMP%`**，Defender 可能删掉里面的 dll），运行 `一键安装.ps1`
+   —— 它会自动备份旧 DLL、覆盖、配置重放开关
+4. 启动微信 → 登录后**点一次左侧「通讯录」**（让 `contact.db` 打开）
 
-### 方案 B：跑脚本自动构建（推荐，功能完整）
+成品包里有什么：
 
-**一条命令搞定**（脚本会自动装 VS Build Tools → 克隆上游 → 打补丁 → 编译 → 部署）：
+```
+version.dll        编译好的 Hook（含语音发送 + 数据库 late-arm 修复）
+一键安装.ps1        退出微信 → 备份 → 覆盖 → 配重放
+一键回滚.ps1        还原到安装前的 DLL
+README.txt / SHA256.txt
+```
+
+> 想用一条命令走完部署：
+> ```powershell
+> pwsh -ExecutionPolicy Bypass -File .\一键部署.ps1 -HookDll "解压目录\version.dll"
+> ```
+
+### 方案 B：自行编译（需要源码 + 补丁，不推荐新手）
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\build-hook.ps1
 ```
 
-> **为什么本仓库不发编译好的 `version.dll`？**
-> 上游 aixed/WeChat-Hook **没有 LICENSE 文件**（默认"保留所有权利"），
-> 直接再分发其衍生二进制法律风险高。所以改成**脚本让你自己在本机构建** ——
-> 效果一样，但更干净。脚本会自动备份你原来的 `version.dll`。
+前提：本机已有上游源码与本项目补丁（补丁不随仓库发布）。脚本会装/检查 VS Build Tools、
+克隆上游、应用补丁、编译、备份并部署旧 DLL。
+
+> **只有原版源码时请先读 [docs/安装流程.md](docs/安装流程.md) 第 2.2 节** ——
+> 原版是 3.9.x 的，偏移与接口都对不上 4.1.10.27，编出来也接不上；文档里写了缺什么、接口契约是什么。
 
 <details>
-<summary>想手动编译（等价于脚本做的事）</summary>
-
-
+<summary>手动编译（等价于脚本做的事）</summary>
 
 ```powershell
 # 1) 克隆上游
 git clone https://github.com/aixed/WeChat-Hook.git C:\wxhook-src\WeChat-Hook
 cd C:\wxhook-src\WeChat-Hook
+git submodule update --init --recursive
 
-# 2) 应用本项目的补丁（修复 QueryDB + 加调试路由）
-git apply <本仓库>\patches\wechat-hook-querydb-fix.patch
+# 2) 应用本项目补丁（补丁需另行获取）
+git apply <补丁目录>\wechat-hook-querydb-fix.patch
 
 # 3) 装编译环境（若没有）
 winget install --id Microsoft.VisualStudio.2022.BuildTools --override "--quiet --wait --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended"
 
-# 4) 编译（补丁里已把工具集改成 v143，适配 VS 2022）
+# 4) 编译
 & "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\MSBuild\Current\Bin\MSBuild.exe" `
   x64_Version_dll.vcxproj /m /t:Build /p:Configuration=Release /p:Platform=x64
 
@@ -92,9 +108,13 @@ winget install --id Microsoft.VisualStudio.2022.BuildTools --override "--quiet -
 copy C:\wxhook-src\WeChat-Hook\x64\Release\version.dll D:\wxhook\wx4110\version.dll
 ```
 
-补丁做了什么、为什么这么做，见 [docs/hook-patch-notes.md](docs/hook-patch-notes.md)。
+编译细节与常见错误见 [docs/安装流程.md](docs/安装流程.md)。
 
 </details>
+
+> **为什么 DLL 放在 Release 附件而不是仓库里？**
+> 仓库保持"纯源码"，`.gitignore` 挡住 `*.dll` / `*.zip`；二进制作为 Release 附件分发，
+> 方便不会编译的用户，也便于随时替换/下架。
 
 ---
 
@@ -393,7 +413,7 @@ curl -X POST http://127.0.0.1:17300/api/hosted -H 'content-type: application/jso
 
 获取 Hook：
 5. git clone https://github.com/aixed/WeChat-Hook.git C:\wxhook-src\WeChat-Hook
-6. 在仓库内执行 git apply <本项目>\patches\wechat-hook-querydb-fix.patch
+6. 应用补丁（补丁需另行获取）：git apply <补丁目录>\wechat-hook-querydb-fix.patch
 7. 若无 MSBuild：winget install --id Microsoft.VisualStudio.2022.BuildTools --override "--quiet --wait --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended"
 8. 用 MSBuild 编译 x64_Version_dll.vcxproj（Release|x64），把产物复制到 D:\wxhook\wx4110\version.dll
    （复制前先备份原文件为 version.dll.bak）

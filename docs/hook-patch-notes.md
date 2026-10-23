@@ -1,6 +1,6 @@
 # 微信 Hook 补丁说明
 
-补丁文件：`patches/wechat-hook-querydb-fix.patch`（对 [aixed/WeChat-Hook](https://github.com/aixed/WeChat-Hook) 的改动）
+补丁文件：`wechat-hook-querydb-fix.patch`（**不随仓库发布**，需另行获取）（对 [aixed/WeChat-Hook](https://github.com/aixed/WeChat-Hook) 的改动）
 
 ## 一、为什么需要这个补丁
 
