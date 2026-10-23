@@ -65,7 +65,7 @@
   html{height:100%}
   body:not(.wx-embed-host){height:100%;overflow:hidden}
 
-  #wx-panel button,#wx-panel input,#wx-panel select,#wx-panel textarea{font:inherit;color:inherit}
+  .wx-panel-root button,.wx-panel-root input,.wx-panel-root select,.wx-panel-root textarea{font:inherit;color:inherit}
   #wx-panel a{color:var(--accent);text-underline-offset:3px}
   #wx-panel a:hover{text-decoration:underline}
 
@@ -247,7 +247,7 @@
 </style>
 </head>
 <body class="wx-standalone">
-<div id="wx-panel">
+<div id="wx-panel" class="wx-panel-root">
 <header>
   <div class="brand">🐟 微信机器人控制台 <small id="ver"></small><small id="panel-url" title="点一下复制" style="cursor:pointer;margin-left:10px;font-family:ui-monospace,Consolas,monospace;font-size:11px;opacity:.7"></small></div>
   <div class="pills" id="pills"><span class="pill">加载中…</span></div>
