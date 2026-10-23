@@ -15,13 +15,13 @@
 
 ## 📦 成品包下载（推荐，不会编译也能装）
 
-**下载地址**：[Releases 页](https://github.com/mengyunqwq/wechat-bot/releases/latest) → 附件 `dafiyu-eyes-v1.3.3.zip`
+**下载地址**：[Releases 页](https://github.com/mengyunqwq/wechat-bot/releases/latest) → 直接下载这 4 个文件（散文件，**无需解压**）：`version.dll`、`install.ps1`（一键安装）、`rollback.ps1`（一键回滚）、`SHA256.txt`
 
 | 包里有什么 | 说明 |
 |---|---|
 | `version.dll` | 编译好的微信 Hook（含语音发送修复、数据库 late-arm 修复）|
-| `一键安装.ps1` | 退出微信 → 备份旧 DLL → 覆盖 → 配重放 |
-| `一键回滚.ps1` | 还原到安装前的 DLL |
+| `install.ps1`（一键安装） | 退出微信 → 备份旧 DLL → 覆盖 → 配重放 |
+| `rollback.ps1`（一键回滚） | 还原到安装前的 DLL |
 | `README.txt` / `SHA256.txt` | 版本说明与校验值 |
 
 **三步安装**
@@ -121,7 +121,7 @@ http://127.0.0.1:3080/wechat-bot
 | 🔬 **诊断** | 崩溃 dump / 数据库 / API 表 / 眼睛目录 / 磁盘 / LLM 路由 |
 | 📦 **更新** | 按版本号检查更新、一键更新（先备份、失败回滚）|
 
-**眼睛**：拖入 `dafiyu-eyes-v1.3.3.zip` → 自动解压、校验 DLL 能力（CDN 重放 / 视频整片）、备份旧 DLL、安装、自动配置重放目录和开关，并回报 `switchOk/dirOk` 自检结果。
+**眼睛**：面板的「拖入 zip 安装」只接受 zip；现在成品包以**散文件**发布，直接用 `install.ps1`（一键安装）（或手动复制 `version.dll`）即可。若你想用面板安装，把这 4 个文件自己压成一个 zip 再拖入。
 
 ---
 

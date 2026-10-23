@@ -77,7 +77,7 @@ AI 拿到这段指令后会自己：查环境 → 装依赖 → 复制独立微�
 3.2 拿 Hook（两条路，二选一）：
   ── 方案 A：下载成品包（推荐，不用编译）──
     到 https://github.com/mengyunqwq/wechat-bot/releases/latest
-    下载附件 dafiyu-eyes-v1.3.3.zip（即"大肥鱼的眼睛"成品包）
+    直接下载这 4 个散文件：version.dll、一键安装.ps1、一键回滚.ps1、SHA256.txt（无需解压）
     然后：
       a) 完全退出微信（任务管理器里 Weixin.exe 进程数为 0）
       b) 解压到任意目录（⚠️ 不要解压到 %TEMP%，Defender 可能删掉里面的 dll）

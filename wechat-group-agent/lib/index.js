@@ -412,7 +412,7 @@ export function apply(ctx, rawConfig) {
 function applyInner(ctx, rawConfig) {
   const config = { ...DEFAULT_CONFIG, ...(rawConfig ?? {}) }
   const SHORT = 'dsh-wechat-bot'
-const BUILD_VER = '2026-10-23.3'   // 抬版本：让新实例压过热重载残留的旧实例   // 带版本号的实例才允许踢掉旧连接（旧代码没这个字段）
+const BUILD_VER = '2026-10-23.4'   // 抬版本：让新实例压过热重载残留的旧实例   // 带版本号的实例才允许踢掉旧连接（旧代码没这个字段）
   const dshHome = process.env.DSH_HOME || join(homedir(), '.dsh')
   // ★ 持久化：把 wechat_bot_config 改过的值存到文件，重载插件后自动读回来。
   //   （以前纯内存，重载/重启 DSH 就全部回落默认，每次都要重设一遍。）

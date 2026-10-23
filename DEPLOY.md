@@ -53,9 +53,9 @@ robocopy "D:\Program Files\Tencent\Weixin" "D:\wxhook\wx4110" /E
 
 ### 方案 A：下载成品包（推荐，不用编译）
 
-1. 打开 **[Releases 页](https://github.com/mengyunqwq/wechat-bot/releases/latest)**，下载附件 `dafiyu-eyes-v1.3.3.zip`
+1. 打开 **[Releases 页](https://github.com/mengyunqwq/wechat-bot/releases/latest)**，下载这 4 个文件：`version.dll`、`install.ps1`（一键安装）、`rollback.ps1`（一键回滚）、`SHA256.txt`（散文件，无需解压）
 2. **完全退出微信**（任务管理器里 `Weixin.exe` 进程数为 0）
-3. 解压到任意目录（**不要解压到 `%TEMP%`**，Defender 可能删掉里面的 dll），运行 `一键安装.ps1`
+3. 解压到任意目录（**不要解压到 `%TEMP%`**，Defender 可能删掉里面的 dll），运行 `install.ps1`（一键安装）
    —— 它会自动备份旧 DLL、覆盖、配置重放开关
 4. 启动微信 → 登录后**点一次左侧「通讯录」**（让 `contact.db` 打开）
 
