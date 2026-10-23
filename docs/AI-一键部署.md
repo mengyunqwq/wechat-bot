@@ -91,8 +91,8 @@ AI 拿到这段指令后会自己：查环境 → 装依赖 → 复制独立微�
         # 新开终端，确认 MSBuild 存在：
         & "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\MSBuild\Current\Bin\MSBuild.exe" -version
         # 克隆上游并【锁定补丁基准提交】—— 不锁提交，git apply 必失败（补丁是针对该提交生成的）
-        git clone https://github.com/aixed/WeChat-Hook.git E:\wxhook-src\WeChat-Hook
-        cd E:\wxhook-src\WeChat-Hook
+        git clone https://github.com/aixed/WeChat-Hook.git C:\wxhook-src\WeChat-Hook
+        cd C:\wxhook-src\WeChat-Hook
         git checkout 5c92aab
         # 应用本项目的补丁（修复 QueryDB + 加 /QueryDB/debug 调试路由 + 监听改回环 + 加 /SendVoiceMsg）
         git apply --check "<本仓库>\patches\wechat-hook-querydb-fix.patch"
@@ -102,13 +102,13 @@ AI 拿到这段指令后会自己：查环境 → 装依赖 → 复制独立微�
         # 编译（补丁已把工具集改成 v143，适配 VS 2022）
         & "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\MSBuild\Current\Bin\MSBuild.exe" `
           x64_Version_dll.vcxproj /m /t:Build /p:Configuration=Release /p:Platform=x64
-        # 产物：E:\wxhook-src\WeChat-Hook\x64\Release\version.dll
+        # 产物：C:\wxhook-src\WeChat-Hook\x64\Release\version.dll
         # 部署：先停掉该客户端和 bridge，再【备份后替换】（下面两条是 cmd 语法）
         copy /Y "D:\wxhook\wx4110\version.dll" "D:\wxhook\wx4110\version.dll.bak-manual"
-        copy /Y "E:\wxhook-src\WeChat-Hook\x64\Release\version.dll" "D:\wxhook\wx4110\version.dll"
+        copy /Y "C:\wxhook-src\WeChat-Hook\x64\Release\version.dll" "D:\wxhook\wx4110\version.dll"
         # PowerShell 里等价写法：
         # Copy-Item -Force "D:\wxhook\wx4110\version.dll" "D:\wxhook\wx4110\version.dll.bak-manual"
-        # Copy-Item -Force "E:\wxhook-src\WeChat-Hook\x64\Release\version.dll" "D:\wxhook\wx4110\version.dll"
+        # Copy-Item -Force "C:\wxhook-src\WeChat-Hook\x64\Release\version.dll" "D:\wxhook\wx4110\version.dll"
     B3. 验证 Hook 是否加载成功（需要客户端和 bridge 已启动，见阶段 5）：
         curl http://127.0.0.1:30001/QueryDB/debug
         → 有 JSON 返回 = 加载的是【补丁版】（这条路由只有自编译版才有，官方 release 返回 404）

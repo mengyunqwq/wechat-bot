@@ -13,7 +13,7 @@
 
 param(
   [string]$TargetDir = "D:\wxhook\wx4110",      # 机器人专用微信目录（version.dll 要放这里）
-  [string]$WorkDir   = "E:\wxhook-src",          # 源码工作目录
+  [string]$WorkDir   = "C:\wxhook-src",          # 源码工作目录
   [string]$Repo      = "https://github.com/aixed/WeChat-Hook.git",
   # ⚠️ 必须锁定提交：补丁是针对下面这个提交生成的；上游一更新，git apply 就会失败（实测过）
   [string]$Commit    = "5c92aab",                 # 补丁的基准提交（aixed/WeChat-Hook）

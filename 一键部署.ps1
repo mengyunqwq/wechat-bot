@@ -1,4 +1,4 @@
-﻿# 一键部署（Windows 10/11 x64）
+# 一键部署（Windows 10/11 x64）
 #
 # 把 DEPLOY.md 里的 8 个步骤串起来，一条命令从头装到能说话：
 #   ① 环境检查（Node / Python / Git / MSBuild）
@@ -256,7 +256,7 @@ if ($SkipHook) {
   Say '  检查是否已有可用的编译产物…'
   $existing = @(
     "$WorkDir\WeChat-Hook\x64\Release\version.dll",
-    'E:\wxhook-src\WeChat-Hook\x64\Release\version.dll'
+    'C:\wxhook-src\WeChat-Hook\x64\Release\version.dll'
   ) | Where-Object { Test-Path $_ } | Select-Object -First 1
 
   if ($existing) {

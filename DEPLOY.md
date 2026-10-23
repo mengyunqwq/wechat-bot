@@ -75,8 +75,8 @@ powershell -ExecutionPolicy Bypass -File .\scripts\build-hook.ps1
 
 ```powershell
 # 1) 克隆上游
-git clone https://github.com/aixed/WeChat-Hook.git E:\wxhook-src\WeChat-Hook
-cd E:\wxhook-src\WeChat-Hook
+git clone https://github.com/aixed/WeChat-Hook.git C:\wxhook-src\WeChat-Hook
+cd C:\wxhook-src\WeChat-Hook
 
 # 2) 应用本项目的补丁（修复 QueryDB + 加调试路由）
 git apply <本仓库>\patches\wechat-hook-querydb-fix.patch
@@ -89,7 +89,7 @@ winget install --id Microsoft.VisualStudio.2022.BuildTools --override "--quiet -
   x64_Version_dll.vcxproj /m /t:Build /p:Configuration=Release /p:Platform=x64
 
 # 5) 部署（先备份原文件！）
-copy E:\wxhook-src\WeChat-Hook\x64\Release\version.dll D:\wxhook\wx4110\version.dll
+copy C:\wxhook-src\WeChat-Hook\x64\Release\version.dll D:\wxhook\wx4110\version.dll
 ```
 
 补丁做了什么、为什么这么做，见 [docs/hook-patch-notes.md](docs/hook-patch-notes.md)。
@@ -392,7 +392,7 @@ curl -X POST http://127.0.0.1:17300/api/hosted -H 'content-type: application/jso
    （严禁直接修改用户日常微信目录）
 
 获取 Hook：
-5. git clone https://github.com/aixed/WeChat-Hook.git E:\wxhook-src\WeChat-Hook
+5. git clone https://github.com/aixed/WeChat-Hook.git C:\wxhook-src\WeChat-Hook
 6. 在仓库内执行 git apply <本项目>\patches\wechat-hook-querydb-fix.patch
 7. 若无 MSBuild：winget install --id Microsoft.VisualStudio.2022.BuildTools --override "--quiet --wait --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended"
 8. 用 MSBuild 编译 x64_Version_dll.vcxproj（Release|x64），把产物复制到 D:\wxhook\wx4110\version.dll

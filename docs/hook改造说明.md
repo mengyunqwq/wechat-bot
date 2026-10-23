@@ -22,7 +22,7 @@
 
 ## 二、改了哪三处（共 3 个文件）
 
-源码目录：`E:\wxhook-src\WeChat-Hook`（`git clone https://github.com/aixed/WeChat-Hook.git`）
+源码目录：`C:\wxhook-src\WeChat-Hook`（`git clone https://github.com/aixed/WeChat-Hook.git`）
 
 ### 1. `xdb/db_mgr.cpp` —— 自愈登录标志 + 扫描加固
 
@@ -60,7 +60,7 @@ VFS 扫描命中数、每个候选句柄的 `errcode`/`prepare_rc`、已发现�
 winget install --id Microsoft.VisualStudio.2022.BuildTools `
   --override "--quiet --wait --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended"
 
-cd E:\wxhook-src\WeChat-Hook
+cd C:\wxhook-src\WeChat-Hook
 & "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\MSBuild\Current\Bin\MSBuild.exe" `
   x64_Version_dll.vcxproj /m /t:Build /p:Configuration=Release /p:Platform=x64
 # 产物：x64\Release\version.dll

@@ -22,7 +22,7 @@
 |---|---|
 | 微信客户端（被 hook 的那份） | `D:\wxhook\wx4110\Weixin.exe`，版本 **4.1.10.27**（自动更新已锁死） |
 | hook DLL | `D:\wxhook\wx4110\version.dll`，**516608 字节 / MD5 前缀 CB38DD658D9F**（自编译版） |
-| hook 源码 | `E:\wxhook-src\WeChat-Hook`（上游 aixed/WeChat-Hook 的 clone，我们的改动已本地提交 `aa9f681`，工作区干净） |
+| hook 源码 | `C:\wxhook-src\WeChat-Hook`（上游 aixed/WeChat-Hook 的 clone，我们的改动已本地提交 `aa9f681`，工作区干净） |
 | 构建 | `MSBuild.exe x64_Version_dll.vcxproj /m /t:Build /p:Configuration=Release /p:Platform=x64` |
 | hook HTTP | `127.0.0.1:30001`（只监听本机） |
 | hook 回调 | `http://127.0.0.1:18998`（启动参数 `CallBackURL=` 传入，**目前 hook 只解析不实现**） |
@@ -141,7 +141,7 @@ Get-Item 'D:\wxhook\wx4110\version.dll' | Select-Object Length, LastWriteTime   
 (Invoke-WebRequest 'http://127.0.0.1:17300/api/status' -TimeoutSec 10).Content
 
 # 1) 读 hook 里现有的 sqlite detour（路线 A 的落点）
-#    E:\wxhook-src\WeChat-Hook\xdb\db_mgr.cpp   （看 detourPrepare / g_api / noteHandle）
+#    C:\wxhook-src\WeChat-Hook\xdb\db_mgr.cpp   （看 detourPrepare / g_api / noteHandle）
 
 # 2) 顺手验证 rea 能不能用（不行就走 headless）
 D:\rea\rea.cmd --help
@@ -164,7 +164,7 @@ D:\rea\rea.cmd --help
 | 项 | 值 |
 |---|---|
 | 改动 | 仅 `xdb/db_mgr.cpp`，**+225 行 / −0 行**（纯增量，既有语句一字未改，`rc`/出参/控制流原样） |
-| 产物 | `E:\wxhook-src\WeChat-Hook\x64\Release\version.dll`，**534016 字节**，MD5 `CC88631554D724CD49C8C5760FD6CB35` |
+| 产物 | `C:\wxhook-src\WeChat-Hook\x64\Release\version.dll`，**534016 字节**，MD5 `CC88631554D724CD49C8C5760FD6CB35` |
 | 在跑的 DLL | 仍是 516608 / `CB38DD658D9FA0EF5052CDDA97AC7318`（**未部署**） |
 | 导出表 | 与在跑的 DLL **17 = 17 一致**（代理接口没动） |
 | 日志 | `D:\wxhook\wx4110\hook-probe.log`（部署后由探针创建；机器没装 DbgView 所以落文件） |
