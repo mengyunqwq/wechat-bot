@@ -74,6 +74,44 @@ http://127.0.0.1:3080/wechat-bot
 > 想让**局域网/手机**访问：`dsh web --port 3080 --host <你的内网IP> --trusted-host <你的内网IP>:3080`
 > （DSH 的 `--host` 不接受 `0.0.0.0`，必须填具体 IP；**不要暴露公网**）
 
+**v1.2.0 起：面板同时注册进 DSH 界面本体（原生插件 UI）**
+
+除了 `/wechat-bot` 这个独立地址，插件还会把同一个面板注册到 DSH 自己的界面里：
+
+```
+DSH 左侧面板列表（定时任务/交付物那一列）
+  └─ 🐋 微信机器人     ← 点开就是完整面板，和 /wechat-bot 是同一份代码
+```
+
+两个入口是同一个 `panel/index.html`，改一处两边都变。实现方式（给维护者）：
+
+```
+package.json
+  "dsh": { "client": { "platform": "web", ... } }
+  "exports": { "./client": "./lib/client.js" }   ← 宿主硬校验，缺了直接抛错
+
+lib/client.js  = build-client.mjs 生成
+  读 panel/index.html → 切成 CSS/DOM/JS 三段
+  → React 空壳 + useEffect 里挂原 DOM（官方 super-injector 同款迁移法）
+  → ctx.slots.inject("main", ...) 整页 + ctx.slots.inject("sidebar.panellist", ...) 侧栏图标
+```
+
+**让它生效的三个前提**（漏一个图标就不出现，且没有任何报错）：
+
+1. **必须走官方装配**（profile 的 `bundles` / cordis patch）。运行时 `loader.create` 注入的
+   entry 名字是随机 hex，不是合法包名，`dsh-client-modules` 扫描时**直接跳过**
+2. 改完 `package.json` / `lib/client.js` 后**重启 `dsh web`** —— 宿主只在启动时组合
+   client 启动图，运行中热重载不会给新声明的包补位
+3. 改过 `panel/index.html` 后重跑 `node build-client.mjs` 重新生成 `lib/client.js`
+
+**验证是否已注册进 DSH**（不打开浏览器也能查）：
+
+```powershell
+# rev = sha1(mtimeMs, ctimeMs, size) 前 12 位；算不出就直接看响应码
+# 200 = 已进组合图，404 = 宿主没扫到（检查上面三个前提）
+curl "http://127.0.0.1:3080/plugins/??@dsh-external/dsh-wechat-bot/client.js&rev=<rev>"
+```
+
 **14 个页面**
 
 | 页面 | 内容 |

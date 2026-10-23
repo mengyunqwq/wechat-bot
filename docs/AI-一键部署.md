@@ -526,9 +526,23 @@ memoryDir, logFile, dryRun
 | 入口 | 一句话 | 例子 |
 |---|---|---|
 | **DSH 插件工具** | 在 DSH 里直接调工具，最完整（含自检、记忆、表情包、识图） | `wechat_bot_say(room="测试群", text="大家好，我来了")` |
-| **控制面板** | 浏览器里的图形界面，**不用敲命令** | `http://127.0.0.1:<DSH端口>/wechat-bot` —— 桥连上微信时会自动弹出来 |
+| **控制面板** | 浏览器里的图形界面，**不用敲命令** | ① DSH 界面左侧面板列表 🐋「微信机器人」（v1.2.0 起的原生入口）；② 独立地址 `http://127.0.0.1:<DSH端口>/wechat-bot` —— 桥连上微信时会自动弹出来 |
 | **MCP** | 在支持 MCP 的 AI 客户端里用自然语言驱动 | 对 Claude/Cursor 说："用 wechat MCP 往测试群发一条：我上线了" |
 | **REST API** | 任何能发 HTTP 请求的脚本/程序 | `curl -X POST http://127.0.0.1:17300/api/send -H "content-type: application/json" -d "{\"room\":\"测试群\",\"text\":\"大家好\"}"` |
+
+> **v1.2.0 起控制面板是 DSH 原生插件 UI**：同一个面板注册进了 DSH 界面本体
+> （左侧面板列表 🐋「微信机器人」），`/wechat-bot` 独立地址保留，两者是同一份代码。
+> 部署 AI 必须知道的三条前提（漏了图标不出现且无报错）：
+>
+> 1. **装配必须走官方路径**（profile `bundles` / cordis patch），不能用运行时注入 ——
+>    运行时 `loader.create` 的 entry 名是随机 hex，`dsh-client-modules` 扫不到；
+> 2. 部署完成后**重启一次 `dsh web`**，让宿主重新组合 client 启动图；
+> 3. 面板源码改过要重跑 `node build-client.mjs`（生成 `lib/client.js`）。
+>
+> 验证（不打开浏览器也能查）：
+> `curl "http://127.0.0.1:3080/plugins/??@dsh-external/dsh-wechat-bot/client.js&rev=<rev>"`
+> —— 200 = 已进组合图；404 = 宿主没扫到（回查上面三条）。
+
 
 > **给部署 AI 的硬要求（别漏）**：面板地址是 `http://127.0.0.1:<DSH端口>/wechat-bot`，
 > 端口由 `dsh web --port N` 决定，**不能写死 3080**。

@@ -237,6 +237,22 @@ curl "http://127.0.0.1:17300/api/members?room=<群id>"   # 群成员真实昵称
 见 [wechat-group-agent/README.md](wechat-group-agent/README.md)（装进 DSH profile 的 node_modules 并在 patch 里启用）。
 **记得保持 `hosted.enabled = false`**，否则双重回复。
 
+> **控制面板（v1.2.0 起是 DSH 原生插件 UI）**
+>
+> 插件把 `panel/index.html` 注册进了 DSH 界面本体 —— DSH 左侧面板列表会出现
+> **🐋 微信机器人**，点开就是完整控制面板；独立地址 `/wechat-bot` 保留（手机/局域网用）。
+>
+> **三个必须知道的点**：
+>
+> 1. **必须走官方装配**（profile `bundles` / cordis patch）。运行时 `loader.create`
+>    注入的 entry 名是随机 hex，`dsh-client-modules` 不会扫描它 → 图标不出现；
+> 2. 装好后**重启一次 `dsh web`** —— 宿主只在启动时组合 client 启动图；
+> 3. 改过面板源码要重跑 `node build-client.mjs`（在 `wechat-group-agent/` 下，
+>    生成 `lib/client.js`）。
+>
+> 验证：`curl "http://127.0.0.1:3080/plugins/??@dsh-external/dsh-wechat-bot/client.js&rev=<rev>"`
+> 返回 200 表示已进组合图；404 表示宿主没扫到（回查上面三条）。
+
 ### 5.2 用外部 agent（托管模式）
 
 桥替 agent 管节流/作息/记忆/打字节奏，agent 只需回一段文字：
