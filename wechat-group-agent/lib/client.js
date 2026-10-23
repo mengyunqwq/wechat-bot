@@ -58,10 +58,19 @@ window.__ModuleLoader__.load({
 		//#endregion
 		//#region src/client/apply.ts —— 注册进 DSH 界面
 		function apply(ctx) {
-			// 关闭面板 = 把主视图切回默认（layout.selectPanel(null) → 渲染 conversation）
+			// 关闭面板 = 把主视图切回默认（layout.selectPanel(null) → 渲染 conversation）。
+			// 优先 ctx.layout（ui-sidebar 就是这么用的），拿不到再 ctx.get('layout') 兜底。
 			const closePanel = () => {
-				try { ctx.layout && ctx.layout.selectPanel && ctx.layout.selectPanel(null); }
-				catch (e) { console.error("[wechat-bot client] layout.selectPanel:", e); }
+				try {
+					const layout = (ctx && ctx.layout) || (ctx.get && ctx.get("layout"));
+					if (!layout || typeof layout.selectPanel !== "function") {
+						console.warn("[wechat-bot client] 找不到 layout 服务，无法关闭面板");
+						return;
+					}
+					layout.selectPanel(null);
+				} catch (e) {
+					console.error("[wechat-bot client] layout.selectPanel:", e);
+				}
 			};
 			// ① 整页主视图（schedule 面板同款：main 槽 + key）
 			ctx.effect(() => ctx.slots.inject("main", () => ctx.slots.register({

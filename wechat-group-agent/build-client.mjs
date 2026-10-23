@@ -115,10 +115,19 @@ const out = `window.__ModuleLoader__.load({
 \t\t//#endregion
 \t\t//#region src/client/apply.ts —— 注册进 DSH 界面
 \t\tfunction apply(ctx) {
-\t\t\t// 关闭面板 = 把主视图切回默认（layout.selectPanel(null) → 渲染 conversation）
+\t\t\t// 关闭面板 = 把主视图切回默认（layout.selectPanel(null) → 渲染 conversation）。
+\t\t\t// 优先 ctx.layout（ui-sidebar 就是这么用的），拿不到再 ctx.get('layout') 兜底。
 \t\t\tconst closePanel = () => {
-\t\t\t\ttry { ctx.layout && ctx.layout.selectPanel && ctx.layout.selectPanel(null); }
-\t\t\t\tcatch (e) { console.error("[wechat-bot client] layout.selectPanel:", e); }
+\t\t\t\ttry {
+\t\t\t\t\tconst layout = (ctx && ctx.layout) || (ctx.get && ctx.get("layout"));
+\t\t\t\t\tif (!layout || typeof layout.selectPanel !== "function") {
+\t\t\t\t\t\tconsole.warn("[wechat-bot client] 找不到 layout 服务，无法关闭面板");
+\t\t\t\t\t\treturn;
+\t\t\t\t\t}
+\t\t\t\t\tlayout.selectPanel(null);
+\t\t\t\t} catch (e) {
+\t\t\t\t\tconsole.error("[wechat-bot client] layout.selectPanel:", e);
+\t\t\t\t}
 \t\t\t};
 \t\t\t// ① 整页主视图（schedule 面板同款：main 槽 + key）
 \t\t\tctx.effect(() => ctx.slots.inject("main", () => ctx.slots.register({
