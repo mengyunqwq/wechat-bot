@@ -75,16 +75,17 @@ AI 拿到这段指令后会自己：查环境 → 装依赖 → 复制独立微�
     若版本不是 4.1.10.27：停止，告诉人类"Hook 只适配微信 4.1.10.27，请提供该版本的安装目录"。
     （微信 4.x 的客户端是"外壳 + 版本目录"结构，实际 DLL 在 4.1.10.27\ 里。）
 3.2 拿 Hook（两条路，二选一）：
-  ── 方案 A：下载成品包（推荐，不用编译）──
-    到 https://github.com/mengyunqwq/wechat-bot/releases/latest
-    直接下载这 4 个散文件：version.dll、一键安装.ps1、一键回滚.ps1、SHA256.txt（无需解压）
+  ── 方案 A：用仓库里的成品（推荐，不用编译）──
+    成品在仓库 release/ 目录（git clone 即得）：
+      version.dll、install.ps1、rollback.ps1、SHA256.txt
+    也可以从 https://github.com/mengyunqwq/wechat-bot/releases/latest 下载同样 4 个文件
     然后：
       a) 完全退出微信（任务管理器里 Weixin.exe 进程数为 0）
-      b) 解压到任意目录（⚠️ 不要解压到 %TEMP%，Defender 可能删掉里面的 dll）
-      c) 运行 一键安装.ps1 —— 自动备份旧 dll、覆盖、配置重放开关
+      b) 把 release/ 里的文件放到同一目录（⚠️ 不要放 %TEMP%，Defender 可能删掉 dll）
+      c) 运行 .\install.ps1 —— 自动备份旧 dll、覆盖、配置重放开关
       d) 启动微信：Weixin.exe StartPort=30001 RecvType=1 CallBackURL=http://127.0.0.1:18998/recv
       e) 登录后【点一次左侧「通讯录」】—— 让 contact.db 打开，否则群成员/名字/@ 都会退化
-    成品包含：version.dll（含语音发送 + 数据库 late-arm 修复）、一键安装.ps1、一键回滚.ps1、SHA256
+    成品包含：version.dll（含语音发送 + 数据库 late-arm 修复）、install.ps1、rollback.ps1、SHA256
   ── 方案 B：自己编译（需要源码 + 补丁；新手不推荐）──
     前提：本机已有上游源码与本项目补丁（补丁不随仓库发布）。
     只有原版源码时，务必先读 docs/安装流程.md 第 2.2 节 —— 原版是 3.9.x 的，

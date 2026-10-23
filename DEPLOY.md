@@ -53,7 +53,7 @@ robocopy "D:\Program Files\Tencent\Weixin" "D:\wxhook\wx4110" /E
 
 ### 方案 A：下载成品包（推荐，不用编译）
 
-1. 打开 **[Releases 页](https://github.com/mengyunqwq/wechat-bot/releases/latest)**，下载这 4 个文件：`version.dll`、`install.ps1`（一键安装）、`rollback.ps1`（一键回滚）、`SHA256.txt`（散文件，无需解压）
+1. 拿成品：**克隆仓库后直接用 `release/` 目录里的文件**（或从 [Releases 页](https://github.com/mengyunqwq/wechat-bot/releases/latest) 下载同样 4 个文件）：`version.dll`、`install.ps1`（一键安装）、`rollback.ps1`（一键回滚）、`SHA256.txt`
 2. **完全退出微信**（任务管理器里 `Weixin.exe` 进程数为 0）
 3. 解压到任意目录（**不要解压到 `%TEMP%`**，Defender 可能删掉里面的 dll），运行 `install.ps1`（一键安装）
    —— 它会自动备份旧 DLL、覆盖、配置重放开关
@@ -63,8 +63,8 @@ robocopy "D:\Program Files\Tencent\Weixin" "D:\wxhook\wx4110" /E
 
 ```
 version.dll        编译好的 Hook（含语音发送 + 数据库 late-arm 修复）
-一键安装.ps1        退出微信 → 备份 → 覆盖 → 配重放
-一键回滚.ps1        还原到安装前的 DLL
+install.ps1         退出微信 → 备份 → 覆盖 → 配重放
+rollback.ps1        还原到安装前的 DLL
 README.txt / SHA256.txt
 ```
 

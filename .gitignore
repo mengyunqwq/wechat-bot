@@ -36,3 +36,11 @@ _eyes_pkg_tmp/
 # ── hook 逆向产物（源码补丁 / RVA 生成脚本，绝不进公库）2026-10-23 ──
 patches/*.patch
 scripts/gen-offset-patterns.py
+
+# ── 成品（用户要求：直接把成品放进仓库，克隆即用）2026-10-23 ──
+!release/
+!release/version.dll
+!release/install.ps1
+!release/rollback.ps1
+!release/README.txt
+!release/SHA256.txt

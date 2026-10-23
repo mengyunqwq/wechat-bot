@@ -15,7 +15,12 @@
 
 ## 📦 成品包下载（推荐，不会编译也能装）
 
-**下载地址**：[Releases 页](https://github.com/mengyunqwq/wechat-bot/releases/latest) → 直接下载这 4 个文件（散文件，**无需解压**）：`version.dll`、`install.ps1`（一键安装）、`rollback.ps1`（一键回滚）、`SHA256.txt`
+**获取方式（二选一）**：
+
+- **克隆仓库即得**：成品就在仓库的 `release/` 目录里（`git clone` 后直接用，无需下载额外附件）
+- **[Releases 页](https://github.com/mengyunqwq/wechat-bot/releases/latest)**：同样这 4 个文件（散文件，无需解压）
+
+`release/` 里有什么：`version.dll`（已编译 Hook）、`install.ps1`（一键安装）、`rollback.ps1`（一键回滚）、`SHA256.txt`、`README.txt`
 
 | 包里有什么 | 说明 |
 |---|---|
@@ -28,7 +33,7 @@
 
 ```
 ① 完全退出微信（任务管理器里 Weixin.exe 进程数为 0）
-② 解压 zip（不要解压到 %TEMP%），运行 一键安装.ps1
+② 用仓库 `release/` 里的文件（或 Releases 下载，**不用解压**），运行 `install.ps1`（不要在 %TEMP% 里跑）
 ③ 启动微信 → 登录后点一次左侧「通讯录」（让 contact.db 打开）
 ```
 
@@ -190,6 +195,7 @@ wechat-bot/
 │   ├── 安装流程.md        ★ 从零到能用的完整安装顺序
 │   ├── images/           截图
 │   └── *.md              语音/视频/气泡/抖音/生图/角色设定/运维规则/…
+├── release/              ★ 成品（version.dll + install.ps1 + rollback.ps1 + SHA256.txt）
 ├── install.ps1           一键安装
 ├── config.example.json   配置模板
 └── DEPLOY.md             部署细节
