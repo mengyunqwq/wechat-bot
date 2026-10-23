@@ -412,7 +412,7 @@ export function apply(ctx, rawConfig) {
 function applyInner(ctx, rawConfig) {
   const config = { ...DEFAULT_CONFIG, ...(rawConfig ?? {}) }
   const SHORT = 'dsh-wechat-bot'
-const BUILD_VER = '2026-10-23.1'   // 抬版本：让新实例压过热重载残留的旧实例   // 带版本号的实例才允许踢掉旧连接（旧代码没这个字段）
+const BUILD_VER = '2026-10-23.2'   // 抬版本：让新实例压过热重载残留的旧实例   // 带版本号的实例才允许踢掉旧连接（旧代码没这个字段）
   const dshHome = process.env.DSH_HOME || join(homedir(), '.dsh')
   // ★ 持久化：把 wechat_bot_config 改过的值存到文件，重载插件后自动读回来。
   //   （以前纯内存，重载/重启 DSH 就全部回落默认，每次都要重设一遍。）
@@ -4069,9 +4069,30 @@ let res = await callLlm(route, sys, usr, undefined)
     } catch { return { version: '0.0.0', notes: '', releasedAt: '' } }
   }
   async function readRepoVersion() {
-    const r = await ghJson(`/repos/${UPDATE_REPO}/contents/version.json`)
-    const txt = Buffer.from(String(r.content || '').replace(/\n/g, ''), 'base64').toString('utf8')
-    const j = JSON.parse(txt) || {}
+    // ★ 2026-10-23：GitHub 匿名 API 有 60 次/小时限流，超了直接 403（今天实测）。
+    //   通道顺序：GitHub API → jsDelivr CDN（国内可达）→ 都失败才抛。
+    let j = null
+    let apiErr = null
+    try {
+      const r = await ghJson(`/repos/${UPDATE_REPO}/contents/version.json`)
+      const txt = Buffer.from(String(r.content || '').replace(/\n/g, ''), 'base64').toString('utf8')
+      j = JSON.parse(txt) || {}
+    } catch (e) {
+      apiErr = e
+    }
+    if (!j) {
+      const cdn = `https://cdn.jsdelivr.net/gh/${UPDATE_REPO}@main/version.json?ts=${Date.now()}`
+      const ac = new AbortController()
+      const timer = setTimeout(() => ac.abort(), 15000)
+      try {
+        const res = await fetch(cdn, { signal: ac.signal, headers: { 'cache-control': 'no-cache' } })
+        if (!res.ok) throw new Error('jsDelivr HTTP ' + res.status)
+        j = await res.json()
+        log('[update] GitHub API 不可用（' + String(apiErr?.message || apiErr).slice(0, 60) + '）→ 已用 jsDelivr 兜底')
+      } catch (e2) {
+        throw new Error('版本读取失败：API=' + String(apiErr?.message || apiErr).slice(0, 50) + '；CDN=' + String(e2?.message || e2).slice(0, 50))
+      } finally { clearTimeout(timer) }
+    }
     // ★ 2026-10-22：r.sha 是**文件内容的 blob sha**，不能拿去 codeload 下载 zip
     //   （codeload.github.com/<repo>/zip/<blob sha> → HTTP 404，实测 14 字节的 404 响应）。
     //   下载必须用 **commit sha**，所以这里额外查一次 commits/main。
