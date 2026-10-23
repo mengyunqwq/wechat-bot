@@ -1,15 +1,39 @@
 # 微信机器人
 
-把微信变成一个**有性格、有记忆、会发表情包、看得懂图/视频/语音**的群聊机器人。带一个 **Web 控制面板**，也提供 **MCP / WebSocket / HTTP** 三种接口给任意 AI agent 驱动。
+把微信变成一个**有性格、有记忆、会发表情包、看得懂图/视频/语音、还能发真语音**的群聊机器人。带一个 **Web 控制面板**，也提供 **MCP / WebSocket / HTTP** 三种接口给任意 AI agent 驱动。
 
 [![Node](https://img.shields.io/badge/node-%E2%89%A518-brightgreen)](https://nodejs.org)
 [![Python](https://img.shields.io/badge/python-%E2%89%A53.10-blue)](https://www.python.org)
 [![WeChat](https://img.shields.io/badge/WeChat-4.1.10.27%20x64-green)]()
+[![Version](https://img.shields.io/badge/version-1.3.3-blue)]()
 [![License](https://img.shields.io/badge/license-MIT-lightgrey)](LICENSE)
 
 > ⚠️ **动手改部署前请先读 [docs/OPERATIONS-RULES.md](docs/OPERATIONS-RULES.md)**
 > —— 记着「为什么不能强杀微信 / 为什么不能自动拉起客户端 / 为什么看门狗只做进程内自愈」，每条都是真实事故换来的。
-> 重启客户端请用 [scripts/safe-restart-client.ps1](scripts/safe-restart-client.ps1)（会先备份、正常退出、等加载）。
+
+---
+
+## 📦 成品包下载（推荐，不会编译也能装）
+
+**下载地址**：[Releases 页](https://github.com/mengyunqwq/wechat-bot/releases/latest) → 附件 `dafiyu-eyes-v1.3.3.zip`
+
+| 包里有什么 | 说明 |
+|---|---|
+| `version.dll` | 编译好的微信 Hook（含语音发送修复、数据库 late-arm 修复）|
+| `一键安装.ps1` | 退出微信 → 备份旧 DLL → 覆盖 → 配重放 |
+| `一键回滚.ps1` | 还原到安装前的 DLL |
+| `README.txt` / `SHA256.txt` | 版本说明与校验值 |
+
+**三步安装**
+
+```
+① 完全退出微信（任务管理器里 Weixin.exe 进程数为 0）
+② 解压 zip（不要解压到 %TEMP%），运行 一键安装.ps1
+③ 启动微信 → 登录后点一次左侧「通讯录」（让 contact.db 打开）
+```
+
+> 需要 **微信 4.1.10.27 x64**。完整流程（含桥/插件/面板启动、自检清单、常见坑）见
+> **[docs/安装流程.md](docs/安装流程.md)**。
 
 ---
 
@@ -19,16 +43,16 @@
 
 | 组成 | 来源 | 我们的工作 |
 |---|---|---|
-| **微信 Hook（`version.dll`）** | [aixed/WeChat-Hook](https://github.com/aixed/WeChat-Hook)（**无 LICENSE**）| 改了 C++ 源码并自行编译（5 处：QueryDB 门禁/自愈/JSON 加固/懒加载重扫 + 调试路由）。**源码版权归原作者**；本仓库**只给补丁、不给二进制** |
+| **微信 Hook（`version.dll`）** | [aixed/WeChat-Hook](https://github.com/aixed/WeChat-Hook)（**无 LICENSE**）| 修改 C++ 源码并自行编译（数据库句柄修复 / late-arm / 语音气泡 / 眼睛探针 / 调试路由）。**源码版权归原作者**；本项目不提供源码，二进制仅以 **Release 附件**形式提供 |
 | **微信客户端** | 腾讯 | 仅本地调用，**不修改、不分发** |
 | 接入层 / 拟人策略 / MCP / REST / 控制面板 / 图片解密 | 本项目原创 | 全部自研 |
 | 图片解密格式（V2）| 社区公开资料 | 适配与工程化，非从零逆向 |
 
 **因此**：
 
-1. 使用前需你**自行获取**微信 Hook 项目（并遵守其许可），本项目只给补丁与说明。
-2. **请自行评估合规风险**：修改/挂钩微信客户端可能违反腾讯用户协议，账号存在被封禁的可能。**请仅用于个人学习研究，不要用于商业用途或骚扰他人。**
-3. 本项目**不含任何微信账号、密钥、聊天数据**。表情包现场生成需要你自己接一个图像服务的 key（环境变量或本地凭据，仓库里只有占位符）——**不配也能用**，会退化为"只用现成图库"。
+1. **请自行评估合规风险**：修改/挂钩微信客户端可能违反腾讯用户协议，账号存在被封禁的可能。**请仅用于个人学习研究，不要用于商业用途或骚扰他人。**
+2. 本项目**不含任何微信账号、密钥、聊天数据**。表情包现场生成需要你自己接一个图像服务的 key（环境变量或本地凭据，仓库里只有占位符）——**不配也能用**，会退化为"只用现成图库"。
+3. 仓库本身**不提交二进制**（`.gitignore` 挡住 `*.dll` / `*.zip`），Hook 只以 Release 附件分发；如需从源码自行编译，见 [docs/安装流程.md](docs/安装流程.md) 第 2.2 节。
 
 ---
 
@@ -44,13 +68,17 @@
 | **识图** | 群里的图片**自动解密** → 视觉模型识别 → 参与聊天；识别完删临时文件 |
 | **视频识别** | 每秒 1 帧 → 每 20 帧一张带时间戳的**联系表** + 抽音轨走本地语音识别 → 参与聊天。详见 [docs/视频识别.md](docs/视频识别.md) |
 | **语音识别** | 群里的语音自动转文字（本地 SenseVoice，**不需要 API key**）。详见 [docs/语音识别.md](docs/语音识别.md) |
-| **语音气泡** | 机器人能发**真正的微信语音**（type 34，可点播）。详见 [docs/语音气泡.md](docs/语音气泡.md) |
+| **语音气泡** | 机器人能发**真正的微信语音**（type 34，可点播）；面板里一个开关控制，失败自动降级文字。详见 [docs/语音气泡.md](docs/语音气泡.md) |
+| **眼睛（原图/整片视频）** | 面板拖入成品包即可启用：拿**原图**而不是缩略图、拿**整段视频**而不是封面，9 个探针钩子 |
+| **桌宠联动** | 可选：接 [dsh-pet] 桌面宠物，群里有人说话时她会做表情/冒泡，思考时播"思考冒泡"，答完播"雀跃庆祝" |
 | **抖音刷** | 自己去刷推荐流 → 看画面+听台词 → 按自己口味挑一条发群；**纯只读**。详见 [docs/抖音自动刷.md](docs/抖音自动刷.md) |
 | **生图** | 表情包/配图现场生成（Agnes 云端 / 本地 ComfyUI 可选）。详见 [docs/生图.md](docs/生图.md) |
 | **真 @ 提醒** | 正文写 `@群昵称` + 把 wxid 传进 `atlist` → 对方**真的收到红点** |
 | **一键自检** | `wechat_bot_selfcheck`：桥/登录/hook/数据库/轮询/自己是谁/群昵称/语音/识图/表情包/记忆/LLM 路由 **12 项只读体检** |
 | **失联监控** | 心跳检查，异常时通过文件传输助手告警（静默 30 分钟防刷屏）|
 | **多 agent 接入** | MCP Server（Claude Desktop / Cursor / Cline）+ REST API + WebSocket + 托管模式 |
+
+> **不支持**：拍一拍（Hook 侧没有对应实现，面板里也已移除）、撤回、转发。
 
 ---
 
@@ -70,47 +98,9 @@ npx @deepseek-ai/dsh web --port 3080
 http://127.0.0.1:3080/wechat-bot
 ```
 
-> 面板和 DSH 插件是同一个包 —— 没有 DSH 就没有面板。
-> 想让**局域网/手机**访问：`dsh web --port 3080 --host <你的内网IP> --trusted-host <你的内网IP>:3080`
-> （DSH 的 `--host` 不接受 `0.0.0.0`，必须填具体 IP；**不要暴露公网**）
+面板同时注册进 DSH 界面本体（原生插件 UI）：DSH 左侧面板列表里的 **🐋 微信机器人**，点开就是同一份面板。
 
-**v1.2.0 起：面板同时注册进 DSH 界面本体（原生插件 UI）**
-
-除了 `/wechat-bot` 这个独立地址，插件还会把同一个面板注册到 DSH 自己的界面里：
-
-```
-DSH 左侧面板列表（定时任务/交付物那一列）
-  └─ 🐋 微信机器人     ← 点开就是完整面板，和 /wechat-bot 是同一份代码
-```
-
-两个入口是同一个 `panel/index.html`，改一处两边都变。实现方式（给维护者）：
-
-```
-package.json
-  "dsh": { "client": { "platform": "web", ... } }
-  "exports": { "./client": "./lib/client.js" }   ← 宿主硬校验，缺了直接抛错
-
-lib/client.js  = build-client.mjs 生成
-  读 panel/index.html → 切成 CSS/DOM/JS 三段
-  → React 空壳 + useEffect 里挂原 DOM（官方 super-injector 同款迁移法）
-  → ctx.slots.inject("main", ...) 整页 + ctx.slots.inject("sidebar.panellist", ...) 侧栏图标
-```
-
-**让它生效的三个前提**（漏一个图标就不出现，且没有任何报错）：
-
-1. **必须走官方装配**（profile 的 `bundles` / cordis patch）。运行时 `loader.create` 注入的
-   entry 名字是随机 hex，不是合法包名，`dsh-client-modules` 扫描时**直接跳过**
-2. 改完 `package.json` / `lib/client.js` 后**重启 `dsh web`** —— 宿主只在启动时组合
-   client 启动图，运行中热重载不会给新声明的包补位
-3. 改过 `panel/index.html` 后重跑 `node build-client.mjs` 重新生成 `lib/client.js`
-
-**验证是否已注册进 DSH**（不打开浏览器也能查）：
-
-```powershell
-# rev = sha1(mtimeMs, ctimeMs, size) 前 12 位；算不出就直接看响应码
-# 200 = 已进组合图，404 = 宿主没扫到（检查上面三个前提）
-curl "http://127.0.0.1:3080/plugins/??@dsh-external/dsh-wechat-bot/client.js&rev=<rev>"
-```
+> **默认不自动弹浏览器**（`autoOpenPanel: false`）。想要"桥连上就自动开"，面板「高级/接入」页打开即可。
 
 **14 个页面**
 
@@ -121,145 +111,46 @@ curl "http://127.0.0.1:3080/plugins/??@dsh-external/dsh-wechat-bot/client.js&rev
 | 💬 **回复节奏** | 回复概率、冷却、10 分钟上限、连发保护 |
 | 🌱 **主动行为** | 主动发言概率/间隔/安静时段 |
 | 🗣 **说话方式** | 温度、长度、拆条、语气 |
-| 😄 **表情包** | 生成、挑选、发送、图库浏览 |
+| 😄 **表情包** | 生成、挑选、发送、图库浏览、生图接口配置 |
 | 🖼 **感知** | 视觉开关、链接视频、抖音 |
-| 🎙 **语音** | 音色、开关、概率 |
+| 🎙 **语音** | 音色、开关、概率、hook 语音发送开关（持久化）|
 | 🧠 **记忆** | 增删查、提炼 |
-| 👥 **群与人** | 成员、wxid→昵称映射 |
-| 🧩 **模型接口** | provider 增删、连通性测试、生图接口 |
-| 🐟 **人设模型** | 人设参数 |
-| 👁 **眼睛** | **拖入 zip 一键装**原图/视频整片能力（见下）|
+| 👥 **群与人** | 成员、wxid→昵称映射、白名单 |
+| 🐟 **人设模型** | 人设、模型、温度、接口 |
+| 👁 **眼睛** | 拖入 zip 一键装（预检 / 备份 / 安装 / 配重放 / 自检开关）|
 | 🔬 **诊断** | 崩溃 dump / 数据库 / API 表 / 眼睛目录 / 磁盘 / LLM 路由 |
 | 📦 **更新** | 按版本号检查更新、一键更新（先备份、失败回滚）|
 
-**眼睛**：拖入「大肥鱼的眼睛.zip」→ 自动解压、校验 DLL 能力（CDN 重放 / 视频整片）、备份旧 DLL、安装、自动配置重放目录和开关。
-装之前两个能力显示「未启用」，装完变「已启用」。
-**前提**：DLL 必须含 CDN 重放 —— 本项目不分发这个 DLL，面板会明确显示这一项。
+**眼睛**：拖入 `dafiyu-eyes-v1.3.3.zip` → 自动解压、校验 DLL 能力（CDN 重放 / 视频整片）、备份旧 DLL、安装、自动配置重放目录和开关，并回报 `switchOk/dirOk` 自检结果。
 
 ---
 
 ## 快速开始
 
-### 方式一：一键部署（推荐）
+### 方式一：成品包（推荐）
+
+见上文 **[📦 成品包下载](#-成品包下载推荐不会编译也能装)**，完整流程见 [docs/安装流程.md](docs/安装流程.md)。
+
+### 方式二：从源码部署
 
 ```powershell
-# 在仓库根目录运行。依次完成：环境检查 → 装依赖 → 准备独立微信
-# → 编译 Hook（调 scripts/build-hook.ps1）→ 部署 DLL → 写配置 → 启动 → 健康检查
-pwsh -ExecutionPolicy Bypass -File .\一键部署.ps1
-```
-
-### 控制面板
-
-面板挂在 DSH 的 webServer 上，复用 DSH 登录态：
-
-```powershell
-npx @deepseek-ai/dsh web --port 3080
-# → http://127.0.0.1:3080/wechat-bot
-```
-
-> **端口不用猜，从地址栏看。**
->
-> `dsh web` 启动后会自动打开浏览器，那个页面的地址栏就是你的 DSH 地址
-> （`http://127.0.0.1:3080/`，或你换过的任何端口）。在末尾加 `/wechat-bot` 回车：
->
-> ```
-> http://127.0.0.1:3080/            ← DSH 首页（启动后自动打开的）
-> http://127.0.0.1:3080/wechat-bot  ← 控制面板
-> ```
->
-> 换了端口（比如 8080）就是 `http://127.0.0.1:8080/wechat-bot`。
-> **打开面板后，左上角会显示它自己的完整地址，点一下就能复制**，方便发给别人。
-
-**桥连上微信时自动打开面板**
-
-微信登录成功（桥连上）后，插件会用系统默认浏览器自动打开面板 —— 不用每次自己找地址。
-
-```
-地址从哪来（按优先级）：
-  ① 配置项 panelUrl        ← 一键部署会按 -DshPort 自动写好
-  ② 配置项 panelHost
-  ③ 面板自己学到的 host    ← 你打开过一次面板，它就把 Host 头记住了
-  ④ http://127.0.0.1:3080/wechat-bot（兜底）
-```
-
-**一键部署会自动写 `panelUrl`**：`-DshPort` 给多少就写多少（默认 3080）。
-
-不想弹的话，面板「🔧 高级/接入」页把 **「桥连上时自动打开面板」** 关掉即可。
-
-**它覆盖的功能**：
-
-| 能做的事 |
-|---|
-| 看群 / 消息 / 表情包 / 语音；发消息 / 表情 / 拍一拍 / 语音 |
-| 改 101 项配置（人设、概率、模型…）|
-| 记忆增删查、提炼长期记忆、成员名字 |
-| 拖入 zip 装眼睛（预检 + 备份 + 安装 + 配重放）、眼睛状态/开关/清理 |
-| 自检 7 项、诊断（崩溃 / 数据库 / 磁盘）|
-| 用量统计、一键更新 |
-| 模型接口管理（provider / key / 连通性测试）|
-
-**可选参数**
-
-```powershell
-# 已有 version.dll，跳过编译（最快）
-pwsh -ExecutionPolicy Bypass -File .\一键部署.ps1 -HookDll "D:\my-version.dll"
-
-# 只装代码和依赖，不碰微信、不启动
-pwsh -ExecutionPolicy Bypass -File .\一键部署.ps1 -SkipHook -NoStart
-
-# DSH 不是跑在 3080 上？把这个端口告诉部署脚本
-pwsh -ExecutionPolicy Bypass -File .\一键部署.ps1 -DshPort 8080
-
-# 指定微信目录（不给就自动找）
-pwsh -ExecutionPolicy Bypass -File .\一键部署.ps1 -WeChatDir "D:\wxhook\wx4110"
-```
-
-**关于耗时**（最常问的）
-
-| 情况 | 耗时 |
-|---|---|
-| 机器上已有 VS 2022 / MSBuild | **整套约 1~2 分钟**（编译本身 1.2 秒）|
-| 机器上没有编译器 | **首次多花 15~30 分钟**（自动装 VS Build Tools，2~6 GB，脚本会先问你）|
-| 之后微信升级要重编 | 还是 **1.2 秒** |
-
-> 脚本优先用 `pwsh`（PowerShell 7，原生 UTF-8）；只有 5.1 时回退，脚本自带 BOM 不会乱码。
-
-### 方式二：手动（照 DEPLOY.md 做）
-
-```powershell
-# 1) 前置：Node 18+、Python 3.10+（含 pycryptodome）
-# 2) 克隆
-git clone <本仓库地址> wechat-bot
+git clone https://github.com/mengyunqwq/wechat-bot.git wechat-bot
 cd wechat-bot
 
-# 3) 一键安装（装依赖 + 生成配置模板 + 检查环境）
-powershell -ExecutionPolicy Bypass -File .\install.ps1
-
-# 4) 填配置（微信路径、Python 路径、可选 LLM key）
-notepad .\config.json
-
-# 5) 起桥
-cd wx-bridge
-npm start
-
-# 6) （可选）起 DSH + 控制面板
-npx @deepseek-ai/dsh web --port 3080
-#    → http://127.0.0.1:3080/wechat-bot
+# 一键部署：环境检查 → 装依赖 → 写配置 → 启动 → 健康检查
+pwsh -ExecutionPolicy Bypass -File .\一键部署.ps1 -HookDll "D:\path\to\version.dll"
 ```
 
-**完整部署步骤（含微信 Hook 编译、回调/轮询、排错）见 [DEPLOY.md](DEPLOY.md)。**
+| 参数 | 作用 |
+|---|---|
+| `-HookDll <路径>` | 已有 `version.dll` 时直接部署（最快，配合成品包使用）|
+| `-SkipHook` | 只装代码和依赖，不碰微信 |
+| `-NoStart` | 只准备，不启动 |
+| `-DshPort 8080` | 你的 DSH 不在 3080 时指定 |
+| `-WeChatDir "D:\wxhook\wx4110"` | 指定微信目录 |
 
-> ⚠️ **关于预编译 Hook（version.dll）**
-> 本仓库**不分发**编译好的 `version.dll` —— 上游 [aixed/WeChat-Hook](https://github.com/aixed/WeChat-Hook) 没有 LICENSE，
-> 它的编译产物属于衍生作品，再分发有法律风险。所以改成**脚本在你本机编译**：
-> 克隆上游源码 → 打本仓库的补丁 → 编译 → 部署（自动备份原文件）。效果一样，但更干净。
->
-> **注意**：直接下载官方 release 的 `version.dll` **不能用** —— 官方版的 `QueryDB` 是坏的，且没有回调推送实现，
-> 会导致读不到数据库、收不到消息。必须走「源码 + 补丁 + 编译」这条路。
-
-> 🤖 **想让 AI 替你装？** 把 **[docs/AI-一键部署.md](docs/AI-一键部署.md)** 第 2 节整段复制给任意 AI 客户端
-> （豆包 / Claude Desktop / Cursor / Cline / DSH…），它会自己完成环境检查 → 装依赖 → 复制独立微信 →
-> 编译 Hook → 改配置 → 启动 → 逐项验证。你只需提供**微信安装目录**和**一个可以牺牲的微信号**。
+> 自行从**原版 Hook 源码**编译的完整步骤（含原版为什么不能直接用、桥依赖的接口契约）见
+> [docs/安装流程.md](docs/安装流程.md) 2.2 节。
 
 ---
 
@@ -295,11 +186,12 @@ wechat-bot/
 │   └── panel/            ★ Web 控制面板（单文件 HTML）
 ├── scripts/              运维脚本（安全重启、备份等）
 ├── docs/                 所有详细文档
+│   ├── 安装流程.md        ★ 从零到能用的完整安装顺序
 │   ├── images/           截图
 │   └── *.md              语音/视频/气泡/抖音/生图/角色设定/运维规则/…
 ├── install.ps1           一键安装
 ├── config.example.json   配置模板
-└── DEPLOY.md             完整部署指南
+└── DEPLOY.md             部署细节
 ```
 
 ---
@@ -315,17 +207,26 @@ wechat-bot/
 ❌ D:\微信数据\
 ```
 
-早期版本的库名提取函数只放行 ASCII（`if (c < 0x20 || c > 0x7E) return false`），
-UTF-8 中文字符每个字节都 `> 0x7E` → 整个函数失败 → 库名取不到 → 只能扫描猜名字 → 按名查找全 miss：
+早期版本的库名提取函数只放行 ASCII，中文路径会让库名取不到：
 
 ```
-GetAllDBName 能列库，但 QueryDB/execute 一律返回
+QueryDB/execute 返回
   {"status":-1,"desc":"get database handle which named message_0.db failed"}
 ```
 
-已修（2026-10-22），但**仍然建议**数据目录放纯 ASCII 路径 —— hook/SQLite/备份脚本对非 ASCII 的支持各不相同。
-查看当前目录：**微信 → 设置 → 文件管理 → 文件保存位置**。
-详见 [docs/DB-句柄修复说明.md](docs/DB-句柄修复说明.md)。
+已修，但仍建议数据目录放纯 ASCII 路径。详见 [docs/DB-句柄修复说明.md](docs/DB-句柄修复说明.md)。
+
+### 装完/重启后读不到 `contact.db`？
+
+微信的 `contact.db` **只在打开通讯录或搜索联系人时才真正打开**。
+登录后点一次左侧「通讯录」（停留 3 秒），桥就能登记句柄；否则会表现为：
+
+- 面板「群与人」成员为空
+- 名字只显示 wxid
+- 真 @ 退化成纯文本 `@昵称`
+- 桥日志：`get database handle which named contact.db failed`
+
+新版 Hook 已加 **late-arm**（每次查询前补装开库钩子），点一次通讯录即可永久登记。
 
 ---
 
@@ -343,22 +244,22 @@ GetAllDBName 能列库，但 QueryDB/execute 一律返回
 
 ## 📚 详细文档
 
-- **[常见错误与排错](docs/常见错误与排错.md)** —— 踩过的坑、症状速查、救命三招（有问题先看这个）
+- **[安装流程.md](docs/安装流程.md)** —— ★ 从零到能用：成品包 / 自行编译 / 启动顺序 / 自检清单 / 常见坑
+- **[常见错误与排错](docs/常见错误与排错.md)** —— 症状速查、救命三招（有问题先看这个）
 
 | 文档 | 内容 |
 |---|---|
-| [DEPLOY.md](DEPLOY.md) | 完整部署（Hook 编译、回调/轮询、排错）|
+| [docs/安装流程.md](docs/安装流程.md) | 完整安装顺序（推荐先读）|
+| [DEPLOY.md](DEPLOY.md) | 部署细节（回调/轮询/排错）|
 | [docs/OPERATIONS-RULES.md](docs/OPERATIONS-RULES.md) | **运维红线 R1–R16**（每条都是事故换来的）|
 | [docs/AI-一键部署.md](docs/AI-一键部署.md) | 给 AI 客户端的部署指引（可整段喂给 AI）|
-| [docs/DB-句柄修复说明.md](docs/DB-句柄修复说明.md) | 数据库句柄问题的根因与修复（含中文路径坑）|
+| [docs/DB-句柄修复说明.md](docs/DB-句柄修复说明.md) | 数据库句柄问题的根因与修复 |
 | [docs/语音识别.md](docs/语音识别.md) | 语音消息 → 文字 |
 | [docs/视频识别.md](docs/视频识别.md) | 视频抽帧 + 音轨 → 理解画面和台词 |
 | [docs/语音气泡.md](docs/语音气泡.md) | 让机器人发出真正的微信语音 |
 | [docs/抖音自动刷.md](docs/抖音自动刷.md) | 自己去刷推荐流、挑一条发群 |
 | [docs/生图.md](docs/生图.md) | 表情包/配图生成（云端或本地 ComfyUI）|
 | [docs/大肥鱼角色设定.md](docs/大肥鱼角色设定.md) | 示例人设 |
-| [docs/hook改造说明.md](docs/hook改造说明.md) | Hook 改造技术说明 |
-| [patches/](patches/) | Hook 源码补丁（RVA 已打码）|
 
 ---
 
@@ -366,11 +267,10 @@ GetAllDBName 能列库，但 QueryDB/execute 一律返回
 
 | 限制 | 说明 |
 |---|---|
-| **视频原片** | 视频整片依赖 Hook 的 CDN 重放（本项目不分发）；没有时退化为明文封面，再不行就 `[视频]` |
-| **图片原图** | 同上。没有原图时用解密出的缩略图识别 |
-| **微信版本** | 只适配 **4.1.10.27 x64**；升级后偏移会失效 |
-| **数据库句柄** | 少数环境下 `db_filename` 取不到库名（见 [DB 文档](docs/DB-句柄修复说明.md)）；可用纯 ASCII 数据目录避开 |
-| **预编译 Hook** | 不提供，需要自己编译（见上文）|
+| **微信版本** | 只适配 **4.1.10.27 x64**；升级后 Hook 偏移会失效，需要新版本 Hook |
+| **视频原片 / 图片原图** | 依赖 Hook 的 CDN 重放（成品包已含）；没有时退化为封面/缩略图 |
+| **数据库句柄** | 少数环境下取不到库名（见 [DB 文档](docs/DB-句柄修复说明.md)）；建议纯 ASCII 数据目录 |
+| **拍一拍 / 撤回 / 转发** | Hook 侧无实现，面板未暴露 |
 | **多开** | 需要复制独立微信目录 + 独立 Hook，不要和主微信共用 |
 
 ---
@@ -378,15 +278,15 @@ GetAllDBName 能列库，但 QueryDB/execute 一律返回
 ## ⭐ 如果你是"被叫来部署这个项目"的 AI
 
 1. **先读** [docs/OPERATIONS-RULES.md](docs/OPERATIONS-RULES.md) —— 里面是不可违反的运维红线
-2. **再读** [docs/AI-一键部署.md](docs/AI-一键部署.md) —— 完整的部署流程与验证清单
-3. **部署前必须确认**：微信安装路径、数据目录是否为纯 ASCII、是否准备了可牺牲的小号
+2. **再读** [docs/安装流程.md](docs/安装流程.md) —— 完整的安装顺序与验证清单
+3. **部署前必须确认**：微信版本 4.1.10.27、是否准备了可牺牲的小号
 4. **不要**强杀微信、不要自动拉起客户端、不要改 Hook 的监听地址为 `0.0.0.0`
 
 ---
 
 ## 致谢
 
-- [aixed/WeChat-Hook](https://github.com/aixed/WeChat-Hook) —— 微信 Hook 基础（本项目只提供补丁，不提供二进制）
+- [aixed/WeChat-Hook](https://github.com/aixed/WeChat-Hook) —— 微信 Hook 基础（本项目修改后以 Release 附件分发二进制）
 - [DeepSeek Harness](https://github.com/deepseek-ai) —— 插件运行时
 - SenseVoice / imageio-ffmpeg / Playwright / yt-dlp 等上游项目
 
