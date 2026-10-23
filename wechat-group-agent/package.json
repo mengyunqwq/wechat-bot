@@ -1,0 +1,40 @@
+{
+  "name": "@dsh-external/dsh-wechat-bot",
+  "version": "0.0.3",
+  "description": "微信拟人化群聊机器人：连接 wx-bridge（WeChatFerry hook）实时收消息，按拟人策略（被@优先、泛聊低概率插话、随机打字延迟、安静时段、限流）调用 LLM 生成口语化回复，并按语境挑发群友表情包；内置 /wechat-bot Web 控制台，可手动开关全部功能",
+  "private": true,
+  "type": "module",
+  "main": "./lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib",
+    "panel",
+    "cordis.patch.yml"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-client-runtime",
+        "@deepseek-ai/dsh-client-ui-slots"
+      ],
+      "platform": "web"
+    }
+  },
+  "license": "BSD-3-Clause",
+  "peerDependencies": {
+    "@deepseek-ai/dsh-llm": ">=0.0.1-rc <2",
+    "@deepseek-ai/dsh-tools": ">=0.0.1-rc <2",
+    "cordis": ">=4.0.0-rc <5"
+  },
+  "scripts": {
+    "build": "bash scripts/build.sh",
+    "test": "node lib/test-policy.mjs"
+  }
+}
