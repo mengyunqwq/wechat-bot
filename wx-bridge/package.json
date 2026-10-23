@@ -1,7 +1,7 @@
 {
   "name": "wx-bridge",
   "version": "0.1.0",
-  "description": "WeChatFerry(PC hook) ↔ WebSocket JSON 桥：实时收消息、发文本/图片/表情包、表情包自动归档",
+  "description": "WeChatFerry(PC hook) \u2194 WebSocket JSON \u6865\uff1a\u5b9e\u65f6\u6536\u6d88\u606f\u3001\u53d1\u6587\u672c/\u56fe\u7247/\u8868\u60c5\u5305\u3001\u8868\u60c5\u5305\u81ea\u52a8\u5f52\u6863",
   "type": "module",
   "private": true,
   "main": "server.mjs",
@@ -21,5 +21,16 @@
   },
   "optionalDependencies": {
     "koffi": "^2.9.0"
+  },
+  "overrides": {
+    "axios": {
+      "form-data": "4.0.6"
+    },
+    "request": {
+      "form-data": "4.0.6"
+    },
+    "wechat4u": {
+      "form-data": "4.0.6"
+    }
   }
 }
