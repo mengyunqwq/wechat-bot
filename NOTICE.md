@@ -4,11 +4,11 @@
 
 本仓库的**接入层、拟人策略、MCP/REST 接口、托管模式、图片解密工具**为原创代码。
 
-但**微信 Hook（`version.dll`）来自第三方开源项目** [aixed/WeChat-Hook](https://github.com/aixed/WeChat-Hook)：
+但**微信 Hook（`version.dll`）来自我们自己公开的仓库** [mengyunqwq/wechat-hook](https://github.com/mengyunqwq/wechat-hook)（衍生自第三方项目 aixed/WeChat-Hook）：
 
 - 我们**修改了它的 C++ 源码**（数据库句柄修复 / late-arm 补装 / 语音气泡 / 眼睛探针 / 调试路由）
 - ⚠️ **该项目没有 LICENSE 文件** —— 按著作权法默认即「保留所有权利」，**并未授予再分发许可**。因此：
-  - 本仓库的 **git 工作区不包含**其源码、源码补丁或编译产物（`.gitignore` 挡住 `*.dll` / `*.zip` / `patches/*.patch`）
+  - Hook 的**源码在独立仓库** [mengyunqwq/wechat-hook](https://github.com/mengyunqwq/wechat-hook) 公开维护；本仓库只放了编译好的 `release/version.dll`
   - 编译产物 `version.dll` **同时放在仓库 `release/` 目录和 Release 附件**里，供个人学习研究、方便不会编译的用户直接部署；
     若上游权利人认为不妥，可通过 Issue 联系，我们会立即下架该附件
   - 想从源码自行编译的，见 [docs/安装流程.md](docs/安装流程.md) 第 2.2 节（含原版为什么不能直接用、桥依赖的接口契约）

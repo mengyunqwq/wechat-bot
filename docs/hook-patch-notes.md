@@ -1,3 +1,5 @@
+> 📌 **说明（2026-10-24）**：hook 源码已公开在 https://github.com/mengyunqwq/wechat-hook ，本文档里的补丁流程已过时，仅作历史记录。
+
 # 微信 Hook 补丁说明
 
 补丁文件：`wechat-hook-querydb-fix.patch`（**不随仓库发布**，需另行获取）（对 [aixed/WeChat-Hook](https://github.com/aixed/WeChat-Hook) 的改动）

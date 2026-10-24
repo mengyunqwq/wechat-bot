@@ -48,7 +48,7 @@
 
 | 组成 | 来源 | 我们的工作 |
 |---|---|---|
-| **微信 Hook（`version.dll`）** | [aixed/WeChat-Hook](https://github.com/aixed/WeChat-Hook)（**无 LICENSE**）| 修改 C++ 源码并自行编译（数据库句柄修复 / late-arm / 语音气泡 / 眼睛探针 / 调试路由）。**源码版权归原作者**；本项目不提供源码，二进制仅以 **Release 附件**形式提供 |
+| **微信 Hook（`version.dll`）** | [mengyunqwq/wechat-hook](https://github.com/mengyunqwq/wechat-hook)（我们自己的公开仓库，衍生自 aixed/WeChat-Hook；上游**无 LICENSE**）| 修改 C++ 源码并自行编译（数据库句柄修复 / late-arm / 语音气泡 / 眼睛探针 / 调试路由）。**源码版权归原作者**；本项目不提供源码，二进制仅以 **Release 附件**形式提供 |
 | **微信客户端** | 腾讯 | 仅本地调用，**不修改、不分发** |
 | 接入层 / 拟人策略 / MCP / REST / 控制面板 / 图片解密 | 本项目原创 | 全部自研 |
 | 图片解密格式（V2）| 社区公开资料 | 适配与工程化，非从零逆向 |
@@ -298,7 +298,7 @@ QueryDB/execute 返回
 
 ## 致谢
 
-- [aixed/WeChat-Hook](https://github.com/aixed/WeChat-Hook) —— 微信 Hook 基础（本项目修改后以 Release 附件分发二进制）
+- [mengyunqwq/wechat-hook](https://github.com/mengyunqwq/wechat-hook) —— 我们自己的微信 Hook（**默认使用**，4.1.10.27 适配版，含源码与逆向笔记）
 - [DeepSeek Harness](https://github.com/deepseek-ai) —— 插件运行时
 - SenseVoice / imageio-ffmpeg / Playwright / yt-dlp 等上游项目
 

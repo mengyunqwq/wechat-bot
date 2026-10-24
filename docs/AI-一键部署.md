@@ -86,36 +86,23 @@ AI 拿到这段指令后会自己：查环境 → 装依赖 → 复制独立微�
       d) 启动微信：Weixin.exe StartPort=30001 RecvType=1 CallBackURL=http://127.0.0.1:18998/recv
       e) 登录后【点一次左侧「通讯录」】—— 让 contact.db 打开，否则群成员/名字/@ 都会退化
     成品包含：version.dll（含语音发送 + 数据库 late-arm 修复）、install.ps1、rollback.ps1、SHA256
-  ── 方案 B：自己编译（需要源码 + 补丁；新手不推荐）──
-    前提：本机已有上游源码与本项目补丁（补丁不随仓库发布）。
-    只有原版源码时，务必先读 docs/安装流程.md 第 2.2 节 —— 原版是 3.9.x 的，
-    偏移与接口都对不上 4.1.10.27，编出来也接不上。
-    B1. 一键脚本（会自己装 VS Build Tools、克隆上游、编译、部署）：
+  ── 方案 B：自己编译（我们自己的 hook 仓库；想改代码时用）──
+    源码：https://github.com/mengyunqwq/wechat-hook （公开，衍生自 aixed/WeChat-Hook）
+    B1. 一键脚本（自动克隆我们的仓库 + 编译 + 备份部署）：
         powershell -ExecutionPolicy Bypass -File .\scripts\build-hook.ps1
-        （脚本参数 -TargetDir 默认就是 D:\wxhook\wx4110；不同就传 -TargetDir "<客户端目录>"）
-    B2. 或者手动做（等价于脚本；脚本失败时用这条兜底）：
-        # 装编译环境（约 2~6 GB，十几分钟）
-        winget install --id Microsoft.VisualStudio.2022.BuildTools --override "--quiet --wait --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended"
-        # 新开终端，确认 MSBuild 存在：
-        & "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\MSBuild\Current\Bin\MSBuild.exe" -version
-        # 克隆上游（补丁针对的基准提交见补丁说明）
-        git clone https://github.com/aixed/WeChat-Hook.git C:\wxhook-src\WeChat-Hook
-        cd C:\wxhook-src\WeChat-Hook
+        （-TargetDir 默认 D:\wxhook\wx4110）
+    B2. 或手动：
+        git clone https://github.com/mengyunqwq/wechat-hook.git C:\wxhook-src\wechat-hook
+        cd C:\wxhook-src\wechat-hook
         git submodule update --init --recursive
-        # 应用本项目补丁（补丁需另行获取；不在本仓库内）
-        git apply --check "<补丁目录>\wechat-hook-querydb-fix.patch"
-        git apply         "<补丁目录>\wechat-hook-querydb-fix.patch"
-        # 编译
+        # 编译（或 pwsh -File scripts\build.ps1）
         & "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\MSBuild\Current\Bin\MSBuild.exe" `
-          x64_Version_dll.vcxproj /m /t:Build /p:Configuration=Release /p:Platform=x64
-        # 产物：C:\wxhook-src\WeChat-Hook\x64\Release\version.dll
-        # 部署：先停掉该客户端和 bridge，再【备份后替换】（下面两条是 cmd 语法）
-        copy /Y "D:\wxhook\wx4110\version.dll" "D:\wxhook\wx4110\version.dll.bak-manual"
-        copy /Y "C:\wxhook-src\WeChat-Hook\x64\Release\version.dll" "D:\wxhook\wx4110\version.dll"
+          x64_Version_dll.sln /p:Configuration=Release /p:Platform=x64 /m
+        # 产物：C:\wxhook-src\wechat-hook\x64\Release\version.dll
+        # 部署：先停客户端和 bridge，备份后替换 version.dll
     B3. 验证 Hook 是否加载成功（需要客户端和 bridge 已启动，见阶段 5）：
         curl http://127.0.0.1:30001/QueryDB/debug
-        → 有 JSON 返回 = 加载的是【本项目构建版】（官方 release 返回 404）
-
+        → 有 JSON 返回 = 我们的 hook 已加载（上游 release 返回 404）
 ═══ 阶段 4：改配置（逐项，一个都不要漏）═══
 4.1 生成配置模板（cmd）：
     copy config.example.json config.json
@@ -236,8 +223,8 @@ AI 拿到这段指令后会自己：查环境 → 装依赖 → 复制独立微�
     人类提供的"可以牺牲的微信号"就在这里登录。
 5.4 等待并验证（等 40~60 秒；首次启动 hook 要扫内存找数据库句柄，比较慢）：
     ① curl http://127.0.0.1:30001/QueryDB/debug
-       期望：返回 JSON（含 scan_hits 等字段）→ 说明加载的是补丁版 Hook
-       若是 404：version.dll 不是补丁版，或没加载成功（被系统 version.dll 抢了）。
+       期望：返回 JSON（含 scan_hits 等字段）→ 说明加载的是我们的 Hook 版本
+       若是 404：version.dll 不是我们的版本，或没加载成功（被系统 version.dll 抢了）。
        若是连不上：客户端没起来，或 hook 端口不是 30001。
     ② curl http://127.0.0.1:17300/api/status
        期望：loggedIn 为 true，且能看到 transport / port / stickers 等字段。

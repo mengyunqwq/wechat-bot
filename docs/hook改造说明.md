@@ -1,3 +1,5 @@
+> 📌 **说明（2026-10-24）**：hook 源码已公开在 https://github.com/mengyunqwq/wechat-hook ，本文档里的补丁流程已过时，仅作历史记录。
+
 # WeChat-Hook 改造说明（群成员昵称）
 
 > 目标：让机器人拿到**微信群成员的真实昵称**。

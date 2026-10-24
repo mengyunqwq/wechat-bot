@@ -73,48 +73,45 @@ README.txt / SHA256.txt
 > 手动步骤见本文第 1~4 节；也可以把 [docs/AI-一键部署.md](docs/AI-一键部署.md) 整段交给 AI 代为执行。
 > ```
 
-### 方案 B：自行编译（需要源码 + 补丁，不推荐新手）
+### 方案 B：自行编译（我们自己的 hook 仓库，想改代码时用）
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\build-hook.ps1
 ```
 
-前提：本机已有上游源码与本项目补丁（补丁不随仓库发布）。脚本会装/检查 VS Build Tools、
-克隆上游、应用补丁、编译、备份并部署旧 DLL。
-
-> **只有原版源码时请先读 [docs/安装流程.md](docs/安装流程.md) 第 2.2 节** ——
-> 原版是 3.9.x 的，偏移与接口都对不上 4.1.10.27，编出来也接不上；文档里写了缺什么、接口契约是什么。
+本项目的 hook 已开源在 **https://github.com/mengyunqwq/wechat-hook**（衍生自 aixed/WeChat-Hook）。
+脚本会：检查 VS Build Tools → 克隆/更新我们的仓库 → 编译 → 备份并部署旧 DLL。
 
 <details>
 <summary>手动编译（等价于脚本做的事）</summary>
 
 ```powershell
-# 1) 克隆上游
-git clone https://github.com/aixed/WeChat-Hook.git C:\wxhook-src\WeChat-Hook
-cd C:\wxhook-src\WeChat-Hook
+# 1) 克隆我们的 hook 仓库
+git clone https://github.com/mengyunqwq/wechat-hook.git C:\wxhook-src\wechat-hook
+cd C:\wxhook-src\wechat-hook
 git submodule update --init --recursive
 
-# 2) 应用本项目补丁（补丁需另行获取）
-git apply <补丁目录>\wechat-hook-querydb-fix.patch
-
-# 3) 装编译环境（若没有）
+# 2) 装编译环境（若没有）
 winget install --id Microsoft.VisualStudio.2022.BuildTools --override "--quiet --wait --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended"
 
-# 4) 编译
-& "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\MSBuild\Current\Bin\MSBuild.exe" `
-  x64_Version_dll.vcxproj /m /t:Build /p:Configuration=Release /p:Platform=x64
+# 3) 编译（或直接 pwsh -File scripts\build.ps1）
+$vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+$msbuild = & $vswhere -latest -requires Microsoft.Component.MSBuild -find "MSBuild\**\Bin\MSBuild.exe" | Select-Object -First 1
+& $msbuild x64_Version_dll.sln /p:Configuration=Release /p:Platform=x64 /m
 
-# 5) 部署（先备份原文件！）
-copy C:\wxhook-src\WeChat-Hook\x64\Release\version.dll D:\wxhook\wx4110\version.dll
+# 4) 部署（先停微信和 bridge）
+Copy-Item .\x64\Release\version.dll C:\wxhook-src\..\version.dll.new
+# 备份后替换目标客户端的 version.dll
+
+# 5) 验证
+Invoke-RestMethod http://127.0.0.1:30001/QueryDB/status
 ```
-
-编译细节与常见错误见 [docs/安装流程.md](docs/安装流程.md)。
 
 </details>
 
-> **为什么 DLL 放在 Release 附件而不是仓库里？**
-> 仓库保持"纯源码"，`.gitignore` 挡住 `*.dll` / `*.zip`；二进制作为 Release 附件分发，
-> 方便不会编译的用户，也便于随时替换/下架。
+> **成品在哪？**
+> 仓库 `release/` 目录里直接放了编译好的 `version.dll`（克隆即得），Release 页也有附件；
+> 想自己编译就从 [mengyunqwq/wechat-hook](https://github.com/mengyunqwq/wechat-hook) 拉源码。
 
 ---
 
