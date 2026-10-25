@@ -406,9 +406,16 @@ async function handle(op, a = {}) {
       return { ...bridge.status(), startedAt, counters, uptimeSec: Math.round((Date.now() - startedAt) / 1000) }
     case 'pollResume': {
       // 手动解除轮询硬闸（探测连续失败 3 轮后会自己停，防把微信探测崩）
-      try { bridge.poller?.resume?.('手动 /api/pollResume') } catch { /* ignore */ }
-      const p = bridge.poller
-      return { ok: true, hardStopped: typeof p?.hardStopped === 'function' ? p.hardStopped() : false }
+      // ★ 2026-10-25：走 restartPoller（resume + 真正重启轮询）。
+      //   只 resume() 的话：硬闸清了、状态看着正常，但如果 poller 处于 stopped
+      //   （_startPoller 没被调），tick 根本不会跑 → 能读库但一条消息都读不到。
+      let restarted = false
+      try { restarted = await bridge.restartPoller?.('手动 /api/pollResume') } catch { /* ignore */ }
+      return { ok: true, restarted, ...bridge.pollStatus?.() }
+    }
+    case 'pollStatus': {
+      // 只读：轮询器快照（硬闸 / 暂停 / 连续失败 / 轮数 / 条数 / 表数）
+      return { ok: true, ...bridge.pollStatus?.() }
     }
     case 'wechatPower': {
       // 微信客户端电源开关：kill = 杀进程，start = 启动并自动点「进入微信」，status = 查状态

@@ -1613,6 +1613,8 @@ function renderDiag() {
   view.innerHTML = `<h2>诊断 <span class="muted small">环境与链路体检</span></h2>
     <div class="row" style="margin-bottom:10px">
       <button class="btn primary" id="diag-refresh">重新检测</button>
+      <button class="btn" id="diag-poll">恢复轮询</button>
+      <span class="muted small" id="diag-poll-st">轮询状态读取中…</span>
       <span class="muted small" id="diag-at">${App.diag ? esc(ago(App.diagAt)) : '加载中…'}</span>
       <span class="muted small">（要连 hook 的三个端点，最慢约 6 秒）</span>
     </div>
@@ -1711,6 +1713,38 @@ function renderDiag() {
         App.diag = null; renderDiag();
       } catch (e) { toast('清理失败：' + e.message, 'err'); }
     };
+  };
+
+  // ── 轮询状态 + 恢复按钮 ─────────────────────────────────
+  //  「库读得动」不等于「轮询在跑」：硬闸状态下探针照样成功，自检会全绿。
+  //   所以这里直接把轮询器的真实状态摆出来，并给一个能真正重启轮询的按钮。
+  const showPoll = (st) => {
+    const el = $('#diag-poll-st');
+    if (!el) return;
+    if (!st || st.ok === false) { el.textContent = '取不到：' + ((st && st.error) || '桥未连接'); return; }
+    const bits = [];
+    if (st.hardStopped) bits.push('⛔ 硬闸');
+    else if (st.stopped) bits.push('⛔ 已停止');
+    else if (st.paused) bits.push('⏸ 暂停 ' + (st.pauseLeftSec || 0) + 's');
+    else bits.push('✅ 运行中');
+    bits.push('已查 ' + (st.polls || 0) + ' 轮 / 读到 ' + (st.msgs || 0) + ' 条 / ' + (st.tables || 0) + ' 表');
+    if (st.consecFail) bits.push('连续失败 ' + st.consecFail);
+    el.textContent = bits.join(' · ');
+    el.style.color = (st.hardStopped || st.stopped) ? 'var(--warn)' : '';
+    el.title = st.lastError || '';
+  };
+  api('/action', { method: 'POST', body: JSON.stringify({ op: 'pollStatus' }) })
+    .then((j) => showPoll(j.result)).catch((e) => showPoll({ ok: false, error: e.message }));
+  const pollBtn = $('#diag-poll');
+  if (pollBtn) pollBtn.onclick = async () => {
+    if (!confirm('解除轮询硬闸并重启轮询？')) return;
+    pollBtn.disabled = true; pollBtn.textContent = '恢复中…';
+    try {
+      const j = await api('/action', { method: 'POST', body: JSON.stringify({ op: 'pollResume' }) });
+      showPoll(j.result);
+      toast(j.result && j.result.restarted ? '轮询已重启' : '已解除硬闸', 'ok');
+    } catch (e) { toast('恢复失败：' + e.message, 'err'); }
+    finally { pollBtn.disabled = false; pollBtn.textContent = '恢复轮询'; }
   };
 
   loadDiag(true).then(() => draw());

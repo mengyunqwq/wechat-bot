@@ -41,7 +41,7 @@ try {
 } catch { /* ignore */ }
 
 export const name = '@dsh-external/dsh-wechat-bot'
-export const version = '1.3.13'
+export const version = '1.3.14'
 // Cordis 4.0.4 的 inject 只认**数组**或"服务名→配置"映射；
 // 写成 { required, optional } 会让依赖解析失败、fiber 永远 pending（踩过：改了代码却一直跑旧实例）。
 // 这里只声明必然存在的两个服务；attachments（视觉识别用）改为**惰性获取**，
@@ -3533,24 +3533,41 @@ let res = await callLlm(route, sys, usr, undefined)
     add('hook 存活', dbOk ? 'ok' : dbLevel, dbOk ? 'QueryDB 有响应（hook 正常）' : dbText, dbAdvice)
     add('数据库可读', dbLevel, dbText, dbAdvice)
 
-    // ⑤ 消息轮询：只认"有证据的失败"，避免"群里没人说话"被误报成失联
+    // ⑤ 消息轮询：判断「轮询到底在不在跑」，而不是「库能不能读」。
+    //   硬闸（_hardGiveUp）状态下探针查 filehelper 照样成功 → 只看 dbOk 会全绿，
+    //   但 tick 早就不干活了，群里说话一条都进不来。
+    //   这是 2026-10-24「自检全绿却八小时没收到消息」的根因。
     const idleMin = lastMsgAt ? Math.round((Date.now() - lastMsgAt) / 60000) : null
     const wakeMin = lastWakeAt ? Math.round((Date.now() - lastWakeAt) / 60000) : null
+    const poll = (br && br.poll) || {}
+    const pollInfo = poll.exists
+      ? `已查 ${poll.polls || 0} 轮、读到 ${poll.msgs || 0} 条 / ${poll.tables || 0} 表`
+      : '轮询器未启动'
     let pollLevel = 'ok'
-    let pollText = idleMin == null ? '还没收到过消息（可能群里一直没人说话）' : `最近一条消息 ${idleMin} 分钟前`
+    let pollText = idleMin == null
+      ? `还没收到过消息（${pollInfo}）`
+      : `最近一条消息 ${idleMin} 分钟前（${pollInfo}）`
     let pollAdvice = ''
-    // ★ 2026-10-25（B）：硬闸下库照样读得动（探针查 filehelper 能成功），只看 dbOk 会全绿。
-    const hardStopped = !!br?.hardStopped
-    if (hardStopped) {
+    if (poll.hardStopped) {
       pollLevel = 'bad'
       pollText += '｜轮询被硬停（客户端不重登就一直哑）'
-      pollAdvice = '面板点"恢复轮询"，或 POST /api/pollResume；根因见 docs/微信机器人-收不到消息-故障分析.md'
+      pollAdvice = '面板点「恢复轮询」，或 POST /api/pollResume'
+    } else if (poll.stopped) {
+      pollLevel = 'bad'
+      pollText += '｜轮询器已停止（进程在，但没在跑）'
+      pollAdvice = '点「恢复轮询」或重启桥'
+    } else if (poll.paused) {
+      pollLevel = 'warn'
+      pollText += `｜轮询暂停中（剩 ${poll.pauseLeftSec || 0} 秒，连续失败 ${poll.consecFail || 0} 次）`
+      pollAdvice = '桥会自动重试；持续出现说明 message_0.db 打不开'
     } else if (!dbOk && cs.connected && probeRoom) {
       pollLevel = 'bad'; pollText += '｜数据库读不到，轮询必然停了'; pollAdvice = '先修 hook/数据库（见上）'
     } else if (wakeMin != null && wakeMin <= 15) {
       pollLevel = 'bad'; pollText += `｜${wakeMin} 分钟前桥喊过"数据库打不开"`; pollAdvice = '桥会自己重试；持续出现说明 message_0.db 打不开'
     } else if (idleMin != null && idleMin > 180) {
       pollLevel = 'warn'; pollText += '（超过 3 小时没消息）'; pollAdvice = '如果群里明明有人在说话，说明轮询断了'
+    } else if (idleMin == null && !poll.exists) {
+      pollLevel = 'warn'; pollText += '｜轮询器未启动'; pollAdvice = '桥可能刚起来；一直这样说明 startPoller 没跑起来'
     }
     add('消息轮询', pollLevel, pollText, pollAdvice)
 
@@ -4868,6 +4885,14 @@ let res = await callLlm(route, sys, usr, undefined)
           return { ok: false, error: String(e?.message || e).slice(0, 120), dir }
         }
         return { ok: true, removed, dir }
+      }
+      case 'pollStatus': {
+        // 只读：轮询器快照（硬闸/暂停/连续失败/轮数/条数/表数），转发给桥
+        try { return await client.call('pollStatus', {}, 8000) } catch (e) { return { ok: false, error: String(e?.message || e).slice(0, 120) } }
+      }
+      case 'pollResume': {
+        // 解除硬闸 + 真正重启轮询（桥侧走 restartPoller）
+        try { return await client.call('pollResume', {}, 15000) } catch (e) { return { ok: false, error: String(e?.message || e).slice(0, 120) } }
       }
       case 'checkUpdate': {
         // ★ 60 秒节流：面板刷新会触发检查，GitHub 匿名限额只有 60 次/小时，

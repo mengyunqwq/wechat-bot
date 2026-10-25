@@ -1581,6 +1581,32 @@ export class WeChatHookBridge {
 
   history() { return [] }
 
+  /**
+   * 轮询器快照（只读）。为什么单独抽出来：自检只调一次 status 就能判断
+   * 「轮询到底在不在跑」——硬闸状态下库照样读得动，只看库会全绿。
+   */
+  pollStatus() {
+    const p = this.poller
+    if (!p) return { exists: false }
+    let tables = 0
+    try { tables = p.tables instanceof Map ? p.tables.size : 0 } catch { /* ignore */ }
+    return {
+      exists: true,
+      hardStopped: typeof p.hardStopped === 'function' ? !!p.hardStopped() : false,
+      stopped: !!p.stopped,
+      paused: typeof p.paused === 'function' ? !!p.paused() : false,
+      pauseLeftSec: typeof p.pauseLeftSec === 'function' ? Number(p.pauseLeftSec()) || 0 : 0,
+      consecFail: Number(p._consecFail || 0),
+      probeFailRounds: Number(p._probeFailRounds || 0),
+      polls: Number(p.stats?.polls || 0),
+      msgs: Number(p.stats?.msgs || 0),
+      errors: Number(p.stats?.errors || 0),
+      pauses: Number(p.stats?.pauses || 0),
+      tables,
+      lastError: String(p._lastReadErr || ''),
+    }
+  }
+
   status() {
     return {
       loggedIn: this.loggedIn, self: this.selfWxid, selfName: this.selfName,
@@ -1589,6 +1615,9 @@ export class WeChatHookBridge {
       stickers: this.stickers ? this.stickers.stats() : null,
       contacts: this._contactMap.size,
       callbacks: this._cbCount, messages: this._msgCount,
+      // ★ 2026-10-25：把轮询状态并进 status，自检才看得到「哑没哑」。
+      //   之前自检读 br.hardStopped，但 status 根本没这个字段 → 判断是死代码，永远绿。
+      poll: this.pollStatus(),
     }
   }
 }
