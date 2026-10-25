@@ -1474,19 +1474,45 @@ function renderUpdate() {
       .catch(() => { App.updInfo = {} })
   }
   if (!App.upd) {
-    api('/action', { method: 'POST', body: JSON.stringify({ op: 'checkUpdate' }) })
-      .then(j => { App.upd = (j && j.result) || null; if (App.tab === 'update') renderActive({}); })
-      .catch(() => {})
+    // ★ 不再每次进页面都打 GitHub API：匿名限额只有 60 次/小时，刷新几次就烧光，
+    //   烧光后 403 → 退到 jsDelivr → 读到陈旧版本（用户看到「仓库最新」倒退）。
+    //   10 分钟内直接用上次检查的缓存，点「检查更新」才强制查。
+    const i0 = App.updInfo || {};
+    const fresh = Date.now() - (i0.checkedAt || 0) < 10 * 60 * 1000;
+    if (fresh && i0.latest) {
+      App.upd = { available: false, cached: true, remoteVersion: i0.latest.version, notes: i0.latest.notes, localVersion: i0.version, checkedAt: i0.checkedAt };
+    } else {
+      api('/action', { method: 'POST', body: JSON.stringify({ op: 'checkUpdate' }) })
+        .then(j => { App.upd = (j && j.result) || null; if (App.tab === 'update') renderActive({}); })
+        .catch(() => {})
+    }
   }
   const u = App.upd || null;
   const info = App.updInfo || {};
   const has = u && u.available;
+  // ★ 仓库版本取「本次检查结果」与「上次成功缓存」里更大的那个：
+  //   CDN 节点不同步时本次可能读回旧值，不能让它把已经确认过的新版本盖回去。
+  const cmpV = (a, b) => {
+    const pa = String(a || '').replace(/^v/i, '').split('.').map(n => parseInt(n, 10) || 0);
+    const pb = String(b || '').replace(/^v/i, '').split('.').map(n => parseInt(n, 10) || 0);
+    for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+      const x = pa[i] || 0, y = pb[i] || 0;
+      if (x !== y) return x > y ? 1 : -1;
+    }
+    return 0;
+  };
+  const localV = info.version || (u && u.localVersion) || '';
+  const remoteCands = [u && u.remoteVersion, info.latest && info.latest.version].filter(Boolean);
+  let remoteV = remoteCands[0] || '';
+  for (const c of remoteCands) if (cmpV(c, remoteV) > 0) remoteV = c;
+  const staleHint = localV && remoteV && cmpV(remoteV, localV) < 0
+    ? ' <span class="small muted">（CDN 缓存滞后，实际不旧于本地）</span>' : '';
   view.innerHTML = `<h2>更新 <span class="muted small">从 GitHub 拉最新代码</span></h2>
 
     <div class="section"><div class="hd">📦 版本</div>
       <table class="table"><tbody>
         <tr><td class="muted">本地</td><td class="mono"><b title="${esc((info.versionFile || '') + (info.botHome ? '｜项目根：' + info.botHome : ''))}">${esc('v' + (info.version || (u && u.localVersion) || '?'))}</b>${info.versionErrors && info.versionErrors.length ? ` <span class="small muted">（${esc(info.versionErrors[0])}）</span>` : ''}</td></tr>
-        <tr><td class="muted">仓库最新</td><td class="mono"><b>${esc('v' + ((u && u.remoteVersion) || (info.latest && info.latest.version) || '?'))}</b></td></tr>
+        <tr><td class="muted">仓库最新</td><td class="mono"><b>${esc('v' + (remoteV || '?'))}</b>${staleHint}</td></tr>
         <tr><td class="muted">发布说明</td><td>${esc((u && u.notes) || (info.latest && info.latest.notes) || '—')}</td></tr>
         <tr><td class="muted">仓库</td><td class="mono">${esc(info.repo || u && u.repo || '')}</td></tr>
         <tr><td class="muted">上次检查</td><td>${(u && u.checkedAt) || info.checkedAt ? esc(ago((u && u.checkedAt) || info.checkedAt)) : '从未'}</td></tr>
@@ -1531,7 +1557,7 @@ function renderUpdate() {
   $('#upd-check').onclick = async () => {
     const btn = $('#upd-check'); btn.disabled = true; btn.textContent = '检查中…';
     try {
-      const j = await api('/action', { method: 'POST', body: JSON.stringify({ op: 'checkUpdate' }) });
+      const j = await api('/action', { method: 'POST', body: JSON.stringify({ op: 'checkUpdate', force: true }) });
       App.upd = j.result || {};
       toast(App.upd.available ? '发现新版本' : '已是最新', 'ok');
       renderUpdate();

@@ -41,7 +41,7 @@ try {
 } catch { /* ignore */ }
 
 export const name = '@dsh-external/dsh-wechat-bot'
-export const version = '1.3.9'
+export const version = '1.3.10'
 // Cordis 4.0.4 的 inject 只认**数组**或"服务名→配置"映射；
 // 写成 { required, optional } 会让依赖解析失败、fiber 永远 pending（踩过：改了代码却一直跑旧实例）。
 // 这里只声明必然存在的两个服务；attachments（视觉识别用）改为**惰性获取**，
@@ -4064,7 +4064,7 @@ let res = await callLlm(route, sys, usr, undefined)
   const UPDATE_REPO = process.env.WECHAT_UPDATE_REPO || 'mengyunqwq/wechat-bot'
   const UPDATE_STATE_FILE = join(dirname(memoryDir), 'update-state.json')
   const UPDATE_BACKUP_DIR = join(dirname(memoryDir), 'backups')
-  const updateState = { commit: '', version: '', checkedAt: 0, latest: null, history: [] }
+  const updateState = { commit: '', version: '', checkedAt: 0, latest: null, history: [], lastResult: null }
   try {
     const u = JSON.parse(readFileSync(UPDATE_STATE_FILE, 'utf8')) || {}
     updateState.commit = String(u.commit || '')
@@ -4774,8 +4774,16 @@ let res = await callLlm(route, sys, usr, undefined)
         return { ok: true, removed, dir }
       }
       case 'checkUpdate': {
+        // ★ 60 秒节流：面板刷新会触发检查，GitHub 匿名限额只有 60 次/小时，
+        //   连刷几次就 403，之后只能读 CDN 缓存（会看到版本倒退）。点按钮时带 force 绕过。
+        const now = Date.now()
+        if (!a.force && updateState.lastResult && now - updateState.checkedAt < 60_000) {
+          return updateState.lastResult
+        }
         try {
-          return await checkUpdate()
+          const r = await checkUpdate()
+          updateState.lastResult = r
+          return r
         } catch (e) {
           // ★ 远程失败也要带上本地版本号：本地版本是纯本地读取，永远拿得到。
           //   否则面板会退化成 "v?"（用户 2026-10-25 报的就是这个）。
