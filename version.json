@@ -1,5 +1,5 @@
 {
-  "version": "1.3.15",
-  "notes": "1.3.15：面板加「热重载插件」按钮 —— 改完 lib/index.js 不用重启 DSH。走 Cordis loader 的稳态重载路径：清模块缓存 → import 新代码 → 校验导出 → 延迟 dispose 旧 fiber 并重建，新代码加载失败时旧代继续运行。启动 8 秒后会做一次预检演练（只 import 不替换），日志里能确认本机是否支持。",
+  "version": "1.3.16",
+  "notes": "1.3.16：修 DSH 侧边栏「微信机器人」入口消失 —— 注入/重载进来的插件是运行时才进 loader 的，clientModules 的注册表里可能没有它，于是侧栏入口不见了。插件启动 10 秒后会主动把自身加入 clientModules 的扫描队列并 flush 一次（幂等，失败只记日志）。刷新 DSH 页面即可看到入口。",
   "releasedAt": "2026-10-25"
 }

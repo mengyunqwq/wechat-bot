@@ -41,7 +41,7 @@ try {
 } catch { /* ignore */ }
 
 export const name = '@dsh-external/dsh-wechat-bot'
-export const version = '1.3.15'
+export const version = '1.3.16'
 // Cordis 4.0.4 的 inject 只认**数组**或"服务名→配置"映射；
 // 写成 { required, optional } 会让依赖解析失败、fiber 永远 pending（踩过：改了代码却一直跑旧实例）。
 // 这里只声明必然存在的两个服务；attachments（视觉识别用）改为**惰性获取**，
@@ -4111,6 +4111,29 @@ let res = await callLlm(route, sys, usr, undefined)
       })
     } catch (e) { log('[selfReload] 能力探测异常：' + String(e?.message || e)) }
   }, 8000)
+
+  // 让 clientModules 重新扫描本插件的 client 声明（DSH 侧边栏的「微信机器人」入口）。
+  //   为什么需要：注入/重载进来的插件是运行时才进 loader 的，client 注册表可能没它，
+  //   于是侧边栏入口消失。clientModules 监听 internal/plugin 事件，手动 emit 一次就能重扫。
+  setTimeout(() => {
+    try {
+      ctx.emit('internal/plugin', ctx.fiber)
+      const cm = ctx.get('clientModules')
+      // 直接调 flush 并捕获真实错误（只 emit 不够，dirty 可能没包含本包）
+      try {
+        if (cm && cm.dirty && typeof cm.dirty.add === 'function') cm.dirty.add('@dsh-external/dsh-wechat-bot')
+        if (cm && typeof cm.flush === 'function') cm.flush((err) => {
+          log('[client] flush：' + (err ? '❌ ' + String(err?.message || err).slice(0, 240) : 'ok'))
+        })
+      } catch (e) { log('[client] flush 调用异常：' + String(e?.message || e)) }
+      setTimeout(() => {
+        try {
+          const p = cm && typeof cm.clientPath === 'function' ? cm.clientPath('@dsh-external/dsh-wechat-bot') : ''
+          log('[client] 侧栏入口注册：' + (p ? 'ok（' + String(p).split(/[\\/]/).slice(-2).join('/') + '）' : '仍未注册（clientPath 为空）'))
+        } catch (e) { log('[client] 查询失败：' + String(e?.message || e)) }
+      }, 1200)
+    } catch (e) { log('[client] 触发 internal/plugin 失败：' + String(e?.message || e)) }
+  }, 10000)
 
   const UPDATE_STATE_FILE = join(dirname(memoryDir), 'update-state.json')
   const UPDATE_BACKUP_DIR = join(dirname(memoryDir), 'backups')
