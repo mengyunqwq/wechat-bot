@@ -1,5 +1,5 @@
 {
-  "version": "1.3.5",
-  "notes": "1.3.5：控制面板语音页（语音模型开关 + 音色预设）+ 模型启停（关模型释放 GPU）+ 控制面板 400 修复（voiceModelOn/voicePreset 加进 DEFAULT_CONFIG）+ api() connection:close 解决 ECONNRESET + log 大小限制防日志打爆磁盘",
+  "version": "1.3.6",
+  "notes": "1.3.6：修复「更新」页本地版本显示 v? —— GitHub 限流/断网时 checkUpdate 抛错导致本地版本号丢失；updateInfo 现在直接返回本地 version.json 的版本（纯本地读取，不依赖网络）；本地 version.json 补齐。",
   "releasedAt": "2026-10-25"
 }

@@ -40,7 +40,7 @@ try {
 } catch { /* ignore */ }
 
 export const name = '@dsh-external/dsh-wechat-bot'
-export const version = '1.3.5'
+export const version = '1.3.6'
 // Cordis 4.0.4 的 inject 只认**数组**或"服务名→配置"映射；
 // 写成 { required, optional } 会让依赖解析失败、fiber 永远 pending（踩过：改了代码却一直跑旧实例）。
 // 这里只声明必然存在的两个服务；attachments（视觉识别用）改为**惰性获取**，
@@ -4715,12 +4715,21 @@ let res = await callLlm(route, sys, usr, undefined)
         try {
           return await checkUpdate()
         } catch (e) {
-          return { available: false, error: String(e?.message || e).slice(0, 160) }
+          // ★ 远程失败也要带上本地版本号：本地版本是纯本地读取，永远拿得到。
+          //   否则面板会退化成 "v?"（用户 2026-10-25 报的就是这个）。
+          return {
+            available: false,
+            error: String(e?.message || e).slice(0, 160),
+            localVersion: readLocalVersion().version,
+          }
         }
       }
       case 'updateInfo': {
         return {
           repo: UPDATE_REPO,
+          // ★ version 必须从本地 version.json 现读：它是纯本地操作，绝不依赖网络/GitHub 限流。
+          //   之前只返回 commit，面板回退到 info.version（undefined）→ 网络失败时显示 "v?"。
+          version: readLocalVersion().version,
           local: updateState.commit,
           checkedAt: updateState.checkedAt,
           latest: updateState.latest,
