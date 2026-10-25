@@ -41,7 +41,7 @@ try {
 } catch { /* ignore */ }
 
 export const name = '@dsh-external/dsh-wechat-bot'
-export const version = '1.3.8'
+export const version = '1.3.9'
 // Cordis 4.0.4 的 inject 只认**数组**或"服务名→配置"映射；
 // 写成 { required, optional } 会让依赖解析失败、fiber 永远 pending（踩过：改了代码却一直跑旧实例）。
 // 这里只声明必然存在的两个服务；attachments（视觉识别用）改为**惰性获取**，
@@ -4119,10 +4119,20 @@ let res = await callLlm(route, sys, usr, undefined)
   //   现在按候选顺序试，谁先读到合法的 version 字段就用谁；全失败才回 0.0.0 并留下诊断。
   const SELF_LIB_DIR = dirname(fileURLToPath(import.meta.url))   // …/wechat-group-agent/lib
   const PKG_ROOT = dirname(SELF_LIB_DIR)                          // …/wechat-group-agent
+  // ★ 2026-10-25：项目根自动探测，不再死认 D:\微信deepseek。
+  //   实测一台机器把机器人装在 X:\DeepSeek\wechat-bot（WECHAT_BOT_HOME 没设）：
+  //     → 版本读到 0.0.0（去 D:\微信deepseek 找 version.json，当然没有）
+  //     → 「立即更新」把代码覆盖到 D:\微信deepseek（那里根本没有项目），
+  //       而 DSH 实际加载的是 X:\DeepSeek\wechat-bot\wechat-group-agent
+  //     → 更新「成功」但永远不生效，重启也没用。
+  //   规则：WECHAT_BOT_HOME 显式指定优先 → 插件包上一级若含 wx-bridge 就当项目根 → 最后兜底老路径。
+  const PROJECT_ROOT = dirname(PKG_ROOT)
+  const BOT_HOME = process.env.WECHAT_BOT_HOME
+    || (existsSync(join(PROJECT_ROOT, 'wx-bridge')) ? PROJECT_ROOT : 'D:\\微信deepseek')
   const VERSION_CANDIDATES = Array.from(new Set([
-    process.env.WECHAT_BOT_HOME ? join(process.env.WECHAT_BOT_HOME, 'version.json') : '',
+    join(BOT_HOME, 'version.json'),
     'D:\\微信deepseek\\version.json',
-    join(PKG_ROOT, '..', 'version.json'),
+    join(PROJECT_ROOT, 'version.json'),
     join(process.cwd(), 'version.json'),
   ].filter(Boolean)))
   const LOCAL_VERSION_FILE = VERSION_CANDIDATES[0]
@@ -4330,8 +4340,7 @@ let res = await callLlm(route, sys, usr, undefined)
   }
   /** 运行时目录 ↔ 仓库目录 的映射（白名单：只覆盖这些） */
   function runtimeDirs() {
-    const home = process.env.USERPROFILE || homedir()
-    const base = process.env.WECHAT_BOT_HOME || 'D:\\微信deepseek'
+    const base = BOT_HOME
     return [
       { repo: 'wechat-group-agent/lib',    dir: join(base, 'wechat-group-agent', 'lib'),    label: '插件代码' },
       { repo: 'wechat-group-agent/panel',  dir: join(base, 'wechat-group-agent', 'panel'),  label: '控制面板' },
@@ -4360,7 +4369,7 @@ let res = await callLlm(route, sys, usr, undefined)
       report.push({ label: rt.label, files: n, dir: rt.dir })
     }
     // 桥根目录的 .mjs 文件（server.mjs / 其他）
-    const bridgeRoot = join(process.env.WECHAT_BOT_HOME || 'D:\\微信deepseek', 'wx-bridge')
+    const bridgeRoot = join(BOT_HOME, 'wx-bridge')
     const srcBridge = join(srcRoot, 'wx-bridge')
     if (existsSync(srcBridge)) {
       let n = 0
@@ -4789,6 +4798,7 @@ let res = await callLlm(route, sys, usr, undefined)
           // 读的是哪个文件 / 哪些候选失败了 —— 面板悬停可见，出问题不用再猜
           versionFile: versionDiag.file || `(兜底用插件版本常量 @ ${version})`,
           versionErrors: versionDiag.errors,
+          botHome: BOT_HOME,
           local: updateState.commit,
           checkedAt: updateState.checkedAt,
           latest: updateState.latest,
@@ -4845,7 +4855,7 @@ let res = await callLlm(route, sys, usr, undefined)
                 await new Promise((r) => setTimeout(r, 500))
               }
               // 拉起新桥
-              const base = process.env.WECHAT_BOT_HOME || 'D:\\微信deepseek'
+              const base = BOT_HOME
               const bridgeDir = join(base, 'wx-bridge')
               let nodeArgs
               if (oldCmd && /server\.mjs/.test(oldCmd)) {
