@@ -41,7 +41,7 @@ try {
 } catch { /* ignore */ }
 
 export const name = '@dsh-external/dsh-wechat-bot'
-export const version = '1.3.14'
+export const version = '1.3.15'
 // Cordis 4.0.4 的 inject 只认**数组**或"服务名→配置"映射；
 // 写成 { required, optional } 会让依赖解析失败、fiber 永远 pending（踩过：改了代码却一直跑旧实例）。
 // 这里只声明必然存在的两个服务；attachments（视觉识别用）改为**惰性获取**，
@@ -4082,6 +4082,36 @@ let res = await callLlm(route, sys, usr, undefined)
   //   为什么用 main 分支而不是 Release：用户要求"新功能都要更新"，
   //   走 main 就不用每次手动发 Release。
   const UPDATE_REPO = process.env.WECHAT_UPDATE_REPO || 'mengyunqwq/wechat-bot'
+
+  // 启动时做一次「热重载自身」的预检演练（只 import + 校验导出，不替换旧代，零风险）。
+  //   面板诊断页的「热重载插件」按钮走的是同一段逻辑，这里先证明它在本宿主上跑得通。
+  setTimeout(() => {
+    try {
+      const lc = ctx.loader?.internal?.loadCache
+      let url = null
+      if (lc && typeof lc.keys === 'function') {
+        for (const u of lc.keys()) {
+          if (typeof u === 'string' && decodeURIComponent(u).includes('wechat-group-agent/lib/index.js')) { url = u; break }
+        }
+      }
+      log('[selfReload] 能力探测：loadCache=' + (lc ? 'ok' : '不可用')
+        + '，自身模块=' + (url ? '命中' : '未命中')
+        + '，registry=' + (ctx.registry && typeof ctx.registry.plugin === 'function' ? 'ok' : '不可用'))
+      if (!url) return
+      const oldJob = lc.get(url)
+      Map.prototype.delete.call(lc, url)
+      ctx.loader.import(url, () => []).then((ns) => {
+        const fresh = ctx.loader.unwrapExports(ns)
+        const good = !!(fresh && (typeof fresh === 'function' || typeof fresh.apply === 'function'))
+        if (!good && oldJob) lc.set(url, oldJob)   // 预检不过 → 恢复缓存，旧代不受影响
+        log('[selfReload] 预检演练：' + (good ? '✅ 新代码可加载（缓存已恢复，未替换旧代）' : '❌ 导出无效'))
+      }).catch((e) => {
+        if (oldJob) lc.set(url, oldJob)
+        log('[selfReload] 预检演练：❌ import 失败（缓存已恢复）：' + String(e?.message || e).slice(0, 160))
+      })
+    } catch (e) { log('[selfReload] 能力探测异常：' + String(e?.message || e)) }
+  }, 8000)
+
   const UPDATE_STATE_FILE = join(dirname(memoryDir), 'update-state.json')
   const UPDATE_BACKUP_DIR = join(dirname(memoryDir), 'backups')
   const updateState = { commit: '', version: '', checkedAt: 0, latest: null, history: [], lastResult: null }
@@ -4885,6 +4915,58 @@ let res = await callLlm(route, sys, usr, undefined)
           return { ok: false, error: String(e?.message || e).slice(0, 120), dir }
         }
         return { ok: true, removed, dir }
+      }
+      case 'selfReload': {
+        // 热重载插件自身：改完 lib/index.js 不用重启 DSH。
+        //   流程照抄注入器的稳态路径：找 entry → 清 loadCache → import 新代码 →
+        //   预检导出有效 → 延迟 dispose 旧 fiber + registry.plugin 重建。
+        //   关键安全点：**先预检再替换**，新代码加载失败时旧代继续跑，不会把插件搞挂。
+        try {
+          const me = 'dsh-wechat-bot'
+          const entry = [...ctx.loader.entries()].find((e) => String(e.options?.name || '').includes(me))
+          if (!entry) return { ok: false, error: '找不到自己的 loader entry' }
+          const loadCache = ctx.loader.internal?.loadCache
+          if (!loadCache || typeof loadCache.keys !== 'function') {
+            return { ok: false, error: 'loader.internal.loadCache 不可用（宿主版本不支持）' }
+          }
+          let url = null
+          for (const u of loadCache.keys()) {
+            if (typeof u !== 'string') continue
+            if (decodeURIComponent(u).includes('wechat-group-agent/lib/index.js')) { url = u; break }
+          }
+          if (!url) return { ok: false, error: 'loadCache 里找不到自己的模块（可能刚启动还没缓存）' }
+          const oldJob = loadCache.get(url)
+          Map.prototype.delete.call(loadCache, url)
+          let fresh = null
+          try {
+            fresh = ctx.loader.unwrapExports(await ctx.loader.import(url, () => []))
+          } catch (e) {
+            if (oldJob) loadCache.set(url, oldJob)
+            return { ok: false, error: '新代码 import 失败（旧代继续运行）：' + String(e?.message || e).slice(0, 200) }
+          }
+          if (!fresh || (typeof fresh !== 'function' && typeof fresh.apply !== 'function')) {
+            if (oldJob) loadCache.set(url, oldJob)
+            return { ok: false, error: '新代码导出无效（缺 apply），已取消，旧代继续运行' }
+          }
+          // 预检通过 → 延迟替换（先把 HTTP 响应送回面板，避免请求被自己掐断）
+          setTimeout(async () => {
+            try {
+              const fiber = entry.fiber
+              if (fiber && typeof fiber.dispose === 'function') await fiber.dispose()
+              const registry = ctx.registry
+              if (registry && typeof registry.delete === 'function') registry.delete(fiber)
+              const nf = registry.plugin(fresh, entry.options?.config ?? {}, () => [])
+              nf.entry = entry
+              entry.fiber = nf
+              log('[selfReload] ✅ 热重载完成（' + new Date().toLocaleTimeString() + '）')
+            } catch (e) {
+              log('[selfReload] ❌ 重建失败，需要重启 DSH：' + String(e?.message || e))
+            }
+          }, 300)
+          return { ok: true, hint: '新代码预检通过，300ms 后替换旧代（约 1 秒不可用）' }
+        } catch (e) {
+          return { ok: false, error: String(e?.message || e).slice(0, 200) }
+        }
       }
       case 'pollStatus': {
         // 只读：轮询器快照（硬闸/暂停/连续失败/轮数/条数/表数），转发给桥

@@ -1,5 +1,5 @@
 {
-  "version": "1.3.14",
-  "notes": "1.3.14：修「自检全绿但轮询已经哑了」—— 桥的 status 之前根本不返回硬闸状态，自检读的 br.hardStopped 永远是 undefined，那段判断是死代码。现在桥侧新增 pollStatus()（硬闸/暂停/连续失败/轮数/条数/表数）并并入 status；新增只读接口 /api/pollStatus；/api/pollResume 改走 restartPoller（resume + 真正重启轮询，只 resume 时若 poller 已 stop 则不会恢复）；面板「诊断」页新增轮询状态显示与「恢复轮询」按钮。",
+  "version": "1.3.15",
+  "notes": "1.3.15：面板加「热重载插件」按钮 —— 改完 lib/index.js 不用重启 DSH。走 Cordis loader 的稳态重载路径：清模块缓存 → import 新代码 → 校验导出 → 延迟 dispose 旧 fiber 并重建，新代码加载失败时旧代继续运行。启动 8 秒后会做一次预检演练（只 import 不替换），日志里能确认本机是否支持。",
   "releasedAt": "2026-10-25"
 }

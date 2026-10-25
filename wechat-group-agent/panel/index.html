@@ -1614,6 +1614,7 @@ function renderDiag() {
     <div class="row" style="margin-bottom:10px">
       <button class="btn primary" id="diag-refresh">重新检测</button>
       <button class="btn" id="diag-poll">恢复轮询</button>
+      <button class="btn" id="diag-reload" title="重新加载 lib/index.js —— 改完插件代码不用重启 DSH">热重载插件</button>
       <span class="muted small" id="diag-poll-st">轮询状态读取中…</span>
       <span class="muted small" id="diag-at">${App.diag ? esc(ago(App.diagAt)) : '加载中…'}</span>
       <span class="muted small">（要连 hook 的三个端点，最慢约 6 秒）</span>
@@ -1745,6 +1746,19 @@ function renderDiag() {
       toast(j.result && j.result.restarted ? '轮询已重启' : '已解除硬闸', 'ok');
     } catch (e) { toast('恢复失败：' + e.message, 'err'); }
     finally { pollBtn.disabled = false; pollBtn.textContent = '恢复轮询'; }
+  };
+
+  const rlBtn = $('#diag-reload');
+  if (rlBtn) rlBtn.onclick = async () => {
+    if (!confirm('热重载插件代码？\n\n会重新加载 lib/index.js（约 1 秒不可用）；新代码加载失败会自动保留旧代。')) return;
+    rlBtn.disabled = true; rlBtn.textContent = '重载中…';
+    try {
+      const j = await api('/action', { method: 'POST', body: JSON.stringify({ op: 'selfReload' }) });
+      const r = j.result || {};
+      if (r.ok) { toast('已触发热重载，1.5 秒后刷新页面', 'ok'); setTimeout(() => location.reload(), 1500); }
+      else toast('重载失败：' + (r.error || '未知原因'), 'err');
+    } catch (e) { toast('请求失败：' + e.message, 'err'); }
+    finally { rlBtn.disabled = false; rlBtn.textContent = '热重载插件'; }
   };
 
   loadDiag(true).then(() => draw());
