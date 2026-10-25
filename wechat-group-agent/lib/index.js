@@ -15,7 +15,7 @@
  * 纯 ESM，无编译步骤（本环境没有可用的 tsc），改完 dev_reload_package 即生效。
  */
 import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, unlinkSync, writeFileSync, copyFileSync, rmSync } from 'node:fs'
-import { execFileSync } from 'node:child_process'
+import { execFileSync, execSync } from 'node:child_process'
 import { request as httpsRequest } from 'node:https'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -41,7 +41,7 @@ try {
 } catch { /* ignore */ }
 
 export const name = '@dsh-external/dsh-wechat-bot'
-export const version = '1.3.19'
+export const version = '1.3.20'
 // Cordis 4.0.4 的 inject 只认**数组**或"服务名→配置"映射；
 // 写成 { required, optional } 会让依赖解析失败、fiber 永远 pending（踩过：改了代码却一直跑旧实例）。
 // 这里只声明必然存在的两个服务；attachments（视觉识别用）改为**惰性获取**，
@@ -543,8 +543,11 @@ const BUILD_VER = '2026-10-23.4'   // 抬版本：让新实例压过热重载残
 
   /** 语音模型启停（voiceModelOn）：true=启动 api_v2（常驻），false=杀 api_v2（省 GPU） */
   function applyModelSwitch(on) {
-    // 用 execSync 同步执行（不依赖 spawn 的 detached）
-    const { execSync } = require('node:child_process')
+    // ★ 2026-10-26：这里原来是 `const { execSync } = require('node:child_process')`，
+    //   但本插件是 ESM（package.json type:module），ESM 里没有 require →
+    //   一进函数就 ReferenceError，被调用点的 `catch { /* ignore */ }` 吞掉，
+    //   结果就是**面板开关完全失灵：voiceModelOn=true 但 api_v2 从没被启动过**。
+    //   改用顶部 import 的 execSync（已补进 import）。
     const listCmd = 'wmic process where "name=\'python.exe\' and commandline like \'%api_v2%\'" get processid /format:list'
     let pids = []
     try {
@@ -588,7 +591,11 @@ const BUILD_VER = '2026-10-23.4'   // 抬版本：让新实例压过热重载残
     }
     for (const r of rooms.values()) r.policy.cfg = config
     // voiceModelOn 变化 → 真正启停 api_v2
-    if (next.voiceModelOn !== undefined) { try { applyModelSwitch(next.voiceModelOn) } catch { /* ignore */ } }
+    //  ★ 原来这里是 `catch { /* ignore */ }`，把 ReferenceError 全吞了，
+    //    导致「开关开着但模型没起」这种问题被隐藏了几个月。现在记日志。
+    if (next.voiceModelOn !== undefined) {
+      try { applyModelSwitch(next.voiceModelOn) } catch (e) { log('语音模型启停失败：' + String(e?.message || e).slice(0, 160)) }
+    }
     if (applied.length) {
       persistConfig()
       log('配置变更：' + applied.map((x) => x.key + '=' + JSON.stringify(x.value)).join('，'))
