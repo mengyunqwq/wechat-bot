@@ -18,6 +18,7 @@ import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renam
 import { execFileSync } from 'node:child_process'
 import { request as httpsRequest } from 'node:https'
 import { join, dirname } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { homedir } from 'node:os'
 import { createHash, randomUUID } from 'node:crypto'
 import { BridgeClient } from './bridge-client.mjs'
@@ -40,7 +41,7 @@ try {
 } catch { /* ignore */ }
 
 export const name = '@dsh-external/dsh-wechat-bot'
-export const version = '1.3.6'
+export const version = '1.3.7'
 // Cordis 4.0.4 的 inject 只认**数组**或"服务名→配置"映射；
 // 写成 { required, optional } 会让依赖解析失败、fiber 永远 pending（踩过：改了代码却一直跑旧实例）。
 // 这里只声明必然存在的两个服务；attachments（视觉识别用）改为**惰性获取**，
@@ -4112,20 +4113,46 @@ let res = await callLlm(route, sys, usr, undefined)
   //     · commit 每次 push 都变 → 开发者自己改代码/提交，部署方就会看到"有更新"（误报）
   //     · 版本号只在"发版"时升 → 改代码不升版本 = 不提示（开发场景正确）
   //   发版流程：改代码 → 改仓库 version.json 的 version → push
-  const LOCAL_VERSION_FILE = join(process.env.WECHAT_BOT_HOME || 'D:\\微信deepseek', 'version.json')
+  // ★ 2026-10-25：本地版本号定位不再只认 WECHAT_BOT_HOME。
+  //   现象：面板「本地」显示 v0.0.0，但 D:\微信deepseek\version.json 明明存在且合法（无 BOM，329B）。
+  //   → 说明插件进程里的 WECHAT_BOT_HOME 指到了别的目录，单路径读取进了 catch。
+  //   现在按候选顺序试，谁先读到合法的 version 字段就用谁；全失败才回 0.0.0 并留下诊断。
+  const SELF_LIB_DIR = dirname(fileURLToPath(import.meta.url))   // …/wechat-group-agent/lib
+  const PKG_ROOT = dirname(SELF_LIB_DIR)                          // …/wechat-group-agent
+  const VERSION_CANDIDATES = Array.from(new Set([
+    process.env.WECHAT_BOT_HOME ? join(process.env.WECHAT_BOT_HOME, 'version.json') : '',
+    'D:\\微信deepseek\\version.json',
+    join(PKG_ROOT, '..', 'version.json'),
+    join(process.cwd(), 'version.json'),
+  ].filter(Boolean)))
+  const LOCAL_VERSION_FILE = VERSION_CANDIDATES[0]
+  const versionDiag = { file: '', errors: [] }
   function readLocalVersion() {
-    try {
-      const j = JSON.parse(readFileSync(LOCAL_VERSION_FILE, 'utf8')) || {}
-      return {
-        version: String(j.version || '0.0.0'),
-        notes: String(j.notes || ''),
-        releasedAt: String(j.releasedAt || ''),
+    const errs = []
+    for (const f of VERSION_CANDIDATES) {
+      try {
+        const j = JSON.parse(readFileSync(f, 'utf8')) || {}
+        // ★ 空版本 / 0.0.0 视为无效：某些插件脚手架目录里就有 {"version":"0.0.0"} 的 version.json，
+        //   一旦 WECHAT_BOT_HOME 指过去就会先命中它（这正是面板显示 v0.0.0 的来源）。
+        if (!j.version || String(j.version) === '0.0.0') throw new Error('version 为空或 0.0.0，视为无效')
+        versionDiag.file = f
+        versionDiag.errors = errs
+        return {
+          version: String(j.version),
+          notes: String(j.notes || ''),
+          releasedAt: String(j.releasedAt || ''),
+        }
+      } catch (e) {
+        errs.push(f + ' → ' + String(e?.message || e).slice(0, 60))
       }
-    } catch { return { version: '0.0.0', notes: '', releasedAt: '' } }
+    }
+    versionDiag.file = ''
+    versionDiag.errors = errs
+    return { version: '0.0.0', notes: '', releasedAt: '' }
   }
   async function readRepoVersion() {
     // ★ 2026-10-23：GitHub 匿名 API 有 60 次/小时限流，超了直接 403（今天实测）。
-    //   通道顺序：GitHub API → jsDelivr CDN（国内可达）→ 都失败才抛。
+    //   通道顺序：GitHub API → CDN。
     let j = null
     let apiErr = null
     try {
@@ -4135,18 +4162,38 @@ let res = await callLlm(route, sys, usr, undefined)
     } catch (e) {
       apiErr = e
     }
-    if (!j) {
-      const cdn = `https://cdn.jsdelivr.net/gh/${UPDATE_REPO}@main/version.json?ts=${Date.now()}`
+    // ★ 2026-10-25：jsDelivr 对 @main 的缓存可能是几天前的（实测 @main 返回 1.3.4，
+    //   而仓库其实早已 1.3.6），而且 ?ts= 查询参数**绕不过**它的缓存（实测带不带都一样）。
+    //   → 多节点并发取，谁给出版本号最大就用谁：任一通道新鲜就能拿到最新。
+    //   实测（2026-10-25）gcore 节点新鲜、cdn@latest 新鲜、fastly/cdn@main 陈旧。
+    const cands = []
+    if (j) cands.push({ via: 'api', j })
+    const cdns = [
+      ['gcore', `https://gcore.jsdelivr.net/gh/${UPDATE_REPO}@main/version.json`],
+      ['cdn@latest', `https://cdn.jsdelivr.net/gh/${UPDATE_REPO}@latest/version.json`],
+      ['cdn@main', `https://cdn.jsdelivr.net/gh/${UPDATE_REPO}@main/version.json`],
+      ['fastly@main', `https://fastly.jsdelivr.net/gh/${UPDATE_REPO}@main/version.json`],
+    ]
+    const settled = await Promise.allSettled(cdns.map(([via, url]) => (async () => {
       const ac = new AbortController()
-      const timer = setTimeout(() => ac.abort(), 15000)
+      const timer = setTimeout(() => ac.abort(), 12000)
       try {
-        const res = await fetch(cdn, { signal: ac.signal, headers: { 'cache-control': 'no-cache' } })
-        if (!res.ok) throw new Error('jsDelivr HTTP ' + res.status)
-        j = await res.json()
-        log('[update] GitHub API 不可用（' + String(apiErr?.message || apiErr).slice(0, 60) + '）→ 已用 jsDelivr 兜底')
-      } catch (e2) {
-        throw new Error('版本读取失败：API=' + String(apiErr?.message || apiErr).slice(0, 50) + '；CDN=' + String(e2?.message || e2).slice(0, 50))
+        const res = await fetch(url, { signal: ac.signal, headers: { 'cache-control': 'no-cache' } })
+        if (!res.ok) throw new Error('HTTP ' + res.status)
+        const jj = await res.json()
+        if (!jj || !jj.version) throw new Error('无 version 字段')
+        return { via, j: jj }
       } finally { clearTimeout(timer) }
+    })()))
+    for (const r of settled) if (r.status === 'fulfilled') cands.push(r.value)
+    if (!cands.length) {
+      throw new Error('版本读取失败：API=' + String(apiErr?.message || apiErr).slice(0, 50) + '；CDN 全部失败')
+    }
+    let best = cands[0]
+    for (const c of cands) if (cmpSemver(c.j.version, best.j.version) > 0) best = c
+    j = best.j
+    if (best.via !== 'api') {
+      log('[update] GitHub API ' + (apiErr ? '不可用' : '未用') + ' → ' + best.via + ' 读到仓库版本 v' + j.version)
     }
     // ★ 2026-10-22：r.sha 是**文件内容的 blob sha**，不能拿去 codeload 下载 zip
     //   （codeload.github.com/<repo>/zip/<blob sha> → HTTP 404，实测 14 字节的 404 响应）。
@@ -4179,10 +4226,12 @@ let res = await callLlm(route, sys, usr, undefined)
   /** 检查更新：比较本地 version.json 与仓库 version.json */
   async function checkUpdate() {
     const local = readLocalVersion()
+    // 本地文件读不到时用插件版本常量，避免拿 0.0.0 去比较、误报"有更新"
+    const localVer = local.version === '0.0.0' ? version : local.version
     const remote = await readRepoVersion()
-    const available = cmpSemver(remote.version, local.version) > 0
+    const available = cmpSemver(remote.version, localVer) > 0
     updateState.checkedAt = Date.now()
-    updateState.version = local.version
+    updateState.version = localVer
     updateState.latest = {
       version: remote.version, notes: remote.notes, releasedAt: remote.releasedAt, sha: remote.sha,
     }
@@ -4198,10 +4247,10 @@ let res = await callLlm(route, sys, usr, undefined)
         }))
       } catch { /* 提交列表拿不到不影响 */ }
     }
-    log('[update] 本地 v' + local.version + ' 远程 v' + remote.version + ' → ' + (available ? '有更新' : '已是最新'))
+    log('[update] 本地 v' + localVer + ' 远程 v' + remote.version + ' → ' + (available ? '有更新' : '已是最新'))
     return {
       available,
-      localVersion: local.version, remoteVersion: remote.version,
+      localVersion: localVer, remoteVersion: remote.version,
       localNotes: local.notes, notes: remote.notes, releasedAt: remote.releasedAt,
       commits,
     }
@@ -4725,11 +4774,17 @@ let res = await callLlm(route, sys, usr, undefined)
         }
       }
       case 'updateInfo': {
+        // ★ 兜底：候选 version.json 全都读不到时，用插件自身的版本常量（export const version），
+        //   绝不再把 "v0.0.0" 抛给用户看。
+        const lv = readLocalVersion()
         return {
           repo: UPDATE_REPO,
           // ★ version 必须从本地 version.json 现读：它是纯本地操作，绝不依赖网络/GitHub 限流。
           //   之前只返回 commit，面板回退到 info.version（undefined）→ 网络失败时显示 "v?"。
-          version: readLocalVersion().version,
+          version: lv.version === '0.0.0' ? version : lv.version,
+          // 读的是哪个文件 / 哪些候选失败了 —— 面板悬停可见，出问题不用再猜
+          versionFile: versionDiag.file || `(兜底用插件版本常量 @ ${version})`,
+          versionErrors: versionDiag.errors,
           local: updateState.commit,
           checkedAt: updateState.checkedAt,
           latest: updateState.latest,

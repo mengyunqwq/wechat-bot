@@ -1485,7 +1485,7 @@ function renderUpdate() {
 
     <div class="section"><div class="hd">📦 版本</div>
       <table class="table"><tbody>
-        <tr><td class="muted">本地</td><td class="mono"><b>${esc('v' + ((u && u.localVersion) || info.version || '?'))}</b></td></tr>
+        <tr><td class="muted">本地</td><td class="mono"><b title="${esc(info.versionFile || '')}">${esc('v' + ((u && u.localVersion) || info.version || '?'))}</b>${info.versionErrors && info.versionErrors.length ? ` <span class="small muted">（${esc(info.versionErrors[0])}）</span>` : ''}</td></tr>
         <tr><td class="muted">仓库最新</td><td class="mono"><b>${esc('v' + ((u && u.remoteVersion) || (info.latest && info.latest.version) || '?'))}</b></td></tr>
         <tr><td class="muted">发布说明</td><td>${esc((u && u.notes) || (info.latest && info.latest.notes) || '—')}</td></tr>
         <tr><td class="muted">仓库</td><td class="mono">${esc(info.repo || u && u.repo || '')}</td></tr>
