@@ -41,7 +41,7 @@ try {
 } catch { /* ignore */ }
 
 export const name = '@dsh-external/dsh-wechat-bot'
-export const version = '1.3.12'
+export const version = '1.3.13'
 // Cordis 4.0.4 的 inject 只认**数组**或"服务名→配置"映射；
 // 写成 { required, optional } 会让依赖解析失败、fiber 永远 pending（踩过：改了代码却一直跑旧实例）。
 // 这里只声明必然存在的两个服务；attachments（视觉识别用）改为**惰性获取**，
@@ -286,6 +286,9 @@ const DEFAULT_CONFIG = {
   voiceSay: false,                 // 总开关（默认**关**：先自测通过再开）
   voiceModelOn: true,               // 语音模型：true=常驻（时刻准备）/ false=关闭（省 GPU）
   voicePreset: '雌小鬼·A（当前）',  // 音色预设（当前用 GPT-SoVITS）
+  // 更新检查的自定义版本源（不依赖 GitHub）：逗号分隔 URL，返回 {"version":"1.3.x"} 即采用。
+  // 适合自建对象存储 / 局域网共享 / 别的托管；也可填第三方镜像。
+  updateMirror: '',
   voiceSayProbability: 0.2,        // 普通回复改成语音的概率
   voiceSayOnVoiceProbability: 0.5, // 收到**语音**消息时用语音回的概率（对称，最像真人）
   voiceSayMaxChars: 60,            // 超过这么多字就发文字（语音太长很怪）
@@ -4211,10 +4214,34 @@ let res = await callLlm(route, sys, usr, undefined)
         cands.push({ via: 'release', j: { version: tag, notes: line || '', releasedAt: String(rel?.published_at || '') } })
       }
     } catch { /* Release 拿不到不影响，CDN 仍可用 */ }
-    // ③ 兜底：多节点 CDN 并发。实测各节点缓存不同步（gcore 新鲜、fastly@main 可能停在几天前）。
+    // ③ 自定义版本源：真正不依赖 GitHub。用户在面板里填 URL（可多个），返回
+    //   {"version":"1.3.x","notes":"..."} 就采用。这一档**不受 Release 上限校验**——
+    //   它可能是自己发布的版本，比 GitHub 上的还新。
+    const mirrorUrls = String(config.updateMirror || '')
+      .split(/[\s,;，]+/).map((s) => s.trim()).filter((u) => /^https?:\/\//i.test(u))
+    if (mirrorUrls.length) {
+      const ms = await Promise.allSettled(mirrorUrls.map((url) => (async () => {
+        const ac = new AbortController()
+        const timer = setTimeout(() => ac.abort(), 12000)
+        try {
+          const res = await fetch(url, { signal: ac.signal, headers: { 'cache-control': 'no-cache' } })
+          if (!res.ok) throw new Error('HTTP ' + res.status)
+          const jj = await res.json()
+          if (!jj || !jj.version) throw new Error('无 version 字段')
+          return { via: 'mirror', j: jj }
+        } finally { clearTimeout(timer) }
+      })()))
+      for (const r of ms) {
+        if (r.status === 'fulfilled') cands.push(r.value)
+        else log('[update] 自定义版本源失败：' + String(r.reason?.message || r.reason).slice(0, 80))
+      }
+    }
+    // ④ 兜底：多节点 CDN 并发。实测各节点缓存不同步（gcore 新鲜、fastly@main 可能停在几天前）。
     const cdns = [
       ['gcore', `https://gcore.jsdelivr.net/gh/${UPDATE_REPO}@main/version.json`],
+      ['testingcf', `https://testingcf.jsdelivr.net/gh/${UPDATE_REPO}@main/version.json`],
       ['cdn@latest', `https://cdn.jsdelivr.net/gh/${UPDATE_REPO}@latest/version.json`],
+      ['ghproxy', `https://gh-proxy.com/https://raw.githubusercontent.com/${UPDATE_REPO}/main/version.json`],
       ['cdn@main', `https://cdn.jsdelivr.net/gh/${UPDATE_REPO}@main/version.json`],
       ['fastly@main', `https://fastly.jsdelivr.net/gh/${UPDATE_REPO}@main/version.json`],
     ]

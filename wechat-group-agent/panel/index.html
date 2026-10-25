@@ -1523,6 +1523,14 @@ function renderUpdate() {
       </div>
       <div class="small muted" style="margin-top:8px">版本号只在「发版」时才升 —— 开发过程中改代码、提交都不会提示更新。</div>
     </div>
+
+    <div class="section"><div class="hd">🌐 自定义版本源 <span class="muted">不依赖 GitHub API</span></div>
+      <div class="small muted">填一个直接返回 <span class="mono">{"version":"1.3.x"}</span> 的 URL（可填多个，逗号分隔）。适合自建对象存储 / 局域网共享 / 别的托管；这一档不受 GitHub 限额和 CDN 缓存影响。</div>
+      <div class="row" style="margin-top:8px">
+        <input type="text" id="mirror-input" style="flex:1;min-width:260px" placeholder="https://example.com/wechat-bot/version.json" value="${esc((App.S && App.S.config && App.S.config.updateMirror) || '')}">
+        <button class="btn primary" id="mirror-save">保存</button>
+      </div>
+    </div>
     </div>
 
     ${has ? `<div class="section" style="border:1px solid var(--warn)"><div class="hd">🆕 发现新版本
@@ -1548,12 +1556,26 @@ function renderUpdate() {
     <div class="section"><div class="hd">ℹ️ 说明</div>
       <div class="small muted">
         · 每天自动检查一次（插件启动 40 秒后先查一次）<br>
-        · 只覆盖代码：插件 lib/、面板 panel/、桥 lib/、桥入口 *.mjs、scripts/<br>
+        · 只覆盖代码：插件 lib/、面板 panel/、桥 lib/、桥入口 *.mjs、scripts/、根 version.json<br>
         · <b>绝不碰</b> config.json / data/ / facts/ / memory/ / node_modules/<br>
         · 更新后：面板刷新即生效；桥会自动重启；<b>插件代码需要重启 DSH</b> 才加载
       </div>
     </div>`;
 
+  // 自定义版本源：保存后立刻重查一次，让用户马上看到效果
+  const mSave = $('#mirror-save');
+  if (mSave) mSave.onclick = async () => {
+    const inp = $('#mirror-input');
+    const v = inp ? inp.value.trim() : '';
+    try {
+      await api('/config', { method: 'POST', body: JSON.stringify({ patch: { updateMirror: v } }) });
+      if (App.S && App.S.config) App.S.config.updateMirror = v;
+      App.upd = null;
+      App.updInfo = null;
+      toast(v ? '已保存，正在重新检查…' : '已清空自定义源', 'ok');
+      renderUpdate();
+    } catch (e) { toast('保存失败：' + e.message, 'err'); }
+  };
   $('#upd-check').onclick = async () => {
     const btn = $('#upd-check'); btn.disabled = true; btn.textContent = '检查中…';
     try {
