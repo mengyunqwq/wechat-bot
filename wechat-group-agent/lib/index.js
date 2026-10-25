@@ -41,7 +41,7 @@ try {
 } catch { /* ignore */ }
 
 export const name = '@dsh-external/dsh-wechat-bot'
-export const version = '1.3.10'
+export const version = '1.3.11'
 // Cordis 4.0.4 的 inject 只认**数组**或"服务名→配置"映射；
 // 写成 { required, optional } 会让依赖解析失败、fiber 永远 pending（踩过：改了代码却一直跑旧实例）。
 // 这里只声明必然存在的两个服务；attachments（视觉识别用）改为**惰性获取**，
@@ -4241,7 +4241,11 @@ let res = await callLlm(route, sys, usr, undefined)
   async function checkUpdate() {
     const local = readLocalVersion()
     // 本地文件读不到时用插件版本常量，避免拿 0.0.0 去比较、误报"有更新"
-    const localVer = local.version === '0.0.0' ? version : local.version
+    let localVer = local.version === '0.0.0' ? version : local.version
+    // ★ 2026-10-25：version.json 落后于代码本身时以代码为准。
+    //   旧更新器不覆盖根目录 version.json（代码 1.3.10、文件 1.3.9），
+    //   会让「本地版本」永远停在旧值、检查更新无限提示"有更新"。
+    if (cmpSemver(version, localVer) > 0) localVer = version
     const remote = await readRepoVersion()
     const available = cmpSemver(remote.version, localVer) > 0
     updateState.checkedAt = Date.now()
@@ -4379,6 +4383,28 @@ let res = await callLlm(route, sys, usr, undefined)
         }
       }
       if (n) report.push({ label: '桥入口文件', files: n, dir: bridgeRoot })
+    }
+    // ★ 2026-10-25：根目录的 version.json 必须一起更新。
+    //   之前白名单里只有 lib/panel/scripts，版本号文件不覆盖 →
+    //   代码已经是 1.3.10，version.json 还停在 1.3.9 →
+    //   面板「本地」永远显示旧版、检查更新又提示有更新，形成死循环（用户实测踩到）。
+    try {
+      const srcVer = join(srcRoot, 'version.json')
+      if (existsSync(srcVer)) {
+        const vj = JSON.parse(readFileSync(srcVer, 'utf8')) || {}
+        const dst = join(BOT_HOME, 'version.json')
+        writeFileSync(dst, JSON.stringify({
+          version: String(vj.version || ''),
+          notes: String(vj.notes || ''),
+          releasedAt: String(vj.releasedAt || ''),
+        }, null, 2) + '\n', 'utf8')
+        if (vj.version) updateState.version = String(vj.version)
+        report.push({ label: '版本号', files: 1, detail: 'v' + String(vj.version || '?'), dir: dst })
+      } else {
+        report.push({ label: '版本号', skipped: '仓库里没有 version.json' })
+      }
+    } catch (e) {
+      report.push({ label: '版本号', skipped: String(e?.message || e).slice(0, 60) })
     }
     return report
   }
@@ -4798,13 +4824,18 @@ let res = await callLlm(route, sys, usr, undefined)
         // ★ 兜底：候选 version.json 全都读不到时，用插件自身的版本常量（export const version），
         //   绝不再把 "v0.0.0" 抛给用户看。
         const lv = readLocalVersion()
+        // 同上：version.json 若落后于代码（旧更新器不覆盖根文件），以代码版本为准
+        let localVer = lv.version === '0.0.0' ? version : lv.version
+        if (cmpSemver(version, localVer) > 0) localVer = version
         return {
           repo: UPDATE_REPO,
           // ★ version 必须从本地 version.json 现读：它是纯本地操作，绝不依赖网络/GitHub 限流。
           //   之前只返回 commit，面板回退到 info.version（undefined）→ 网络失败时显示 "v?"。
-          version: lv.version === '0.0.0' ? version : lv.version,
+          version: localVer,
           // 读的是哪个文件 / 哪些候选失败了 —— 面板悬停可见，出问题不用再猜
-          versionFile: versionDiag.file || `(兜底用插件版本常量 @ ${version})`,
+          versionFile: (localVer === lv.version && versionDiag.file)
+            ? versionDiag.file
+            : `(以代码版本为准 @ ${version}；version.json=${versionDiag.file || '未读到'})`,
           versionErrors: versionDiag.errors,
           botHome: BOT_HOME,
           local: updateState.commit,
@@ -4832,7 +4863,7 @@ let res = await callLlm(route, sys, usr, undefined)
           // 记录新版本
           const oldCommit = updateState.commit
           updateState.commit = target
-          try { const vj = JSON.parse(readFileSync(join(tmpRoot, '..', 'version.json'), 'utf8')); updateState.version = String(vj.version || updateState.version) } catch { /* ignore */ }
+          try { const vj = JSON.parse(readFileSync(join(tmpRoot, 'version.json'), 'utf8')); updateState.version = String(vj.version || updateState.version) } catch { /* applyFiles 已处理 */ }
           updateState.history.unshift({ at: Date.now(), from: oldCommit.slice(0, 7), to: target.slice(0, 7) })
           updateState.history = updateState.history.slice(0, 20)
           updateState.latest = null
