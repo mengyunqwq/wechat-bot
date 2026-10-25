@@ -41,7 +41,7 @@ try {
 } catch { /* ignore */ }
 
 export const name = '@dsh-external/dsh-wechat-bot'
-export const version = '1.3.11'
+export const version = '1.3.12'
 // Cordis 4.0.4 的 inject 只认**数组**或"服务名→配置"映射；
 // 写成 { required, optional } 会让依赖解析失败、fiber 永远 pending（踩过：改了代码却一直跑旧实例）。
 // 这里只声明必然存在的两个服务；attachments（视觉识别用）改为**惰性获取**，
@@ -4081,31 +4081,48 @@ let res = await callLlm(route, sys, usr, undefined)
   // 为什么不用 powershell：execFileSync 在 Windows 上会闪一个控制台窗口（用户能看到）。
   // 所以用 node:https + 仅对 GitHub 这两个域名关闭证书校验 —— 只读公开仓库、不传任何凭据，
   // 被劫持最多是拿到假代码，所以风险可接受。
-  const httpsGet = (url, ms = 20000) => new Promise((resolve, reject) => {
+  // ★ 2026-10-25：拆出「能看到状态码/响应头」的版本 —— ETag 条件请求需要读 304 和 etag。
+  const httpsGetRaw = (url, ms = 20000, extraHeaders = null) => new Promise((resolve, reject) => {
     let u
     try { u = new URL(url) } catch { reject(new Error('bad url')); return }
     const req = httpsRequest(u, {
       method: 'GET',
       timeout: ms,
       rejectUnauthorized: false,
-      headers: { 'user-agent': 'dsh-wechat-bot', accept: 'application/vnd.github+json' },
+      headers: Object.assign({ 'user-agent': 'dsh-wechat-bot', accept: 'application/vnd.github+json' }, extraHeaders || {}),
     }, (res) => {
       const chunks = []
       res.on('data', (d) => chunks.push(d))
-      res.on('end', () => {
-        const buf = Buffer.concat(chunks)
-        if (res.statusCode >= 400) { reject(new Error('HTTP ' + res.statusCode)); return }
-        resolve(buf)
-      })
+      res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, body: Buffer.concat(chunks) }))
     })
     req.on('timeout', () => req.destroy(new Error('请求超时')))
     req.on('error', reject)
     req.end()
   })
+  const httpsGet = async (url, ms = 20000) => {
+    const r = await httpsGetRaw(url, ms)
+    if (r.status >= 400) throw new Error('HTTP ' + r.status)
+    return r.body
+  }
+  // ★ 2026-10-25：GitHub API 走 ETag 条件请求。
+  //   GitHub 明确规定：返回 304 的请求**不计入 rate limit**（匿名只有 60 次/小时）。
+  //   所以「没发新版」的时候怎么查都不烧额度，发了新版才真正消耗一次。
+  const ghEtagCache = new Map()   // path -> { etag, body }
   const ghJson = async (path, ms = 20000) => {
-    const buf = await httpsGet('https://api.github.com' + path, ms)
-    const text = buf.toString('utf8')
-    try { return JSON.parse(text) } catch { throw new Error('响应不是 JSON：' + text.slice(0, 80)) }
+    const prev = ghEtagCache.get(path)
+    const headers = prev && prev.etag ? { 'if-none-match': prev.etag } : null
+    const res = await httpsGetRaw('https://api.github.com' + path, ms, headers)
+    if (res.status === 304) {
+      if (prev) return prev.body
+      throw new Error('HTTP 304 但本地无缓存')
+    }
+    if (res.status >= 400) throw new Error('HTTP ' + res.status)
+    const text = res.body.toString('utf8')
+    let body
+    try { body = JSON.parse(text) } catch { throw new Error('响应不是 JSON：' + text.slice(0, 80)) }
+    const etag = res.headers.etag || ''
+    if (etag) ghEtagCache.set(path, { etag, body })
+    return body
   }
   /** 检查更新：返回 { available, local, remote, behind, commits[] } */
   // ── 版本号（2026-10-22 改）──────────────────────────────────────
@@ -4165,23 +4182,36 @@ let res = await callLlm(route, sys, usr, undefined)
     return { version, notes: '', releasedAt: '' }
   }
   async function readRepoVersion() {
-    // ★ 2026-10-23：GitHub 匿名 API 有 60 次/小时限流，超了直接 403（今天实测）。
-    //   通道顺序：GitHub API → CDN。
+    // ★ 2026-10-25：通道优先级重排 —— API 与 Release 是权威，CDN 只做兜底。
+    //   旧逻辑只靠 jsDelivr，而它的节点缓存不同步（@main 可能还停在几天前），
+    //   ?ts= 查询参数也绕不过缓存，于是「仓库最新」会读出旧版本甚至来回跳。
     let j = null
     let apiErr = null
+    const cands = []
+    // ① 权威源：API contents/version.json（带 ETag，304 不计限额）
     try {
       const r = await ghJson(`/repos/${UPDATE_REPO}/contents/version.json`)
       const txt = Buffer.from(String(r.content || '').replace(/\n/g, ''), 'base64').toString('utf8')
-      j = JSON.parse(txt) || {}
+      const jj = JSON.parse(txt) || {}
+      if (jj.version) { j = jj; cands.push({ via: 'api', j: jj }) }
     } catch (e) {
       apiErr = e
     }
-    // ★ 2026-10-25：jsDelivr 对 @main 的缓存可能是几天前的（实测 @main 返回 1.3.4，
-    //   而仓库其实早已 1.3.6），而且 ?ts= 查询参数**绕不过**它的缓存（实测带不带都一样）。
-    //   → 多节点并发取，谁给出版本号最大就用谁：任一通道新鲜就能拿到最新。
-    //   实测（2026-10-25）gcore 节点新鲜、cdn@latest 新鲜、fastly/cdn@main 陈旧。
-    const cands = []
-    if (j) cands.push({ via: 'api', j })
+    // ② 权威源：Releases API —— 官方发布的 tag 是"最新版本"的事实依据，不经过任何 CDN。
+    //   它同时用来给 CDN 结果做上限校验：CDN 不可能比官方发布更新，超过的一律是脏数据。
+    let releaseVer = ''
+    try {
+      const rel = await ghJson(`/repos/${UPDATE_REPO}/releases/latest`)
+      const tag = String(rel?.tag_name || '').replace(/^v/i, '')
+      if (tag) {
+        releaseVer = tag
+        // Release body 是 markdown，取第一行有意义的文字当发布说明，避免面板里全是符号
+        const line = String(rel?.body || '').split('\n').map((s) => s.trim())
+          .find((s) => s && !/^[#>*\-|`]/.test(s))
+        cands.push({ via: 'release', j: { version: tag, notes: line || '', releasedAt: String(rel?.published_at || '') } })
+      }
+    } catch { /* Release 拿不到不影响，CDN 仍可用 */ }
+    // ③ 兜底：多节点 CDN 并发。实测各节点缓存不同步（gcore 新鲜、fastly@main 可能停在几天前）。
     const cdns = [
       ['gcore', `https://gcore.jsdelivr.net/gh/${UPDATE_REPO}@main/version.json`],
       ['cdn@latest', `https://cdn.jsdelivr.net/gh/${UPDATE_REPO}@latest/version.json`],
@@ -4199,7 +4229,17 @@ let res = await callLlm(route, sys, usr, undefined)
         return { via, j: jj }
       } finally { clearTimeout(timer) }
     })()))
-    for (const r of settled) if (r.status === 'fulfilled') cands.push(r.value)
+    for (const r of settled) {
+      if (r.status !== 'fulfilled') continue
+      const c = r.value
+      // ★ 有官方 Release 版本时，CDN 报出比它还高的版本 = 脏数据/幻觉，直接丢弃，
+      //   否则会误判"有更新"然后去下载一个不存在的 commit。
+      if (releaseVer && cmpSemver(c.j.version, releaseVer) > 0) {
+        log('[update] CDN(' + c.via + ') 报 v' + c.j.version + '，高于 Release v' + releaseVer + ' → 视为脏数据丢弃')
+        continue
+      }
+      cands.push(c)
+    }
     if (!cands.length) {
       throw new Error('版本读取失败：API=' + String(apiErr?.message || apiErr).slice(0, 50) + '；CDN 全部失败')
     }
@@ -4207,7 +4247,8 @@ let res = await callLlm(route, sys, usr, undefined)
     for (const c of cands) if (cmpSemver(c.j.version, best.j.version) > 0) best = c
     j = best.j
     if (best.via !== 'api') {
-      log('[update] GitHub API ' + (apiErr ? '不可用' : '未用') + ' → ' + best.via + ' 读到仓库版本 v' + j.version)
+      log('[update] 用 ' + best.via + ' 读到仓库版本 v' + j.version
+        + (apiErr ? '（API=' + String(apiErr?.message || apiErr).slice(0, 40) + '）' : ''))
     }
     // ★ 2026-10-22：r.sha 是**文件内容的 blob sha**，不能拿去 codeload 下载 zip
     //   （codeload.github.com/<repo>/zip/<blob sha> → HTTP 404，实测 14 字节的 404 响应）。
@@ -4223,6 +4264,7 @@ let res = await callLlm(route, sys, usr, undefined)
       notes: String(j.notes || ''),
       releasedAt: String(j.releasedAt || ''),
       sha,
+      via: best.via,
     }
   }
   /** semver 比较（容忍 v 前缀和位数不同）：a>b 返回 1 */
@@ -4270,6 +4312,7 @@ let res = await callLlm(route, sys, usr, undefined)
       available,
       localVersion: localVer, remoteVersion: remote.version,
       localNotes: local.notes, notes: remote.notes, releasedAt: remote.releasedAt,
+      source: remote.via,
       commits,
     }
   }
