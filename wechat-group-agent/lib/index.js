@@ -41,7 +41,7 @@ try {
 } catch { /* ignore */ }
 
 export const name = '@dsh-external/dsh-wechat-bot'
-export const version = '1.3.18'
+export const version = '1.3.19'
 // Cordis 4.0.4 的 inject 只认**数组**或"服务名→配置"映射；
 // 写成 { required, optional } 会让依赖解析失败、fiber 永远 pending（踩过：改了代码却一直跑旧实例）。
 // 这里只声明必然存在的两个服务；attachments（视觉识别用）改为**惰性获取**，
@@ -71,6 +71,59 @@ function normText(s) {
     .replace(/[\s，。！？!?~…,.、""''（）()\[\]{}:：;；]/g, '')
     .toLowerCase()
     .slice(0, 60)
+}
+
+/**
+ * 记忆专用归一化：和 normText 的区别是**不截短到 60**。
+ *  为什么：记忆条目最长 200 字，用 60 字窗口比较时，后半句的差异会被抹掉，
+ *  导致「同一件事换个说法」既可能漏判重复、也可能误杀。重复回复判定仍用 normText（不变）。
+ */
+function normFact(s) {
+  return String(s || '')
+    .replace(/\[[^\]]{0,20}\]/g, '')
+    .replace(/@[^\s@]{1,24}/g, '')
+    .replace(/[\s，。！？!?~…,.、""''（）()\[\]{}:：;；]/g, '')
+    .toLowerCase()
+    .slice(0, 220)
+}
+
+/**
+ * 两条记忆是否「讲的是同一件事」。
+ *  原先只判断完全相等 → 模型每次换个说法就成新条目，记忆越攒越重复。
+ *  这里加三层判定：完全相等 / 包含关系 / 字符二元组 Jaccard 相似度。
+ *  阈值 0.72：偏保守，宁可少合并，也不把两件不同的事错误合并。
+ */
+function factSimilar(a, b) {
+  const A = String(a || ''), B = String(b || '')
+  if (!A || !B) return false
+  if (A === B) return true
+  // 包含关系（"老王是群主" vs "老王是群主，管得很松"）—— 长度门槛 4 字，避免短串误伤
+  if (A.length >= 4 && B.length >= 4 && (A.includes(B) || B.includes(A))) return true
+  // 编辑距离相似度：对「中间插个字/换个词」比二元组敏感
+  const maxLen = Math.max(A.length, B.length)
+  if (Math.abs(A.length - B.length) / maxLen > 0.5) return false   // 长度差太多，直接否
+  const dist = editDistance(A, B)
+  return 1 - dist / maxLen >= 0.8
+}
+
+/** Levenshtein 编辑距离（两行滚动数组，避免大数组） */
+function editDistance(a, b) {
+  const m = a.length, n = b.length
+  if (!m) return n
+  if (!n) return m
+  let prev = new Array(n + 1)
+  for (let j = 0; j <= n; j++) prev[j] = j
+  for (let i = 1; i <= m; i++) {
+    const cur = new Array(n + 1)
+    cur[0] = i
+    const ai = a.charCodeAt(i - 1)
+    for (let j = 1; j <= n; j++) {
+      const cost = ai === b.charCodeAt(j - 1) ? 0 : 1
+      cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + cost)
+    }
+    prev = cur
+  }
+  return prev[n]
 }
 
 /**
@@ -1257,12 +1310,112 @@ const namesFile = join(dirname(memoryDir), 'members.json')
   }
 
   /** 写一条长期记忆（自动去重、限量） */
+  /**
+   * 对已有的长期记忆做一次自我去重（治存量）。
+   *  旧代码只判断完全相等，所以历史上攒下不少「换说法」的重复条目。
+   *  合并策略：保留信息更全的（更长的），时间用较新的。
+   * @returns {number} 被合并掉的条数
+   */
+  function dedupFacts(r) {
+    const facts = r.facts || []
+    if (facts.length < 2) return 0
+    // 时间从旧到新处理，这样「保留较新时间」自然成立
+    const sorted = facts.slice().sort((a, b) => (a.at || 0) - (b.at || 0))
+    const out = []
+    for (const f of sorted) {
+      const n = normFact(f.text)
+      const dup = out.find((x) => factSimilar(normFact(x.text), n))
+      if (!dup) { out.push(f); continue }
+      if (String(f.text).length > String(dup.text).length) dup.text = f.text
+      dup.at = Math.max(dup.at || 0, f.at || 0)
+    }
+    const removed = facts.length - out.length
+    if (removed > 0) {
+      out.sort((a, b) => (a.at || 0) - (b.at || 0))
+      r.facts = out
+      r.factsDedupedAt = Date.now()
+      saveFacts(r)
+    }
+    return removed
+  }
+
+  /**
+   * 用 LLM 合并「语义重复」的记忆（字面去重抓不到的那种）。
+   *  例：「wxid_x 被我称作主人」 vs「我会称呼 wxid_x 为主人」——语序不同，编辑距离判定不了。
+   *  只在手动提炼（force）时跑，避免每次自动提炼都花 token。
+   * @returns {Promise<number>} 合并掉的条数
+   */
+  async function compactFacts(r) {
+    const facts = r.facts || []
+    if (facts.length < 12) return 0
+    const BATCH = 20   // 一次喂 75 条会让模型「思考」吃光输出预算返回空，分批更稳
+    const merged = []
+    const now = Date.now()
+    let failedBatches = 0
+    const sys = '你是记忆整理器。合并语义重复的条目，保留信息最完整的表述。只输出条目，每行一条，不要编号、不要解释。'
+    for (let start = 0; start < facts.length; start += BATCH) {
+      const batch = facts.slice(start, start + BATCH)
+      const list = batch.map((f, i) => `${i + 1}. ${String(f.text).slice(0, 120)}`).join('\n')
+      const usr = '下面是一批长期记忆。请把**说的是同一件事**的条目合并成一条（保留信息最全的写法），'
+        + '不重复的原样保留。不要新增原文没有的内容，不要输出解释。\n\n' + list
+      try {
+        const route = resolveRoute()
+        stats.llmCalls++
+        // effort 传 'low'：这个模型做「合并」时会思考到把输出预算吃光，降思考换输出
+        let res = await callLlm(route, sys, usr, 'low')
+        if (!String(res.text || '').trim()) res = await callLlm(route, '', sys + '\n\n' + usr, 'low')
+        const lines = String(res.text || '').split(/\r?\n/).map((s) => s.trim()).filter(Boolean)
+        const got = []
+        for (const l of lines) {
+          if (/^无$/.test(l)) continue
+          const t = l.replace(/^[-•\d.、\s]+/, '').trim()
+          if (!t || t.length > 200) continue
+          if (got.some((m) => factSimilar(normFact(m.text), normFact(t)))) continue
+          got.push({ text: t, kind: 'compact', at: now })
+        }
+        // 这一批合并失败（空/异常）→ 原样保留，不能丢
+        if (!got.length) { failedBatches++; merged.push(...batch); continue }
+        merged.push(...got)
+      } catch (e) {
+        failedBatches++
+        merged.push(...batch)
+        log('记忆合并批次失败，原样保留：' + String(e?.message || e))
+      }
+    }
+    if (!merged.length) return -1
+    // 全批失败 = 模型不可用，别动原数据
+    if (failedBatches * BATCH >= facts.length) {
+      log(`记忆合并放弃：所有批次都没返回有效内容（${failedBatches} 批）`)
+      return -1
+    }
+    // 最后再用字面去重兜一遍（跨批的重复靠这层）
+    const out = []
+    for (const m of merged) {
+      if (out.some((x) => factSimilar(normFact(x.text), normFact(m.text)))) continue
+      out.push(m)
+    }
+    // 保险：至少保留六成，否则视为异常
+    if (out.length < Math.max(6, Math.floor(facts.length * 0.5))) {
+      log(`记忆合并放弃：结果只有 ${out.length}/${facts.length} 条，疑似异常`)
+      return 0
+    }
+    out.forEach((m, i) => { m.at = now - (out.length - i) * 1000 })
+    const removed = facts.length - out.length
+    r.facts = out
+    saveFacts(r)
+    log(`「${r.roomName}」记忆合并：${facts.length} → ${out.length} 条（合并 ${removed} 条语义重复）`)
+    return removed
+  }
+
+  /** 写一条长期记忆（相似度去重、限量、单条上限 200 字） */
   function addFact(r, text, kind = 'auto') {
     const t = String(text || '').trim()
-    if (!t || t.length > 120) return false
+    // 上限从 120 提到 200：用户要求「记忆做长一点」，一条能写完整背景
+    if (!t || t.length > 200) return false
     r.facts ||= []
-    const n = normText(t)
-    if (r.facts.some((f) => normText(f.text) === n)) return false
+    const n = normFact(t)
+    // 去重从「完全相等」升级为「讲的是同一件事」（换说法也算重复）
+    if (r.facts.some((f) => factSimilar(normFact(f.text), n))) return false
     r.facts.push({ text: t, kind, at: Date.now() })
     if (r.facts.length > 80) r.facts = r.facts.slice(-80)
     saveFacts(r)
@@ -1281,6 +1434,16 @@ const namesFile = join(dirname(memoryDir), 'members.json')
     const seen = r.msgs.length
     r.factsExtractedAt = Date.now()
     r.factsExtractedCount = seen
+    // 顺便清理存量重复（旧版只做完全相等比较，历史条目里有大量换说法的重复）
+    const removed = dedupFacts(r)
+    if (removed) log(`「${r.roomName}」记忆去重：合并掉 ${removed} 条重复（剩 ${r.facts.length} 条）`)
+    // 手动提炼时，再让模型合并一次语义重复（字面去重抓不到语序重排/同义替换）
+    //  这个模型（deepseek-flash）对「合并列表」会思考到返空，连续失败 2 次就停用，省 token
+    if (force && (r.compactFails || 0) < 2) {
+      const rc = await compactFacts(r)
+      r.compactFails = rc < 0 ? (r.compactFails || 0) + 1 : 0
+      if (rc < 0 && r.compactFails >= 2) log('记忆合并已停用：模型连续返回空（改配置后可手动重置）')
+    }
     const recent = r.msgs.slice(-30)
       .map((m) => `${m.isSelf ? '我' : m.senderName}: ${m.text}`)
       .join('\n')
@@ -1289,10 +1452,14 @@ const namesFile = join(dirname(memoryDir), 'members.json')
       const route = resolveRoute()
       stats.llmCalls++
       const sys = '你是一个记忆整理器。只输出事实条目，每行一条，不要编号、不要解释。'
-      const usr = '从下面的群聊记录里提炼 1~3 条**值得长期记住**的事实，例如：\n'
+      // 把已有记忆喂给模型，从源头减少重复（之前的重复主要来自「模型不知道已经记过什么」）
+      const existing = (r.facts || []).slice(-24).map((f) => '- ' + String(f.text).slice(0, 120)).join('\n')
+      const usr = '从下面的群聊记录里提炼 1~4 条**值得长期记住**的事实，例如：\n'
         + '谁是谁（昵称/身份）、某人的喜好或习惯、群里的约定或梗、重要事件、我答应过别人的事。\n'
-        + '只记长期有用的；日常闲聊不要记。没有值得记的就只输出：无\n\n'
-        + '群聊记录：\n' + recent
+        + '**每条写完整一点**（建议 30~100 字）：带上是谁、什么场合、什么细节，别只写半句。\n'
+        + '只记长期有用的；日常闲聊不要记。没有值得记的就只输出：无\n'
+        + (existing ? '\n【已经记过下面这些，不要重复提炼同一件事（换个说法也算重复）】\n' + existing + '\n' : '')
+        + '\n群聊记录：\n' + recent
 let res = await callLlm(route, sys, usr, undefined)
       // 这个模型会先"思考"，有时把输出预算吃光导致空回复 → 降级重试（把 system 并进 user）
       if (!String(res.text || '').trim()) {
@@ -1628,8 +1795,10 @@ let res = await callLlm(route, sys, usr, undefined)
       '  · 别炫耀这些能力，也别解释你怎么看到的；就像普通人"看了一眼"那样自然。',
       known.length ? `群里的人：${known.join('、')}` : (names ? `群成员：${names}` : ''),
       // 长期记忆：每次都带上（用户要求"每次都通过记忆系统"）
+      //  从 12 条提到 18 条 —— 单条上限同时放宽到 200 字，记忆能带更多细节；
+      //  18×200 字约 3.6K 字符，仍在预算内。
       (r.facts || []).length
-        ? '\n【长期记忆（关于这个群和这些人，别忘）】\n' + r.facts.slice(-12).map((f) => '- ' + f.text).join('\n')
+        ? '\n【长期记忆（关于这个群和这些人，别忘）】\n' + r.facts.slice(-18).map((f) => '- ' + f.text).join('\n')
         : '',
       // 我刚问过、还没人回答的问题：不许再问第二遍
       r.pendingQuestion
