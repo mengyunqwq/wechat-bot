@@ -22,13 +22,13 @@
 |---|---|
 | 微信客户端（被 hook 的那份） | `D:\wxhook\wx4110\Weixin.exe`，版本 **4.1.10.27**（自动更新已锁死） |
 | hook DLL | `D:\wxhook\wx4110\version.dll`，**516608 字节 / MD5 前缀 CB38DD658D9F**（自编译版） |
-| hook 源码 | `C:\wxhook-src\WeChat-Hook`（上游 aixed/WeChat-Hook 的 clone，我们的改动已本地提交 `aa9f681`，工作区干净） |
+| hook 源码 | `E:\wxhook-src\WeChat-Hook`（上游 aixed/WeChat-Hook 的 clone，我们的改动已本地提交 `aa9f681`，工作区干净） |
 | 构建 | `MSBuild.exe x64_Version_dll.vcxproj /m /t:Build /p:Configuration=Release /p:Platform=x64` |
 | hook HTTP | `127.0.0.1:30001`（只监听本机） |
 | hook 回调 | `http://127.0.0.1:18998`（启动参数 `CallBackURL=` 传入，**目前 hook 只解析不实现**） |
-| bridge | `<项目目录>\wx-bridge`（运行版，有 node_modules），`127.0.0.1:17300`，数据目录 `<项目目录>\data` |
+| bridge | `D:\微信deepseek\wx-bridge`（运行版，有 node_modules），`127.0.0.1:17300`，数据目录 `D:\微信deepseek\data` |
 | 发布仓库 | `D:\dsh-wechat-bot`（公开，**脱敏**，`git add -A` 前必须复查个人路径） |
-| 插件 | `<项目目录>\wechat-group-agent\lib\index.js`（DSH 插件，热重载用 `dev_reload_package`） |
+| 插件 | `D:\微信deepseek\wechat-group-agent\lib\index.js`（DSH 插件，热重载用 `dev_reload_package`） |
 | 逆向工具 | Ghidra 12.1.4 `D:\ghidra\ghidra_12.1.4_PUBLIC`（`analyzeHeadless.bat` 可用）+ 项目 `D:\rea\ghproj` + 现成脚本 `D:\rea\*.java`（`FindDbGate/FindHooks/FindQueryDB/FindSearchDatabases/DumpHead/FindHookTargets`）；rea 6.5.0 `D:\rea\rea.cmd`（**可用性未验证**，先跑 `rea --help` / 一个 analyze 试试） |
 | Weixin.dll | `D:\wxhook\wx4110\4.1.10.27\Weixin.dll`，**175 MB，无符号** |
 
@@ -124,7 +124,7 @@
    数据库句柄失效、失聪；而且重启要手机确认的风险始终在）
 2. **不要在没有影子对比前关掉轮询** —— 推送没验证就接管 = 拿机器人的可用性赌博
 3. **不要 `git add -A` 到 `D:\dsh-wechat-bot`** —— 那个目录里可能有本机路径的文件；
-   提交前必须跑一遍脱敏复查（`wxid_[0-9a-z]{8,}` / `47390425951` / `<项目目录>` / `D:\wxhook`）
+   提交前必须跑一遍脱敏复查（`wxid_[0-9a-z]{8,}` / `47390425951` / `D:\微信deepseek` / `D:\wxhook`）
 4. **hook 里绝不阻塞** —— 推送/网络调用必须短超时 + 失败静默，阻塞会拖死客户端
 5. **hook 改动攒一批只部署一次** —— 每次部署都要重启客户端（有手机确认风险），别改一行部署一次
 6. **每步都要能回滚** —— DLL 是单文件替换；`D:\wxhook\archive\4.1.10.27-20261018-0130`
@@ -141,7 +141,7 @@ Get-Item 'D:\wxhook\wx4110\version.dll' | Select-Object Length, LastWriteTime   
 (Invoke-WebRequest 'http://127.0.0.1:17300/api/status' -TimeoutSec 10).Content
 
 # 1) 读 hook 里现有的 sqlite detour（路线 A 的落点）
-#    C:\wxhook-src\WeChat-Hook\xdb\db_mgr.cpp   （看 detourPrepare / g_api / noteHandle）
+#    E:\wxhook-src\WeChat-Hook\xdb\db_mgr.cpp   （看 detourPrepare / g_api / noteHandle）
 
 # 2) 顺手验证 rea 能不能用（不行就走 headless）
 D:\rea\rea.cmd --help
@@ -164,7 +164,7 @@ D:\rea\rea.cmd --help
 | 项 | 值 |
 |---|---|
 | 改动 | 仅 `xdb/db_mgr.cpp`，**+225 行 / −0 行**（纯增量，既有语句一字未改，`rc`/出参/控制流原样） |
-| 产物 | `C:\wxhook-src\WeChat-Hook\x64\Release\version.dll`，**534016 字节**，MD5 `CC88631554D724CD49C8C5760FD6CB35` |
+| 产物 | `E:\wxhook-src\WeChat-Hook\x64\Release\version.dll`，**534016 字节**，MD5 `CC88631554D724CD49C8C5760FD6CB35` |
 | 在跑的 DLL | 仍是 516608 / `CB38DD658D9FA0EF5052CDDA97AC7318`（**未部署**） |
 | 导出表 | 与在跑的 DLL **17 = 17 一致**（代理接口没动） |
 | 日志 | `D:\wxhook\wx4110\hook-probe.log`（部署后由探针创建；机器没装 DbgView 所以落文件） |
@@ -196,7 +196,7 @@ D:\rea\rea.cmd --help
 | 写语句入口 | 全部 `via=prepare_v3` | **入口是 `sqlite3_prepare_v3`，不是 `prepare_v2`**（第一轮零命中的原因） |
 | `[PROBE-STEP]` | 60 条，全部 `from=wx` | step 钩子工作正常，能看到微信的执行流 |
 | 消息相关写入 | `INSERT INTO 'main'.'message_fts_v4_0_content'`（`message_fts.db`，`via=prepare_v3`） | **消息确实走这台实例**（FTS 索引与 Msg_ 行同事务） |
-| 微信调用点 RVA | 已实测得到（具体地址见本地私密笔记，不进公库） | 路线 B 若需要，入口已现成 |
+| 微信调用点 RVA | DB 层 `wx+0x3329DD8`；FTS 写 `0x5099932` / `0x5084F39` / `0x509A319` / `0x509B697`；exec `0x506DE31` | 路线 B 若需要，入口已现成 |
 | 副作用 | CPU 0%（基线 0%）、客户端不崩、轮询在消息到达后恢复正常（6 会话） | 探针安全 |
 
 **实现要点（下一轮照这个做）**：

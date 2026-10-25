@@ -18,8 +18,5 @@
     "jimp": "^1.6.1",
     "wechatferry": "0.0.26",
     "ws": "^8.18.0"
-  },
-  "optionalDependencies": {
-    "koffi": "^2.9.0"
   }
 }

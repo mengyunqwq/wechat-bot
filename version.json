@@ -1,5 +1,5 @@
 {
-  "version": "1.3.16",
-  "notes": "1.3.16：修 DSH 侧边栏「微信机器人」入口消失 —— 注入/重载进来的插件是运行时才进 loader 的，clientModules 的注册表里可能没有它，于是侧栏入口不见了。插件启动 10 秒后会主动把自身加入 clientModules 的扫描队列并 flush 一次（幂等，失败只记日志）。刷新 DSH 页面即可看到入口。",
+  "version": "1.3.17",
+  "notes": "1.3.17：修致命漏提交 —— wx-bridge/server.mjs 和 lib/wechat-hook.mjs 都 import 了 lib/forensics.mjs，但这个文件从没提交到仓库，别人拉下来桥直接起不来（ERR_MODULE_NOT_FOUND）。同时补齐一批长期漏同步的源码（bridge-client/panel/pet-bridge/policy 等 6 个文件是 10-23 的旧版）以及 40 多个工具/测试脚本。",
   "releasedAt": "2026-10-25"
 }
