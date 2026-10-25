@@ -45,10 +45,12 @@ const PY = pyExe()   // 仅用于 paths 展示
  * pitch  = 音调（±NHz）
  */
 export const VOICES = {
-  main: { voice: 'zh-CN-XiaoxiaoNeural', rate: '+0%', pitch: '+8Hz' },      // 主声（用户 2026-10-20 选定：音色 10「晓晓-低柔」）
-  sweet: { voice: 'zh-CN-XiaoyiNeural', rate: '-6%', pitch: '+8Hz' },       // 撒娇/委屈（保持晓伊，更嗲）
-  angry: { voice: 'zh-CN-XiaoxiaoNeural', rate: '+10%', pitch: '-4Hz' },    // 生气/吐槽
-  serious: { voice: 'zh-CN-XiaoxiaoNeural', rate: '+5%', pitch: '+12Hz' },  // 正经回答
+  // 2026-10-25：已换成 GPT-SoVITS（雌小鬼音色，训练版 G_final）
+  // edge-tts 旧音色（晓晓/晓伊）已废弃 —— 实际合成走 tts-silk.py → GPT-SoVITS API 9880
+  main: { voice: 'gpt-sovits', rate: '+0%', pitch: '+0Hz' },
+  sweet: { voice: 'gpt-sovits', rate: '+0%', pitch: '+0Hz' },
+  angry: { voice: 'gpt-sovits', rate: '+0%', pitch: '+0Hz' },
+  serious: { voice: 'gpt-sovits', rate: '+0%', pitch: '+0Hz' },
 }
 
 export const MAX_TEXT_CHARS = 120      // 超过直接拒绝（语音太长很怪）

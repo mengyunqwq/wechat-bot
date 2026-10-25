@@ -333,9 +333,6 @@ export const CONFIG_META = {
   voiceSayMaxChars: {
     group: 'voiceOut', label: '超过多少字改文字', type: 'number', min: 1, max: 300, step: 5, unit: '字',
   },
-  voiceSayEmotion: {
-    group: 'voiceOut', label: '音色预设', type: 'enum', options: ['main', 'sweet', 'angry', 'serious'],
-  },
 
   // ── 记忆与检索 ──────────────────────────────────────────────
   memoryExtract: {
@@ -470,7 +467,7 @@ export const FEATURES = [
   { id: 'visionVideo', icon: '🎬', title: '识视频', key: 'visionOnVideo', kind: 'bool', desc: '抽帧 + 音轨转写，看懂群里视频', related: ['videoFrames', 'videoDeleteAfterRead'] },
   { id: 'linkVideo', icon: '🔗', title: '链接视频', key: 'linkVideo', kind: 'bool', desc: '抖音/B站/小红书链接下载后看懂', risk: 'warn', related: ['linkVideoProbability'] },
   { id: 'voiceIn', icon: '🎧', title: '语音识别', key: 'voiceOnVoice', kind: 'bool', desc: '群里语音转文字，当普通消息回', related: ['voiceLanguage', 'voiceAutoPrepare'] },
-  { id: 'voiceOut', icon: '🎙', title: '语音发送', key: 'voiceSay', kind: 'bool', desc: '把回复合成微信语音气泡', risk: 'warn', related: ['voiceSayProbability', 'voiceSayEmotion'] },
+  { id: 'voiceOut', icon: '🎙', title: '语音发送', key: 'voiceSay', kind: 'bool', desc: '把回复合成微信语音气泡', risk: 'warn', related: ['voiceSayProbability'] },
   { id: 'sticker', icon: '😄', title: '表情包', key: 'stickerChance', kind: 'chance', defaultChance: 0.22, desc: '文字后补一张图库表情', related: ['genStickerChance'] },
   { id: 'split', icon: '✂️', title: '拆句', key: 'splitChance', kind: 'chance', defaultChance: 0.3, desc: '像真人一样分两三条发', related: ['maxLines'] },
   { id: 'canned', icon: '💤', title: '敷衍回复', key: 'cannedChance', kind: 'chance', defaultChance: 0.1, desc: '少量"哈哈/确实/6"短句', related: [] },

@@ -19,6 +19,7 @@ import http from 'node:http'
 import { execFileSync, spawn } from 'node:child_process'
 import { copyFileSync, existsSync, mkdirSync, writeFileSync, readFileSync, readdirSync, renameSync, rmSync, unlinkSync, statSync } from 'node:fs'
 import { join, dirname } from 'node:path'
+import { mark as fMark } from './forensics.mjs'
 import { tmpdir } from 'node:os'
 
 // ── 高分辨率图片提供者（hires provider）────────────────────────────────────
@@ -307,17 +308,30 @@ export class WeChatHookBridge {
 
   // ── HTTP（发送类接口）───────────────────────────────────────
   async api(path, data, method = 'POST', timeoutMs = 10000) {
+    const t0 = Date.now()
     const ac = new AbortController()
     const t = setTimeout(() => ac.abort(new Error('api timeout')), timeoutMs)
     try {
       const res = await fetch(`http://127.0.0.1:${this.apiPort}${path}`, {
         method,
-        headers: { 'content-type': 'application/json' },
+        headers: { 'content-type': 'application/json', 'connection': 'close' },
         body: method === 'GET' ? undefined : JSON.stringify(data ?? {}),
         signal: ac.signal,
       })
       const text = await res.text()
+      const ms = Date.now() - t0
+      // 取证：只记录路径/耗时/结果（SQL 内容不进日志）
+      // 取证细节：/QueryDB/execute 带上库名（不带 SQL，避免把消息内容写进日志）
+      let extra = ''
+      try {
+        if (path.includes('/QueryDB/execute') && data && data.optDbName) extra = ' [' + String(data.optDbName) + ']'
+        else if (path.includes('/SendTextMsg') && data && data.wxidorgid) extra = ' [to ' + String(data.wxidorgid).slice(0, 20) + ']'
+      } catch { }
+      fMark('api', method + ' ' + path + extra + ' ' + ms + 'ms ' + (res.ok ? 'ok' : 'http' + res.status))
       try { return JSON.parse(text) } catch { return { raw: text } }
+    } catch (e) {
+      fMark('api', method + ' ' + path + ' ' + (Date.now() - t0) + 'ms FAIL ' + String(e?.message || e).slice(0, 60))
+      throw e
     } finally { clearTimeout(t) }
   }
 
@@ -786,7 +800,12 @@ export class WeChatHookBridge {
           //    两个实例抢同一个数据目录 → 客户端崩溃 / 数据库损坏（实测当晚坏过一次）。
           //    要恢复请【人工】启动客户端（正常退出用 CloseMainWindow，别强杀）。
           //    确实需要自动拉起时，显式设 WECHAT_AUTOLAUNCH=1。
-          this.log('检测到客户端已退出（不会自动拉起；如需自动请设 WECHAT_AUTOLAUNCH=1）')
+          // 取证：客户端退出 = 很可能刚崩溃 → 把最近事件快照单独存一份
+    try {
+      const snap = fSnapshot('client-exited')
+      fMark('client-exit', snap ? 'snapshot=' + snap : 'snapshot failed')
+    } catch { }
+    this.log('检测到客户端已退出（不会自动拉起；如需自动请设 WECHAT_AUTOLAUNCH=1）')
           this.loggedIn = false
           this.ready = false
           this._apiDeadSince = 0
@@ -1065,7 +1084,7 @@ export class WeChatHookBridge {
         durationMs: Number(durationMs) || 0,
       }, 'POST', 30_000)
     } catch (e) {
-      this.log('语音：调 /SendVoiceMsg 失败：' + String(e?.message || e).slice(0, 160))
+      this.log('语音：调 /SendVoiceMsg 失败：' + String(e?.message || e).slice(0, 160) + ' | cause=' + (e?.cause ? String(e.cause) : 'none'))
       return { ret: -1, retmsg: String(e?.message || e), diag: null }
     } finally {
       if (asciiCopy) { try { unlinkSync(asciiCopy) } catch { /* ignore */ } }

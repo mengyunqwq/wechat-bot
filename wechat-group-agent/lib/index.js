@@ -39,7 +39,9 @@ try {
   appendFileSync(pf, `[${new Date().toISOString()}] [module] 模块求值开始\n`)
 } catch { /* ignore */ }
 
-export const name = '@dsh-external/dsh-wechat-bot'// Cordis 4.0.4 的 inject 只认**数组**或"服务名→配置"映射；
+export const name = '@dsh-external/dsh-wechat-bot'
+export const version = '1.3.5'
+// Cordis 4.0.4 的 inject 只认**数组**或"服务名→配置"映射；
 // 写成 { required, optional } 会让依赖解析失败、fiber 永远 pending（踩过：改了代码却一直跑旧实例）。
 // 这里只声明必然存在的两个服务；attachments（视觉识别用）改为**惰性获取**，
 // 免得某个作用域取不到它时把整个插件卡在 pending。
@@ -281,10 +283,11 @@ const DEFAULT_CONFIG = {
   // hook 侧还有独立开关（<客户端目录>\hook-voice-send.on 或 POST /Debug/VoiceSend {"on":true}）——
   // 开关没开时 hook 返回 -1001，日志会打清楚原因（不会静默失败）。
   voiceSay: false,                 // 总开关（默认**关**：先自测通过再开）
+  voiceModelOn: true,               // 语音模型：true=常驻（时刻准备）/ false=关闭（省 GPU）
+  voicePreset: '雌小鬼·A（当前）',  // 音色预设（当前用 GPT-SoVITS）
   voiceSayProbability: 0.2,        // 普通回复改成语音的概率
   voiceSayOnVoiceProbability: 0.5, // 收到**语音**消息时用语音回的概率（对称，最像真人）
   voiceSayMaxChars: 60,            // 超过这么多字就发文字（语音太长很怪）
-  voiceSayEmotion: 'main',         // 音色预设：main/sweet/angry/serious
   visionCacheMax: 500,           // 识图结果缓存条数（同一张图只识别一次；超出丢最早的）
   visionProvider: 'opencodego-extra',
   visionModel: 'deepseek-v4-flash-vision-exp',
@@ -481,6 +484,30 @@ const BUILD_VER = '2026-10-23.4'   // 抬版本：让新实例压过热重载残
     return v
   }
 
+  /** 语音模型启停（voiceModelOn）：true=启动 api_v2（常驻），false=杀 api_v2（省 GPU） */
+  function applyModelSwitch(on) {
+    // 用 execSync 同步执行（不依赖 spawn 的 detached）
+    const { execSync } = require('node:child_process')
+    const listCmd = 'wmic process where "name=\'python.exe\' and commandline like \'%api_v2%\'" get processid /format:list'
+    let pids = []
+    try {
+      const out = execSync(listCmd, { encoding: 'utf8', windowsHide: true })
+      pids = (out.match(/ProcessId=(\d+)/g) || []).map((s) => Number(s.split('=')[1]))
+    } catch { /* ignore */ }
+    if (on) {
+      if (pids.length) { log('语音模型：api_v2 已在跑'); return }
+      try {
+        execSync('start "" /B "D:\\Python311\\python.exe" "D:\\微信deepseek\\data\\GPT-SoVITS\\api_v2.py"', {
+          cwd: 'D:\\微信deepseek\\data\\GPT-SoVITS', windowsHide: true, shell: 'cmd.exe',
+        })
+        log('语音模型：api_v2 已启动（常驻）')
+      } catch (e) { log('语音模型：启动失败 ' + String(e?.message || e).slice(0, 100)) }
+    } else {
+      for (const pid of pids) { try { execSync('taskkill /PID ' + pid + ' /F', { stdio: 'ignore', windowsHide: true }) } catch { /* ignore */ } }
+      if (pids.length) log('语音模型：已关闭 api_v2（释放 GPU）')
+    }
+  }
+
   /** 批量应用配置：要么全部通过校验再写，要么一条都不改。 */
   function applyConfigPatch(patch) {
     const applied = []
@@ -503,6 +530,8 @@ const BUILD_VER = '2026-10-23.4'   // 抬版本：让新实例压过热重载残
       if (k === 'quietHours' && quietNext) { quietWindows.length = 0; quietWindows.push(...quietNext) }
     }
     for (const r of rooms.values()) r.policy.cfg = config
+    // voiceModelOn 变化 → 真正启停 api_v2
+    if (next.voiceModelOn !== undefined) { try { applyModelSwitch(next.voiceModelOn) } catch { /* ignore */ } }
     if (applied.length) {
       persistConfig()
       log('配置变更：' + applied.map((x) => x.key + '=' + JSON.stringify(x.value)).join('，'))
@@ -618,6 +647,19 @@ const namesFile = join(dirname(memoryDir), 'members.json')
     } catch { /* ignore */ }
   }
 
+  // ── 取证日志：崩溃/断线前 60 秒做了什么（只写文件，不影响流程）────────
+  let fLogPath = ''
+  function fMark(cat, detail) {
+    try {
+      if (!fLogPath) {
+        const d = join(dirname(memoryDir), 'logs')
+        mkdirSync(d, { recursive: true })
+        fLogPath = join(d, 'forensics.log')
+      }
+      const text = String(typeof detail === 'string' ? detail : JSON.stringify(detail || {})).replace(/[\r\n]+/g, ' ').slice(0, 400)
+      appendFileSync(fLogPath, new Date().toISOString() + '\t' + cat + '\t' + text + '\n')
+    } catch { /* ignore */ }
+  }
   function log(...args) {
     const line = '[' + new Date().toISOString() + '] ' + args.map(String).join(' ')
     try {
@@ -984,6 +1026,7 @@ const namesFile = join(dirname(memoryDir), 'members.json')
   async function handleMsg(m) {
     if (!m || !m.roomId) return
     stats.msgIn++
+    fMark('msg', { room: m.roomId, from: m.senderName || m.sender || '', type: m.typeName || m.type || '', text: String(m.text || '').slice(0, 50), id: m.id || '' })
     lastMsgAt = Date.now()      // 健康自检用它判断"轮询还在不在工作"（收到消息 = 轮询活着）
     const r = roomState(m.roomId, m.roomName)
     r.lastActivityAt = Date.now()      // 主动找话题要判断"群里多久没动静了"
@@ -1455,6 +1498,7 @@ let res = await callLlm(route, sys, usr, undefined)
       : (trigger.imageDesc ? 'image' : detectTrigger(trigger, { aliases: config.aliases, selfNames: r.selfNames }))
     const quiet = isQuiet(quietWindows)
     const d = r.policy.decide({ priority, quiet, text: trigger.text || '' })
+    fMark('decide', { room: r.roomId, priority, reply: d.reply, reason: String(d.reason || '').slice(0, 60) })
     if (!d.reply) {
       // 闲聊概率没命中 → **不再直接跳过**，继续交给模型判断
       // （用户要求：不必每句都回，但每句都要看，由它理解后决定）
@@ -2884,6 +2928,7 @@ let res = await callLlm(route, sys, usr, undefined)
   let lastDeliveredRoom = ''
   async function deliver(r, trigger, priority, reply) {
     const roomId = r.roomId
+    fMark('deliver', { room: roomId, priority, text: String(reply?.text || '').slice(0, 40), sticker: !!reply?.wantSticker, voice: !!reply?.voiceText })
     // 记住"我刚刚回了谁" —— 对方再接话就进对话延续模式（否则会回一句就哑）
     r.lastRepliedSender = trigger.sender
     r.lastRepliedAt = Date.now()
@@ -2932,11 +2977,11 @@ let res = await callLlm(route, sys, usr, undefined)
           let vs = null
           try {
             vs = await client.call('sayVoice', {
-              roomId, text: voiceText, emotion: config.voiceSayEmotion || 'main',
+              roomId, text: voiceText, emotion: 'main',
             }, 150_000)
           } catch (e) { vs = { ok: false, error: String(e?.message || e) } }
           if (vs?.ok) {
-            log(`发语音气泡成功：${vs.bytes} 字节 / ${vs.durationMs}ms（${config.voiceSayEmotion || 'main'}）`)
+            log(`发语音气泡成功：${vs.bytes} 字节 / ${vs.durationMs}ms（main）`)
             stats.sentVoice = (stats.sentVoice || 0) + 1
             ;(r.sentTexts ||= []).push({ text: voiceText, at: Date.now() })
             if (r.sentTexts.length > 40) r.sentTexts = r.sentTexts.slice(-40)
@@ -3099,6 +3144,10 @@ let res = await callLlm(route, sys, usr, undefined)
   // ── 生命周期 ────────────────────────────────────────────────
   ctx.effect(() => {
     client.connect()
+    // 启动时自动打开 hook 语音发送开关（省得每次手动点；hook 默认是关的）
+    setTimeout(() => {
+      try { client.call('voiceSwitch', { on: true }).then(() => log('hook 语音发送开关：已自动打开')).catch(() => {}) } catch { /* ignore */ }
+    }, 3000)
     return () => {
       // 卸载时清掉全局登记（否则下次热重载会去 close 一个已经没用的对象）
       try { if (globalThis.__WECHAT_BOT_CLIENT__ === client) delete globalThis.__WECHAT_BOT_CLIENT__ } catch { /* ignore */ }
@@ -3486,7 +3535,13 @@ let res = await callLlm(route, sys, usr, undefined)
     let pollLevel = 'ok'
     let pollText = idleMin == null ? '还没收到过消息（可能群里一直没人说话）' : `最近一条消息 ${idleMin} 分钟前`
     let pollAdvice = ''
-    if (!dbOk && cs.connected && probeRoom) {
+    // ★ 2026-10-25（B）：硬闸下库照样读得动（探针查 filehelper 能成功），只看 dbOk 会全绿。
+    const hardStopped = !!br?.hardStopped
+    if (hardStopped) {
+      pollLevel = 'bad'
+      pollText += '｜轮询被硬停（客户端不重登就一直哑）'
+      pollAdvice = '面板点"恢复轮询"，或 POST /api/pollResume；根因见 docs/微信机器人-收不到消息-故障分析.md'
+    } else if (!dbOk && cs.connected && probeRoom) {
       pollLevel = 'bad'; pollText += '｜数据库读不到，轮询必然停了'; pollAdvice = '先修 hook/数据库（见上）'
     } else if (wakeMin != null && wakeMin <= 15) {
       pollLevel = 'bad'; pollText += `｜${wakeMin} 分钟前桥喊过"数据库打不开"`; pollAdvice = '桥会自己重试；持续出现说明 message_0.db 打不开'
@@ -4857,7 +4912,7 @@ let res = await callLlm(route, sys, usr, undefined)
         const text = String(a.text ?? '').trim()
         if (!text) throw new Error('text 不能为空')
         const r = await client.call('sayVoice', {
-          roomId: room.roomId, text, emotion: String(a.emotion || config.voiceSayEmotion || 'main'),
+          roomId: room.roomId, text, emotion: String(a.emotion || 'main'),
         }, 90_000)
         if (r?.ok) {
           stats.sentVoice = (stats.sentVoice || 0) + 1
@@ -5095,7 +5150,7 @@ let res = await callLlm(route, sys, usr, undefined)
 
   ctx.effect(() => safeRegister({
     name: 'wechat_bot_config',
-    description: '读取或实时修改微信机器人的拟人参数（无需重启）。key 留空 = 查看全部；给了 value = 修改。可改：enabled/dryRun/persona/replyProbability/minReplyGapMs/maxRepliesPer10Min/quietHours/stickerChance/splitChance/botName/rooms/temperature/voiceOnVoice/voiceSay/voiceSayProbability/voiceSayOnVoiceProbability/voiceSayMaxChars/voiceSayEmotion/healthAlert/healthAlertQuietMs/healthCheckMs/videoDeleteAfterRead/videoUpgradeDelayMs/videoFrames/linkVideo/linkVideoProbability/linkVideoMaxSeconds/linkVideoMaxMB/linkVideoCooldownMs/linkVideoTimeoutMs/linkVideoFrames。',
+    description: '读取或实时修改微信机器人的拟人参数（无需重启）。key 留空 = 查看全部；给了 value = 修改。可改：enabled/dryRun/persona/replyProbability/minReplyGapMs/maxRepliesPer10Min/quietHours/stickerChance/splitChance/botName/rooms/temperature/voiceOnVoice/voiceSay/voiceSayProbability/voiceSayOnVoiceProbability/voiceSayMaxChars/healthAlert/healthAlertQuietMs/healthCheckMs/videoDeleteAfterRead/videoUpgradeDelayMs/videoFrames/linkVideo/linkVideoProbability/linkVideoMaxSeconds/linkVideoMaxMB/linkVideoCooldownMs/linkVideoTimeoutMs/linkVideoFrames。',
     parameters: {
       type: 'object',
       properties: {

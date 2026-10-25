@@ -908,7 +908,9 @@ function renderFeatures() {
         <div class="top"><div class="ico">${f.icon}</div><div class="grow">
           <div class="t">${esc(f.title)} ${risk ? `<span class="risk ${risk==='critical'?'critical':''}">${risk==='critical'?'高危':risk==='high'?'高风险':'注意'}</span>` : ''}</div>
           <div class="d">${esc(f.desc)}</div></div>
-          <label class="sw"><input type="checkbox" data-feature="${f.id}" ${on ? 'checked' : ''}><i></i></label>
+          ${f.kind === 'select'
+            ? `<select data-select="${f.id}" style="padding:4px">${(f.options||[]).map(o => `<option ${S.config[f.key]===o?'selected':''}>${esc(o)}</option>`).join('')}</select>`
+            : `<label class="sw"><input type="checkbox" data-feature="${f.id}" ${on ? 'checked' : ''}><i></i></label>`}
         </div>
         <div class="small muted" style="margin-top:8px">${f.kind === 'chance'
           ? '概率 ' + pct(S.config[f.key]) + (S.config[f.key] ? '' : '（关）')
@@ -938,6 +940,23 @@ function renderFeatures() {
       } catch (e) {
         S.config[f.key] = old;
         el.checked = !on;
+        toast('保存失败：' + e.message, 'err');
+      }
+    };
+  });
+  // 音色下拉（select）
+  $$('select[data-select]').forEach(el => {
+    el.onchange = async () => {
+      const f = feats.find(x => x.id === el.dataset.select);
+      if (!f) return;
+      const v = el.value;
+      const old = S.config[f.key];
+      S.config[f.key] = v;
+      try {
+        await api('/config', { method:'POST', body: JSON.stringify({ patch: { [f.key]: v } }) });
+        toast('已切换：' + f.title + ' → ' + v, 'ok');
+      } catch (e) {
+        S.config[f.key] = old;
         toast('保存失败：' + e.message, 'err');
       }
     };
@@ -1339,14 +1358,34 @@ async function loadMembers() {
 /* ── 运维 ─────────────────────────────────────────────── */
 async function renderVoiceExtra() {
   const box = $('#voice-extra'); if (!box) return;
-  box.innerHTML = `<div class="section"><div class="hd">🔌 hook 语音发送开关</div>
-    <div class="row"><button class="btn" id="btn-voice-q">查询状态</button>
-      <button class="btn primary" id="btn-voice-on">打开</button>
-      <span id="voice-state" class="muted small">查询中…</span></div>
-    <div class="small muted" style="margin-top:8px">voiceSay 打开但这里没开时，hook 会返回 -1001，机器人会自动降级发文字。</div></div>`;
-  $('#btn-voice-q').onclick = () => voiceSwitch();
-  $('#btn-voice-on').onclick = () => voiceSwitch(true);
-  voiceSwitch();
+  const cfg = App.S.config || {};
+  const modelOn = cfg.voiceModelOn !== false;
+  const preset = cfg.voicePreset || '雌小鬼·A（当前）';
+  const PRESETS = ['雌小鬼·A（当前）','雌小鬼·B','雌小鬼·C','雌小鬼·D','训练版（12轮）'];
+  box.innerHTML = `<div class="section"><div class="hd">🧠 语音模型</div>
+    <div class="row"><label class="sw"><input type="checkbox" id="voice-model-sw" ${modelOn ? 'checked' : ''}><i></i></label>
+      <span id="voice-model-state" class="muted small">${modelOn ? '常驻（时刻准备）' : '已关闭（省 GPU）'}</span></div>
+    <div class="small muted" style="margin-top:8px">开=模型常驻（2 秒出语音）；关=释放模型（省 4GB GPU，开时需加载 15 秒）。</div></div>
+
+    <div class="section"><div class="hd">🎭 音色预设</div>
+    <div class="row"><select id="voice-preset" style="padding:4px">${PRESETS.map(o => `<option ${o===preset?'selected':''}>${esc(o)}</option>`).join('')}</select>
+      <span class="muted small">切换后立即生效</span></div></div>
+`;
+  $('#voice-preset').onchange = async (e) => {
+    const v = e.target.value;
+    try {
+      await api('/config', { method:'POST', body: JSON.stringify({ patch: { voicePreset: v } }) });
+      toast('音色已切换：' + v, 'ok');
+    } catch (err) { toast('失败：' + err.message, 'err'); }
+  };
+  $('#voice-model-sw').onchange = async (e) => {
+    const on = e.target.checked;
+    try {
+      await api('/config', { method:'POST', body: JSON.stringify({ patch: { voiceModelOn: on } }) });
+      $('#voice-model-state').textContent = on ? '常驻（时刻准备）' : '已关闭（省 GPU）';
+      toast(on ? '语音模型：已开启（常驻）' : '语音模型：已关闭（省 GPU）', 'ok');
+    } catch (err) { e.target.checked = !on; toast('失败：' + err.message, 'err'); }
+  };
 }
 
 async function voiceSwitch(on) {
