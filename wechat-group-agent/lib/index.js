@@ -41,7 +41,7 @@ try {
 } catch { /* ignore */ }
 
 export const name = '@dsh-external/dsh-wechat-bot'
-export const version = '1.3.7'
+export const version = '1.3.8'
 // Cordis 4.0.4 的 inject 只认**数组**或"服务名→配置"映射；
 // 写成 { required, optional } 会让依赖解析失败、fiber 永远 pending（踩过：改了代码却一直跑旧实例）。
 // 这里只声明必然存在的两个服务；attachments（视觉识别用）改为**惰性获取**，
@@ -4148,7 +4148,11 @@ let res = await callLlm(route, sys, usr, undefined)
     }
     versionDiag.file = ''
     versionDiag.errors = errs
-    return { version: '0.0.0', notes: '', releasedAt: '' }
+    // ★ 2026-10-25 第二次修：所有候选都读不到时**必须**回插件自身的版本常量。
+    //   之前这里返回 '0.0.0'，而 checkUpdate 的失败分支是 `localVersion: readLocalVersion().version`
+    //   → 网络一抖（GitHub 限流 / CDN 超时）面板就显示 v0.0.0。
+    //   那台机器「仓库最新 1.3.7」来自上次成功的缓存，本地却是 0.0.0，就是这个组合。
+    return { version, notes: '', releasedAt: '' }
   }
   async function readRepoVersion() {
     // ★ 2026-10-23：GitHub 匿名 API 有 60 次/小时限流，超了直接 403（今天实测）。
