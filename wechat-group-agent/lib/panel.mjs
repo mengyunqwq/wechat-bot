@@ -294,7 +294,13 @@ export function setupPanel(ctx, api) {
 
         if (sub === '/action') {
           const op = String(body?.op || '')
-          if (!ALLOWED_OPS.has(op)) return json(res, 400, { ok: false, error: '不允许的操作：' + op })
+          if (!ALLOWED_OPS.has(op)) {
+            return json(res, 400, {
+              ok: false,
+              error: '不允许的操作：' + op,
+              hint: '如果刚更新过插件：面板 HTML 会立刻变新，但插件代码要「重启 DSH」或点「诊断 → 热重载插件」才生效（不是重启微信）',
+            })
+          }
           if (HIGH_RISK_OPS.has(op) && body?.confirm !== op) {
             return json(res, 400, { ok: false, error: `高风险操作需要 confirm:"${op}"` })
           }

@@ -42,7 +42,7 @@ try {
 } catch { /* ignore */ }
 
 export const name = '@dsh-external/dsh-wechat-bot'
-export const version = '1.4.0'
+export const version = '1.4.1'
 // Cordis 4.0.4 的 inject 只认**数组**或"服务名→配置"映射；
 // 写成 { required, optional } 会让依赖解析失败、fiber 永远 pending（踩过：改了代码却一直跑旧实例）。
 // 这里只声明必然存在的两个服务；attachments（视觉识别用）改为**惰性获取**，
@@ -5398,23 +5398,38 @@ let res = await callLlm(route, sys, usr, undefined)
           if (!loadCache || typeof loadCache.keys !== 'function') {
             return { ok: false, error: 'loader.internal.loadCache 不可用（宿主版本不支持）' }
           }
+          // ★ 2026-10-26：原来只清 index.js 的缓存 → panel.mjs 等被 import 的模块
+          //   仍然命中旧缓存，于是「热重载后 ALLOWED_OPS 还是旧的」（用户实测：
+          //   更新后调 momentStatus 报「不允许的操作」，重启 DSH 才正常）。
+          //   现在把本插件 lib/ 下**所有**模块的缓存都清掉，整张模块图重新求值。
+          const ownUrls = []
           let url = null
           for (const u of loadCache.keys()) {
             if (typeof u !== 'string') continue
-            if (decodeURIComponent(u).includes('wechat-group-agent/lib/index.js')) { url = u; break }
+            const d = decodeURIComponent(u)
+            if (!d.includes('wechat-group-agent/lib/')) continue
+            ownUrls.push(u)
+            if (d.includes('wechat-group-agent/lib/index.js')) url = u
           }
           if (!url) return { ok: false, error: 'loadCache 里找不到自己的模块（可能刚启动还没缓存）' }
-          const oldJob = loadCache.get(url)
-          Map.prototype.delete.call(loadCache, url)
+          const oldJobs = new Map()
+          for (const u of ownUrls) {
+            oldJobs.set(u, loadCache.get(u))
+            Map.prototype.delete.call(loadCache, u)
+          }
+          const restoreAll = () => {
+            for (const [u, job] of oldJobs) if (job) loadCache.set(u, job)
+          }
+          const oldJob = oldJobs.get(url)
           let fresh = null
           try {
             fresh = ctx.loader.unwrapExports(await ctx.loader.import(url, () => []))
           } catch (e) {
-            if (oldJob) loadCache.set(url, oldJob)
+            restoreAll()
             return { ok: false, error: '新代码 import 失败（旧代继续运行）：' + String(e?.message || e).slice(0, 200) }
           }
           if (!fresh || (typeof fresh !== 'function' && typeof fresh.apply !== 'function')) {
-            if (oldJob) loadCache.set(url, oldJob)
+            restoreAll()
             return { ok: false, error: '新代码导出无效（缺 apply），已取消，旧代继续运行' }
           }
           // 预检通过 → 延迟替换（先把 HTTP 响应送回面板，避免请求被自己掐断）
