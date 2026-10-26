@@ -1634,6 +1634,7 @@ async function renderMomentExtra() {
       <button class="btn primary" id="moment-ai">🤖 让 AI 写一条并发布</button>
       <button class="btn" id="moment-ai-img">🖼 AI 写 + 配图发布</button>
       <button class="btn" id="moment-check">检查微信窗口</button>
+      <button class="btn" id="moment-judge" title="拿最近群聊让 AI 判一次，只显示结果不发布">🔍 试评估</button>
       <span class="small muted" id="moment-st">读取状态…</span>
     </div>
     <textarea id="moment-text" rows="4" placeholder="或者自己写一条…（最多 1500 字）"
@@ -1647,6 +1648,7 @@ async function renderMomentExtra() {
       <span class="small muted" id="moment-count">0 字</span>
     </div>
   </div>
+  <div class="section" id="moment-judge-box" style="display:none"><div class="hd">🔍 试评估结果 <span class="muted">（不会发布）</span></div><div id="moment-judge-out" class="small"></div></div>
   <div class="section"><div class="hd">📈 发布记录</div><div id="moment-hist"><div class="empty">读取中…</div></div></div>`;
 
   const st = $('#moment-st');
@@ -1672,7 +1674,11 @@ async function renderMomentExtra() {
         : '⚠️ hook 未连接';
       const nextIn = s2.nextAt ? Math.max(0, s2.nextAt - Date.now()) : 0;
       const rows = [
-        ['自动发布', r.auto ? '✅ 已开启' : '⏸ 已关闭'],
+        ['定时发布', r.auto ? '✅ 已开启' : '⏸ 已关闭'],
+        ['群聊事件触发', r.fromChat
+          ? ('✅ 开（门槛 ' + (r.chatMinScore || 7) + ' 分 · ' +
+             ((r.chatRooms && r.chatRooms.length) ? (r.chatRooms.length + ' 个群') : '所有群') + '）')
+          : '⏸ 关'],
         ['AI 写文案', r.useLLM ? '是' : '否（用内置句子）'],
         ['配图', r.autoImage
           ? ('✅ 开（' + (r.imageSource === 'char' ? '蓝色大肥鱼本人' : r.imageSource === 'ai' ? 'AI 文生图' : '网上随机动漫图') + '）')
@@ -1682,7 +1688,13 @@ async function renderMomentExtra() {
         ['允许时段', r.hours || '不限'],
         ['今日已发', (s2.todayCount || 0) + ' 条'],
         ['下次预计', r.auto ? (nextIn ? ('约 ' + fmtGap(nextIn) + '后') : '下一次检查时') : '—'],
-        ['上次', s2.lastAt ? (fmtTime(s2.lastAt) + ' · ' + (s2.lastVerified ? '✅ 已发布' : (s2.lastErr ? '❌ ' + s2.lastErr : '—'))) : '还没发过'],
+        ['上次', s2.lastAt
+          ? (fmtTime(s2.lastAt)
+             + ' · ' + (s2.lastVerified ? '✅ 已发布' : (s2.lastErr ? '❌ ' + s2.lastErr : '—'))
+             + (s2.lastTrigger === 'chat'
+                ? (' ｜ 群聊触发 ' + (s2.lastScore ? s2.lastScore + ' 分' : '') + (s2.lastRoom ? ' · ' + s2.lastRoom : ''))
+                : (s2.lastTrigger === 'schedule' ? ' ｜ 定时' : '')))
+          : '还没发过'],
       ];
       hist.innerHTML = `<div class="list">${rows.map(([k, v]) =>
         `<div class="item"><span class="muted">${esc(k)}</span><span>${esc(String(v))}</span></div>`).join('')}
@@ -1701,6 +1713,29 @@ async function renderMomentExtra() {
   }
 
   $('#moment-check').onclick = () => { st.textContent = '检查中…'; refresh() };
+
+  $('#moment-judge').onclick = async () => {
+    const btn = $('#moment-judge');
+    const box = $('#moment-judge-box'), out = $('#moment-judge-out');
+    btn.disabled = true; btn.textContent = '判定中…';
+    try {
+      const r = await api('/action', { method: 'POST', body: JSON.stringify({ op: 'momentEvalTest', args: {} }) });
+      box.style.display = '';
+      if (!r.ok) { out.innerHTML = '<span style="color:#c00">' + esc(r.error || '失败') + '</span>'; return; }
+      const v = r.verdict || {};
+      const good = v.worthy && (v.score || 0) >= (r.threshold || 7);
+      out.innerHTML =
+        '<div><b>' + esc(r.room || '') + '</b> · 看 ' + r.messages + ' 条 · 门槛 ' + r.threshold + ' 分</div>' +
+        '<div style="margin:6px 0;font-size:15px">' +
+          (good ? '<span style="color:#0a0">✅ 值得发</span>' : '<span style="color:#888">⏸ 不值得</span>') +
+          ' · 评分 <b>' + (v.score || 0) + '</b> / 10</div>' +
+        (v.text ? '<div style="margin:6px 0;padding:8px 10px;background:#f6f6f8;border-radius:8px">文案：' + esc(v.text) + '</div>' : '') +
+        (v.reason ? '<div class="muted">理由：' + esc(v.reason) + '</div>' : '') +
+        '<div class="muted" style="margin-top:6px">本次是否会真的发：' + (r.wouldPost ? '会' : '不会') +
+          (r.gate && !r.gate.ok ? '（' + esc(r.gate.why) + '）' : '') + '</div>';
+    } catch (e) { toast('试评估失败：' + e.message, 'err') }
+    finally { btn.disabled = false; btn.textContent = '🔍 试评估' }
+  };
 
   $('#moment-ai').onclick = async () => {
     const btn = $('#moment-ai');

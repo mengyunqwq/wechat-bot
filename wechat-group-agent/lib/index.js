@@ -42,7 +42,7 @@ try {
 } catch { /* ignore */ }
 
 export const name = '@dsh-external/dsh-wechat-bot'
-export const version = '1.4.3'
+export const version = '1.4.4'
 // Cordis 4.0.4 的 inject 只认**数组**或"服务名→配置"映射；
 // 写成 { required, optional } 会让依赖解析失败、fiber 永远 pending（踩过：改了代码却一直跑旧实例）。
 // 这里只声明必然存在的两个服务；attachments（视觉识别用）改为**惰性获取**，
@@ -459,6 +459,13 @@ const DEFAULT_CONFIG = {
   momentImageSource: 'char',     // 配图来源：char=蓝色大肥鱼本人(i2i) | web=网上随机动漫图 | ai=文生图
   momentImageStyle: '生活感照片，真实质感，自然光，构图干净，竖构图也行；不要任何文字、水印、logo',
   momentImageRatio: '4:3',       // 生图画幅
+  // ── 群聊事件触发（2026-10-26）：不是按时间发，而是"群里遇到好玩的事才发" ──
+  momentFromChat: false,          // 开关：群聊里遇到值得记的瞬间 → 自己发一条
+  momentChatMinScore: 7,          // LLM 打分门槛（1~10，越高越挑剔）
+  momentChatLookback: 25,         // 评估时看最近多少条消息
+  momentChatDebounceMs: 90_000,   // 群里安静多久后才评估（等对话自然停下，避免打断）
+  momentChatCooldownMs: 1_800_000,// 同一个群两次评估的最小间隔（30 分钟）
+  momentChatRooms: [],            // 只看这些群（空 = 所有接入的群）
   // 记忆与日志
   contextMessages: 24,
   historyLookup: true,             // 群里提起以前的事时，从微信数据库翻历史（本地查询，0 token）
@@ -1306,6 +1313,9 @@ const namesFile = join(dirname(memoryDir), 'members.json')
     }
 
     push(r, m)
+
+    // ★ 群聊事件触发朋友圈：有人说话就安排一次"安静后评估"（防抖/冷却/额度都在内部判）
+    try { scheduleChatMomentEval(r) } catch (e) { log('朋友圈事件调度异常：' + String(e?.message || e)) }
 
     if (!config.enabled) return
     if (!m.isGroup && !config.allowPrivate) return
@@ -3558,7 +3568,8 @@ let res = await callLlm(route, sys, usr, undefined)
       momentState.lastRet = r.ret
       momentState.lastErr = r.ok ? '' : (r.error || ('ret=' + r.ret))
       momentState.lastVerified = verified ? 1 : 0
-      if (r.ok) momentState.dayCount += 1
+      momentState.lastTrigger = 'schedule'
+      if (r.ok) { momentState.dayCount += 1; rememberMomentText(text) }
       planNextMoment(Date.now())
       saveMomentState()
       log(`朋友圈：${r.ok ? '已发布' : '失败'} verified=${momentState.lastVerified} ret=${r.ret}`)
@@ -3591,6 +3602,183 @@ let res = await callLlm(route, sys, usr, undefined)
     }, Math.max(60_000, Number(config.momentCheckMs) || 300_000))
     return () => { clearTimeout(first); clearInterval(iv) }
   }, SHORT + ': moment loop')
+
+  // ══════════════════════════════════════════════════════════════════════════
+  //  群聊事件触发朋友圈（2026-10-26）
+  //
+  //  思路：定时发是"到点硬发"，容易尬。改成**听群聊**——
+  //  群里出现好笑的梗/名场面/温情时刻时，让 LLM 判断值不值得发，值得才发。
+  //
+  //  三层闸门（都是硬约束，防止刷屏）：
+  //    ① 防抖：群里安静 momentChatDebounceMs 后才评估（等对话停下来）
+  //    ② 冷却：同群两次评估间隔 >= momentChatCooldownMs
+  //    ③ 额度：沿用全局 —— 允许时段 / 每天上限 / 与上一条的最小间隔
+  //  另外去重：和最近发过的文案太像就跳过（避免同一件事反复发）
+  // ══════════════════════════════════════════════════════════════════════════
+  const chatMomentCooldown = new Map()   // roomId → { lastEvalAt, timer }
+
+  function momentQuotaGate() {
+    const now = Date.now()
+    const day = momentDayKey(now)
+    if (momentState.dayKey !== day) { momentState.dayKey = day; momentState.dayCount = 0 }
+    if (!inMomentHours()) return { ok: false, why: '不在允许时段' }
+    const cap = Math.max(1, Number(config.momentDailyMax) || 2)
+    if (momentState.dayCount >= cap) return { ok: false, why: '今天已经发够（' + momentState.dayCount + '/' + cap + '）' }
+    const gap = Math.max(60_000, Number(config.momentMinGapMs) || 6 * 3600_000)
+    if (momentState.lastAt && now - momentState.lastAt < gap) {
+      return { ok: false, why: '距上一条不足 ' + Math.round(gap / 60000) + ' 分钟' }
+    }
+    return { ok: true }
+  }
+
+  function chatMomentGate(roomId) {
+    if (!config.momentFromChat) return { ok: false, why: '事件触发未开启' }
+    const only = Array.isArray(config.momentChatRooms) ? config.momentChatRooms : []
+    if (only.length && !only.includes(roomId)) return { ok: false, why: '群不在名单里' }
+    return momentQuotaGate()
+  }
+
+  function normMomentText(t) {
+    return String(t || '').replace(/[\s\p{P}\p{S}]/gu, '')
+  }
+
+  function isDupMomentText(t) {
+    const a = normMomentText(t)
+    if (!a) return true
+    const prev = Array.isArray(momentState.recentTexts) ? momentState.recentTexts : []
+    for (const p of prev) {
+      const b = normMomentText(p)
+      if (!b) continue
+      if (a === b || a.includes(b) || b.includes(a)) return true
+      const setB = new Set(b)
+      let hit = 0
+      const setA = new Set(a)
+      for (const ch of setA) if (setB.has(ch)) hit++
+      if (hit / Math.max(1, setA.size) > 0.72) return true
+    }
+    return false
+  }
+
+  function rememberMomentText(t) {
+    const prev = Array.isArray(momentState.recentTexts) ? momentState.recentTexts : []
+    momentState.recentTexts = [...prev, t].slice(-8)
+  }
+
+  /** 消息进来时调用：安排一次延迟评估（同群只挂一个定时器） */
+  function scheduleChatMomentEval(r) {
+    if (!config.momentFromChat || !config.enabled) return
+    if (!r || !r.roomId) return
+    const st = chatMomentCooldown.get(r.roomId) || {}
+    if (st.timer) return                                  // 已经在等，重新计时不必要
+    const cd = Math.max(60_000, Number(config.momentChatCooldownMs) || 1_800_000)
+    if (st.lastEvalAt && Date.now() - st.lastEvalAt < cd) return
+    const delay = Math.max(15_000, Number(config.momentChatDebounceMs) || 90_000)
+    st.timer = track(setTimeout(() => {
+      st.timer = null
+      void evalChatForMoment(r).catch((e) => log('朋友圈事件评估异常：' + String(e?.message || e).slice(0, 160)))
+    }, delay))
+    chatMomentCooldown.set(r.roomId, st)
+  }
+
+  /** 让 LLM 判断一段群聊值不值得发朋友圈；返回 {worthful, score, text, reason} 或 {error} */
+  async function judgeChatMomentBar(transcript, minScore = 7) {
+    const sys = [
+      `你在替「${config.botName || '大肥鱼'}」判断：下面这段群聊里，有没有值得发朋友圈的瞬间。`,
+      '值得发的：好笑的梗、名场面、大家的糗事、突然的温情/共鸣、群友说的金句。',
+      '不值得发的：日常寒暄、单纯提问、互相@没内容、只有指令、广告、纯表情、私人信息。',
+      '要发的话，写成第一人称短文案（40 字以内，口语化，不加引号，不提"朋友圈"，不点名群友，可用"某人"）。',
+      '严格只输出一行 JSON：{"worthy":true,"score":0,"text":"文案","reason":"一句话理由"}',
+    ].join('\n')
+    let raw = ''
+    try {
+      const { text } = await callLlm(resolveRoute(), sys, transcript, config.reasoningEffort || undefined)
+      raw = String(text || '')
+    } catch (e) {
+      return { error: 'LLM 调用失败：' + String(e?.message || e).slice(0, 120) }
+    }
+    try {
+      const mm = raw.match(/\{[\s\S]*\}/)
+      const j = JSON.parse(mm ? mm[0] : raw)
+      return {
+        worthy: !!j.worthy,
+        score: Number(j.score) || 0,
+        text: String(j.text || '').trim().replace(/^["'「『]|["'」』]$/g, '').slice(0, 200),
+        reason: String(j.reason || '').slice(0, 80),
+        minScore,
+        raw: raw.slice(0, 300),
+      }
+    } catch {
+      return { error: '返回不是 JSON：' + raw.slice(0, 120) }
+    }
+  }
+
+  /** 让 LLM 判断这段群聊值不值得发朋友圈 */
+  async function evalChatForMoment(r) {
+    const st = chatMomentCooldown.get(r.roomId) || {}
+    st.lastEvalAt = Date.now()
+    chatMomentCooldown.set(r.roomId, st)
+
+    const gate = chatMomentGate(r.roomId)
+    if (!gate.ok) return                                  // 额度/时段/开关不满足，静默跳过
+
+    if (momentBusy) { log('朋友圈：正在发上一条，跳过本次事件评估'); return }
+
+    const look = Math.max(8, Math.min(60, Number(config.momentChatLookback) || 25))
+    const msgs = (r.msgs || []).slice(-look).filter((x) => x && x.text)
+    if (msgs.length < 4) return                            // 太短的对话不评估
+
+    const transcript = msgs
+      .map((x) => (x.isSelf ? '我' : (x.senderName || '群友')) + '：' + String(x.text).slice(0, 120))
+      .join('\n')
+    const minScore = Math.max(1, Math.min(10, Number(config.momentChatMinScore) || 7))
+
+    let j = null
+    try {
+      j = await judgeChatMomentBar(transcript, minScore)
+    } catch (e) {
+      log('朋友圈事件：LLM 调用失败 ' + String(e?.message || e).slice(0, 120))
+      return
+    }
+    if (!j || j.error) { log('朋友圈事件：评估失败 ' + String(j?.error || '').slice(0, 120)); return }
+    const score = Number(j.score) || 0
+    const reason = String(j.reason || '').slice(0, 60)
+    if (!j.worthy || score < minScore) {
+      log(`朋友圈事件：不值得（score=${score}/${minScore}）${reason}`)
+      return
+    }
+    const draft = String(j.text || '').trim().replace(/^["'「『]|["'」』]$/g, '').slice(0, 200)
+    if (!draft) { log('朋友圈事件：worthy 但文案为空，跳过'); return }
+    if (isDupMomentText(draft)) { log('朋友圈事件：和最近发过的太像，跳过：「' + draft.slice(0, 24) + '」'); return }
+
+    log(`朋友圈事件：值得发（score=${score}）${reason} → 「${draft.slice(0, 30)}」`)
+    momentBusy = true
+    try {
+      let images = []
+      if (config.momentAutoImage) {
+        log('朋友圈：正在生成配图（图生图，锁角色）…')
+        const g = await pickMomentImg(draft)
+        if (g.ok) images = [g.file]
+        else log(`朋友圈：配图失败（${g.error}），改发纯文字`)
+      }
+      const res = await postMomentNow(draft, images)
+      const ok = !!res.ok
+      momentState.lastAt = Date.now()
+      momentState.lastText = draft
+      momentState.lastRet = res.ret
+      momentState.lastErr = ok ? '' : (res.error || ('ret=' + res.ret))
+      momentState.lastVerified = ok ? 1 : 0
+      momentState.lastTrigger = 'chat'
+      momentState.lastScore = score
+      momentState.lastReason = reason
+      momentState.lastRoom = r.roomName || r.roomId
+      if (ok) { momentState.dayCount += 1; rememberMomentText(draft) }
+      planNextMoment(Date.now())
+      saveMomentState()
+      log(`朋友圈（群聊触发｜${r.roomName || r.roomId}｜score=${score}）：${ok ? '已发布' : '失败'} ret=${res.ret}`)
+    } finally {
+      momentBusy = false
+    }
+  }
 
   // 自动更新：启动 40 秒后查一次（避开插件初始化高峰），之后每 24 小时一次。
   // 只检查、不自动装 —— 面板会弹提示，用户点「立即更新」才动文件。
@@ -5087,6 +5275,41 @@ let res = await callLlm(route, sys, usr, undefined)
         log(`[postMoment] ret=${r.ret} verified=${momentState.lastVerified} len=${text.length}`)
         return { ok: r.ok, ret: r.ret, diag: r.diag, text }
       }
+      case 'momentEvalTest': {
+        // 试评估：拿某个群最近的聊天让 AI 判断一次，**只返回结果，不发布**
+        // 用途：调门槛 / 看它会不会乱发 / 验证 LLM 判定链路
+        const roomId = String(a.room || '')
+        let r = roomId ? rooms.get(roomId) : null
+        if (!r) {
+          // 没指定群就挑最近最活跃的一个
+          let best = null
+          for (const x of rooms.values()) {
+            if (!x.msgs || !x.msgs.length) continue
+            if (!best || (x.lastActivityAt || 0) > (best.lastActivityAt || 0)) best = x
+          }
+          r = best
+        }
+        if (!r) return { ok: false, error: '还没有可评估的群聊记录（先让群里聊几句）' }
+        const look = Math.max(8, Math.min(60, Number(config.momentChatLookback) || 25))
+        const msgs = (r.msgs || []).slice(-look).filter((x) => x && x.text)
+        if (msgs.length < 4) return { ok: false, error: '这个群记录太少（' + msgs.length + ' 条），至少 4 条' }
+        const transcript = msgs
+          .map((x) => (x.isSelf ? '我' : (x.senderName || '群友')) + '：' + String(x.text).slice(0, 120))
+          .join('\n')
+        const minScore = Math.max(1, Math.min(10, Number(config.momentChatMinScore) || 7))
+        const j = await judgeChatMomentBar(transcript, minScore)
+        const gate = momentQuotaGate()
+        return {
+          ok: !j.error,
+          room: r.roomName || r.roomId,
+          messages: msgs.length,
+          verdict: j,
+          // 就算 worthy，真实发送还要过这些闸门
+          wouldPost: !!(!j.error && j.worthy && (Number(j.score) || 0) >= minScore && gate.ok),
+          gate,
+          threshold: minScore,
+        }
+      }
       case 'momentNow': {
         // 让 AI 自己写一条并立刻发（不用等排期）
         // args.image === true 时强制生成配图；=== false 时强制纯文字；不传则看开关
@@ -5114,6 +5337,9 @@ let res = await callLlm(route, sys, usr, undefined)
           hours: config.momentHours || '',
           useLLM: !!config.momentUseLLM,
           autoImage: !!config.momentAutoImage,
+          fromChat: !!config.momentFromChat,
+          chatMinScore: Number(config.momentChatMinScore) || 7,
+          chatRooms: Array.isArray(config.momentChatRooms) ? config.momentChatRooms : [],
           imageSource: config.momentImageSource || 'char',
           imageStyle: config.momentImageStyle || '',
           imageRatio: config.momentImageRatio || '4:3',
@@ -5127,6 +5353,10 @@ let res = await callLlm(route, sys, usr, undefined)
             dayKey: momentState.dayKey || '',
             todayCount: momentState.dayKey === momentDayKey() ? momentState.dayCount : 0,
             lastText: momentState.lastText || '',
+            lastTrigger: momentState.lastTrigger || '',
+            lastScore: momentState.lastScore || 0,
+            lastReason: momentState.lastReason || '',
+            lastRoom: momentState.lastRoom || '',
             lastRet: momentState.lastRet,
             lastErr: momentState.lastErr || '',
             lastVerified: momentState.lastVerified || 0,

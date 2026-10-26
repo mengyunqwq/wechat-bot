@@ -147,6 +147,25 @@ export const CONFIG_META = {
   momentImageRatio: {
     group: 'moment', label: '配图画幅', type: 'enum', options: ['1:1', '4:3', '3:4', '16:9', '9:16'],
   },
+  momentFromChat: {
+    group: 'moment', label: '群聊事件触发', type: 'bool',
+    help: '开启后：群里出现好玩的梗/名场面/温情时刻，AI 判断值得才发（比定时更自然）',
+  },
+  momentChatMinScore: {
+    group: 'moment', label: '事件门槛（越高越挑）', type: 'number', min: 1, max: 10, step: 1, unit: '分',
+  },
+  momentChatLookback: {
+    group: 'moment', label: '评估看多少条消息', type: 'number', min: 8, max: 60, step: 1, unit: '条',
+  },
+  momentChatDebounceMs: {
+    group: 'moment', label: '群里安静多久再评估', type: 'number', min: 15000, max: 600000, step: 15000, unit: 'ms',
+  },
+  momentChatCooldownMs: {
+    group: 'moment', label: '同群评估冷却', type: 'number', min: 300000, max: 21600000, step: 300000, unit: 'ms',
+  },
+  momentChatRooms: {
+    group: 'moment', label: '只看这些群（空=全部）', type: 'csv',
+  },
   proactiveQuietMs: {
     group: 'proactive', label: '安静多久才考虑', type: 'number', min: 60000, max: 86400000, step: 60000, unit: 'ms',
   },

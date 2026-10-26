@@ -33,6 +33,7 @@ const ALLOWED_OPS = new Set([
   'wechatPower',
   // 2026-10-26：发朋友圈（hook 内 /Moment/Post，进程内自动操作）
   'postMoment', 'momentStatus', 'momentNow',
+  'momentEvalTest',   // 试评估：拿群聊让 AI 判一次，不发布（调门槛用）
   'selfReload', 'pollStatus', 'pollResume',   // ★ 2026-10-26：诊断页的「热重载插件」「恢复轮询」按钮，原来没进白名单，点了必报「不允许的操作」
 ])
 
