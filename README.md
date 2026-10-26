@@ -1,307 +1,238 @@
-# 微信机器人
+# 微信拟人化群聊机器人
 
-把微信变成一个**有性格、有记忆、会发表情包、看得懂图/视频/语音、还能发真语音**的群聊机器人。带一个 **Web 控制面板**，也提供 **MCP / WebSocket / HTTP** 三种接口给任意 AI agent 驱动。
+一个跑在本机的微信群聊机器人：**实时收消息 → 按拟人策略决定要不要回 → LLM 生成口语化回复 → 像真人一样延迟发送**，并能在群里发表情包。
 
-[![Node](https://img.shields.io/badge/node-%E2%89%A518-brightgreen)](https://nodejs.org)
-[![Python](https://img.shields.io/badge/python-%E2%89%A53.10-blue)](https://www.python.org)
-[![WeChat](https://img.shields.io/badge/WeChat-4.1.10.27%20x64-green)]()
-[![Version](https://img.shields.io/badge/version-1.3.3-blue)]()
-[![License](https://img.shields.io/badge/license-MIT-lightgrey)](LICENSE)
-
-> ⚠️ **动手改部署前请先读 [docs/OPERATIONS-RULES.md](docs/OPERATIONS-RULES.md)**
-> —— 记着「为什么不能强杀微信 / 为什么不能自动拉起客户端 / 为什么看门狗只做进程内自愈」，每条都是真实事故换来的。
-
----
-
-## 📦 成品包下载（推荐，不会编译也能装）
-
-**获取方式（二选一）**：
-
-- **克隆仓库即得**：成品就在仓库的 `release/` 目录里（`git clone` 后直接用，无需下载额外附件）
-- **[Releases 页](https://github.com/mengyunqwq/wechat-bot/releases/latest)**：同样这 4 个文件（散文件，无需解压）
-
-`release/` 里有什么：`version.dll`（已编译 Hook）、`install.ps1`（一键安装）、`rollback.ps1`（一键回滚）、`SHA256.txt`、`README.txt`
-
-| 包里有什么 | 说明 |
-|---|---|
-| `version.dll` | 编译好的微信 Hook（含语音发送修复、数据库 late-arm 修复）|
-| `install.ps1`（一键安装） | 退出微信 → 备份旧 DLL → 覆盖 → 配重放 |
-| `rollback.ps1`（一键回滚） | 还原到安装前的 DLL |
-| `README.txt` / `SHA256.txt` | 版本说明与校验值 |
-
-**三步安装**
+**当前实测可用状态：机器人已进群，能收群里消息、能回话（用户已确认收到回复）。**
 
 ```
-① 完全退出微信（任务管理器里 Weixin.exe 进程数为 0）
-② 用仓库 `release/` 里的文件（或 Releases 下载，**不用解压**），运行 `install.ps1`（不要在 %TEMP% 里跑）
-③ 启动微信 → 登录后点一次左侧「通讯录」（让 contact.db 打开）
+微信群 ⇄ 微信 4.1.10.27（本机客户端）
+              ↑ version.dll 代理（aixed/WeChat-Hook，免注入）
+              ↓ HTTP 30001（发消息） + 回调 18998（收消息）
+        wx-bridge（接入层，Node）
+              ↕ WebSocket JSON
+   @dsh-external/dsh-wechat-bot（DSH 插件 = 大脑：拟人策略 + LLM + 表情包）
 ```
 
-> 需要 **微信 4.1.10.27 x64**。完整流程（含桥/插件/面板启动、自检清单、常见坑）见
-> **[docs/安装流程.md](docs/安装流程.md)**。
+## 目录
 
----
-
-## ⚠️ 二次开发声明（请务必先读）
-
-**本项目是「二次开发」产物，不是从零原创。**
-
-| 组成 | 来源 | 我们的工作 |
-|---|---|---|
-| **微信 Hook（`version.dll`）** | [mengyunqwq/wechat-hook](https://github.com/mengyunqwq/wechat-hook)（我们自己的公开仓库，衍生自 aixed/WeChat-Hook；上游**无 LICENSE**）| 修改 C++ 源码并自行编译（数据库句柄修复 / late-arm / 语音气泡 / 眼睛探针 / 调试路由）。**源码版权归原作者**；本项目不提供源码，二进制仅以 **Release 附件**形式提供 |
-| **微信客户端** | 腾讯 | 仅本地调用，**不修改、不分发** |
-| 接入层 / 拟人策略 / MCP / REST / 控制面板 / 图片解密 | 本项目原创 | 全部自研 |
-| 图片解密格式（V2）| 社区公开资料 | 适配与工程化，非从零逆向 |
-
-**因此**：
-
-1. **请自行评估合规风险**：修改/挂钩微信客户端可能违反腾讯用户协议，账号存在被封禁的可能。**请仅用于个人学习研究，不要用于商业用途或骚扰他人。**
-2. 本项目**不含任何微信账号、密钥、聊天数据**。表情包现场生成需要你自己接一个图像服务的 key（环境变量或本地凭据，仓库里只有占位符）——**不配也能用**，会退化为"只用现成图库"。
-3. 仓库本身**不提交二进制**（`.gitignore` 挡住 `*.dll` / `*.zip`），Hook 只以 Release 附件分发；如需从源码自行编译，见 [docs/安装流程.md](docs/安装流程.md) 第 2.2 节。
-
----
-
-## 它能做什么
-
-| 能力 | 说明 |
+| 路径 | 作用 |
 |---|---|
-| **拟人聊天** | 不是"有问必答"：闲聊按概率插话、被 @ 必回、打字延迟、偶尔拆成两条、深夜睡觉 |
-| **作息** | 23:00 睡 / 08:00 醒（可配）。睡觉时**不主动插话，但被 @ 仍会回** |
-| **长期记忆** | 本地 JSON；自动提炼"谁是谁 / 谁喜欢什么 / 约定 / 事件"；**每群独立** |
-| **认识群里的人** | 从微信数据库读**真实昵称**（备注优先），会 @ 对人；能认出"哪个是自己" |
-| **表情包** | 收藏群里的表情（存本体、去重）→ 视觉模型**自动打标签** → 聊到相应语境**按标签挑出来发**；也能图生图现场生成（文字气泡本地绘制，保证字清楚）|
-| **识图** | 群里的图片**自动解密** → 视觉模型识别 → 参与聊天；识别完删临时文件 |
-| **视频识别** | 每秒 1 帧 → 每 20 帧一张带时间戳的**联系表** + 抽音轨走本地语音识别 → 参与聊天。详见 [docs/视频识别.md](docs/视频识别.md) |
-| **语音识别** | 群里的语音自动转文字（本地 SenseVoice，**不需要 API key**）。详见 [docs/语音识别.md](docs/语音识别.md) |
-| **语音气泡** | 机器人能发**真正的微信语音**（type 34，可点播）；面板里一个开关控制，失败自动降级文字。详见 [docs/语音气泡.md](docs/语音气泡.md) |
-| **眼睛（原图/整片视频）** | 随成品包的 Hook 内置：拿**原图**而不是缩略图、拿**整段视频**而不是封面（9 个探针钩子）。面板已移除安装页 |
-| **桌宠联动** | 可选：接 [dsh-pet] 桌面宠物，群里有人说话时她会做表情/冒泡，思考时播"思考冒泡"，答完播"雀跃庆祝" |
-| **抖音刷** | 自己去刷推荐流 → 看画面+听台词 → 按自己口味挑一条发群；**纯只读**。详见 [docs/抖音自动刷.md](docs/抖音自动刷.md) |
-| **生图** | 表情包/配图现场生成（Agnes 云端 / 本地 ComfyUI 可选）。详见 [docs/生图.md](docs/生图.md) |
-| **真 @ 提醒** | 正文写 `@群昵称` + 把 wxid 传进 `atlist` → 对方**真的收到红点** |
-| **一键自检** | `wechat_bot_selfcheck`：桥/登录/hook/数据库/轮询/自己是谁/群昵称/语音/识图/表情包/记忆/LLM 路由 **12 项只读体检** |
-| **失联监控** | 心跳检查，异常时通过文件传输助手告警（静默 30 分钟防刷屏）|
-| **多 agent 接入** | MCP Server（Claude Desktop / Cursor / Cline）+ REST API + WebSocket + 托管模式 |
-
-> **不支持**：拍一拍（Hook 侧没有对应实现，面板里也已移除）、撤回、转发。
-
----
-
-## 🎛 控制面板
-
-浏览器里管这个机器人，**不用改配置文件**。
-
-![控制面板](docs/images/panel-overview.png)
-
-**怎么打开**
-
-```bash
-# 1) 启动 DSH（面板挂在它的 webServer 上）
-npx @deepseek-ai/dsh web --port 3080
-
-# 2) 浏览器打开（先登录 DSH，面板复用它的登录态）
-http://127.0.0.1:3080/wechat-bot
-```
-
-面板同时注册进 DSH 界面本体（原生插件 UI）：DSH 左侧面板列表里的 **🐋 微信机器人**，点开就是同一份面板。
-
-> **默认不自动弹浏览器**（`autoOpenPanel: false`）。想要"桥连上就自动开"，面板「高级/接入」页打开即可。
-
-**15 个页面**
-
-| 页面 | 内容 |
-|---|---|
-| 📊 **总览** | 收发统计、表情包库、崩溃次数、token 用量、健康自检、各群额度、最近消息 |
-| 🎛 **功能开关** | 各功能总闸、演练模式 |
-| 💬 **回复节奏** | 回复概率、冷却、10 分钟上限、连发保护 |
-| 🌱 **主动行为** | 主动发言概率/间隔/安静时段 |
-| 🗣 **说话方式** | 温度、长度、拆条、语气 |
-| 😄 **表情包** | 生成、挑选、发送、图库浏览、生图接口配置 |
-| 🖼 **感知** | 视觉开关、链接视频、抖音 |
-| 🎙 **语音** | 音色、开关、概率、hook 语音发送开关（持久化）|
-| 🧠 **记忆** | 增删查、提炼 |
-| 👥 **群与人** | 成员、wxid→昵称映射、白名单 |
-| 🐟 **人设模型** | 人设、模型、温度、接口 |
-| 🔬 **诊断** | 崩溃 dump / 数据库 / API 表 / 磁盘 / LLM 路由 |
-| 📦 **更新** | 按版本号检查更新、一键更新（先备份、失败回滚）|
-| 🩺 **运维日志** | 健康检查、自愈、高级接入配置与日志查看 |
-| 🕹 **手动操作** | 发文字 / 发语音（合成）/ 发表情包，选群发送 |
-
-**眼睛**：能力已内置在 `version.dll`（仓库 `release/` 与 Release 附件）里，装好 Hook 即生效；面板已移除「眼睛」安装页，不需要再拖 zip。验证：`GET http://127.0.0.1:30001/Debug/VuProbe` 应返回 `hooksOk: 9/9`。
-
----
+| `wx-bridge/` | 接入层：收/发消息、表情包库、mock 模拟器、自研注入器 |
+| `wechat-group-agent/` | DSH 插件：拟人策略、LLM 生成、表情包挑选、GUI 控制工具 |
+| `data/` | 表情包库、消息日志、桥日志 |
+| `D:\wxhook\wx4110\` | 微信 4.1.10.27 客户端 + `version.dll`（hook） |
 
 ## 快速开始
 
-### 方式一：成品包（推荐）
+1. **双击 `启动机器人.cmd`** —— 会拉起微信客户端（带回调参数）和 wx-bridge。
+2. 若客户端要求扫码，用**机器人小号**扫码登录（会话通常会被记住，无需每次扫）。
+3. 把机器人拉进群，@ 它即可。
+4. 用 `状态检查.cmd` 看连接与决策日志。
 
-见上文 **[📦 成品包下载](#-成品包下载推荐不会编译也能装)**，完整流程见 [docs/安装流程.md](docs/安装流程.md)。
+## 为什么是这个技术路线（踩坑记录，很重要）
 
-### 方式二：手动部署（或交给 AI 照文档做）
+| 方案 | 结果 |
+|---|---|
+| WeChatFerry + 微信 3.9.12.17 | ❌ 腾讯"版本过低"拦截，伪装版本也绕不过 |
+| 官方 iLink/ClawBot（2026 腾讯开放） | ⚠️ 可用但**仅支持私聊**，做不了群聊 |
+| wxhook（wxhelper 系）DLL 注入 | ❌ DLL 能加载，但 HTTP 服务一请求就崩，微信跟着崩 |
+| **aixed/WeChat-Hook（version.dll 代理）** | ✅ **可用**：免注入、API 正常、收发都通 |
+
+关键点：**`version.dll` 代理式加载**（把 DLL 放进客户端目录，微信启动时自己加载），
+完全避开"注入"这一整类问题。
+
+## 该 hook 构建的已知限制（实测）
+
+- ❌ `/QueryDB/*` 与 `IsLogin` 是坏的 → **拿不到联系人昵称**（机器人看到的是 wxid），群列表也读不到。
+- ❌ `/ForwardXMLMsg` 一调就把微信弄崩 → **不能发微信原生表情**，表情包改用图片发送（视觉一致）。
+- ❌ 没有下载附件的接口 → 群里别人发的图片/表情**只能收到 XML，存不下图片文件**。
+- ✅ `/SendTextMsg`、`/SendImgMsg`、`/set_callback`、回调推送 都正常。
+
+## 拟人化设计
+
+| 机制 | 默认值 | 说明 |
+|---|---|---|
+| 被 @ / 被点名 | 必回 | 昵称必须在插件里配对（`botName`） |
+| 问句 | 概率 ×2.2 | |
+| 纯闲聊 | 0.3 | **不是有问必答**，这条最像人 |
+| 打字延迟 | 600~900ms + 45~70ms/字 + 抖动 | 被@时更快，上限 14s |
+| 拆句 | 15% 概率拆两条 | |
+| 补表情包 | 22% 概率 | 模型输出 `[表情]` 时只发图 |
+| 同群冷却 / 10 分钟上限 | 15s / 6 条 | 防刷屏 + 像人 |
+| 连续自说自话 | 2 条后闭嘴 | |
+| 安静时段 | 01:00-07:30 | 除了被@ |
+| 每群记忆 | 300 条 | 重启不失忆 |
+
+## 🔊 语音识别（群里发语音 → 转成文字 → 当普通消息回复）
+
+微信语音（`local_type=34`）是 **SILK v3** 编码，而音频**不在文件系统里**，
+在 `media_0.db` 的 **`VoiceInfo.voice_data`（BLOB，明文 SILK，不需要 AES 解密）**，
+用 `local_id` 与消息表 `Msg_<hash>` 关联（两边同一个值）。链路：
+
+```
+微信语音消息（local_type=34，XML 里只有元数据）
+   → wx-bridge 查 media_0.db / VoiceInfo.voice_data（local_id 关联；磁盘目录只作兜底）
+   → 剥掉容器前缀（1 字节 0x02，从 #!SILK_V3 处开始取）
+   → decode-wechat-voice.py（pilk 解 SILK + 纯 Python 重采样）
+   → 16kHz / 单声道 / PCM16 WAV（DSH 语音服务的硬要求）
+   → 事件字段 voiceWav → 插件调 ctx.speechToText 转写
+   → 转写文字**当普通消息文本**（记忆/@ 识别/回复都按文本走）→ 删临时 WAV
+```
+
+实测样例（一条 1.4 秒语音）：`voice_data` 2488 字节 → 剥前缀后 2487 字节 SILK →
+WAV 1.42s / 45484 字节 → 转写结果「干什么干什么？」（CPU 推理 0.08s）。
+
+### 需要什么（**不需要任何额外 API key**）
+
+| 依赖 | 说明 | 不装会怎样 |
+|---|---|---|
+| DSH 的**「语音输入」bundle** | 提供 `ctx.speechToText` 服务，provider id = `sensevoice-local` | 插件日志打印"没有 speechToText 服务" → 语音保持 `[语音]` |
+| **本地 SenseVoice 模型（约 239MB）** | 首次自动下载到 `%DSH_HOME%\speech-to-text\sensevoice\models\`（本机 `DSH_HOME=D:\dsh\data`）；也可在 DSH 设置里手动"准备" | 转写报错 → 保持 `[语音]`（下载会继续，下一条语音即可用） |
+| `pip install pilk` | 纯 Python SILK 解码（**本机没有 ffmpeg，所以不依赖它**） | 解码失败只记日志 → 保持 `[语音]` |
+
+- 服务侧只接受 **canonical 16kHz/mono/PCM16 WAV**（逐字段校验头部），本仓库的
+  `decode-wechat-voice.py` 就是按这个契约产出的（`--selftest` 会逐项校验头部）。
+- 语音处理是**纯旁路**：定位不到音频、解码失败、模型没准备、转写报错 —— 全都只记日志，
+  消息照旧按 `[语音]` 走，**不会阻塞回复、不会抛错**。
+- 关掉语音识别：环境变量 `WECHAT_VOICE=0`（桥侧），或插件配置 `voiceOnVoice: false`。
+
+### 排查（实测时看这几条日志）
+
+| 日志（桥：`data\logs\bridge-*.log`） | 含义 |
+|---|---|
+| `语音：VoiceInfo 命中 N 字节（local_id=…）｜XML length=… ✓一致｜时长约 N.Ns` | **主路命中**（含与 XML 的交叉校验） |
+| `语音解码成功（已剥前缀 1 字节）：VoiceInfo blob N 字节 → data\voice\voice-<id>-<ts>.wav` | 解码成功 |
+| `语音：VoiceInfo 里没有 local_id=… 的音频（可能没同步/已被清理）` | 库里没有 → 转磁盘兜底 |
+| `语音定位：查了 N 个目录 → 候选 M 个（…）` / `语音定位：命中 <文件>（…偏离 Ns…）` | 磁盘兜底找过哪些目录、命中哪个文件 |
+| `语音定位：没找到任何候选音频（…按需下载…）` | 磁盘上也没有 → 保持 `[语音]` |
+| `语音解码失败（库 blob N 字节）：…` | 解码失败的具体原因（pilk/容器格式） |
+
+| 日志（插件：`%DSH_HOME%\super-injector\dsh-wechat-bot.log`） | 含义 |
+|---|---|
+| `语音转写成功（音频 Ns / 推理 Ns）：<文字>` | 转写成功 |
+| `语音转写文字已当文本处理：…` | 已替换 `text`（记忆/@/回复按文本走） |
+| `已删除语音临时 WAV` | 临时文件已清理 |
+| `语音模型未就绪（phase=unprepared）→ 触发准备…` | 模型没准备时才会出现（首次下载约 239MB） |
+| `没有 speechToText 服务（…bundle 没启用？）` | 服务不可用 → 降级 `[语音]` |
+| `语音转写失败（保持 [语音]）：…` | 具体失败原因（服务侧会拒绝非 16k/mono/PCM16） |
+
+## 在 DSH 里控制它
+
+| 工具 | 用途 |
+|---|---|
+| `wechat_bot_status` | 连接/登录、模型、计数、各群节流与最近消息 |
+| `wechat_bot_say` | 手动让它发一条（可带表情包） |
+| `wechat_bot_config` | 实时改参数：`persona`/`replyProbability`/`quietHours`/`botName`… |
+| `wechat_bot_stickers` | 看表情包库 / 试挑一张 |
+| `wechat_bot_history` | 看某群记忆上下文 |
+
+> ⚠️ 改 `botName` 必须与机器人在微信里的**群昵称**一致，否则"被@必回"识别不出来。
+
+## 🎛 Web 控制面板（`/wechat-bot`）
+
+浏览器打开 **http://127.0.0.1:3080/wechat-bot**（与 DSH 共用登录态，不用另配账号）。
+
+| 页面 | 能做什么 |
+|---|---|
+| 总览 | 桥/微信/hook 三色灯、收发计数、各群节流、最近消息、一键自检 |
+| 功能开关 | 20 张卡：识图/识表情/识视频/链接视频/语音听与说/表情包/拆句/主动找话题/抖音/自愈…点一下即时生效 |
+| 参数 | 100+ 项：回复概率、冷却、安静时段、拆句、@、模型/人设、记忆、健康告警…带范围校验与默认值提示 |
+| 表情包 | 图库（试挑/发送/生成）、补图概率、题材库 |
+| 记忆 | 每群长期记忆：查看 / 追加 / 清空 / 立即提炼（**只读磁盘，不会惊动机器人主动发言**） |
+| 群与人 | 群白名单、成员名字映射、机器人昵称/别名 |
+| 运维日志 | 自检报告、插件日志 / 桥日志、配置导入导出 |
+| 手动操作 | 以机器人身份发文字/语音/表情、拍一拍、查历史 |
+
+- 写操作复用 DSH 的 cookie + Host/Origin 栅栏，另要求同源 JSON；高危项二次确认。
+- 审计：`D:\dsh\data\wechat-bot\panel-audit.log`（时间/IP/UA/动作）。
+- **回滚**：改动前备份在 `backup-wechat-panel-*/`（含插件 `lib` 与 `config.json`，步骤见 `RESTORE.md`）。
+
+### 🧩 模型接口
+
+面板新增「模型接口」页，服务商直接从 DSH 的 pi-ai 目录读取，支持：
+
+**Claude / GPT / DeepSeek / Grok / GLM / Qwen / Kimi / MiMo / Gemini / OpenRouter / MiniMax / Groq** 等 40+ 路由。
+
+- 填 API Key → 写进 DSH 凭据库（界面只显示引用名，**不回显明文**）→ **保存即注册路由，不用重启 DSH**
+- 每个服务商可单独「测试」（真实发一条极小请求）、「设为聊天」、「设为视觉」
+- 模型清单留空 = 用 pi-ai 内置目录；也可手填模型 id
+- 图像生成单独一栏：Agnes / OpenAI / xAI / GLM 预设，写 `data/image-gen.json`
+  - 只换地址/模型即时生效；切「请求格式」或让桥读取新凭据需重启 `wx-bridge`
+
+### 群名/人名从哪来（为什么以前显示 4739…@chatroom / wxid_xxx）
+
+微信 4.x 的 `contact.db` 经常被卸载、句柄失效（`/QueryDB/execute` 直接 500），
+但 `contact_fts.db` 一直可读：群名和联系人昵称都在 `contact_fts_v5_content.c0`（`\b` 分隔），
+用 `name2id.rowid` ↔ `username` 对上即可（第一个非空字段就是显示名）。
+
+- 插件侧已内置这个查询（面板/状态/消息/群选择器直接显示真名，**不需要重启桥**）
+- 桥侧也加了同样的兜底（重启 `wx-bridge` 后，其他消费 `bridge.rooms()` / `senderName` 的地方也会带名字）
+- 查不到时仍退回显示 roomId / wxid，不会报错
+
+## 手动启动
 
 ```powershell
-git clone https://github.com/mengyunqwq/wechat-bot.git wechat-bot
-cd wechat-bot
+# 1) 客户端（必须带这两个参数，否则收不到消息）
+cd D:\wxhook\wx4110
+.\Weixin.exe StartPort=30001 RecvType=1 CallBackURL=http://127.0.0.1:18998
 
-# 1) 装依赖
-cd wx-bridge; npm install; cd ..
-python -m pip install pycryptodome zstandard pilk imageio-ffmpeg Pillow edge-tts
+# 2) 接入层
+cd D:\微信deepseek\wx-bridge
+node server.mjs --transport=wechat-hook --api-port=30001 --cb-port=18998 --wechat=D:\wxhook\wx4110\Weixin.exe
 
-# 2) 配置
-copy config.example.json config.json      # 按 DEPLOY.md 第 3 节改字段
-
-# 3) 部署 Hook（release\version.dll → 独立微信目录，先完全退出微信）
-#    见 DEPLOY.md 第 1、2 节
-
-# 4) 启动桥
-node wx-bridge\server.mjs --transport=wechat-hook --api-port=30001 --cb-port=18998 `
-     --data-dir="D:\wechat-bot\data" --wechat="D:\wxhook\wx4110\Weixin.exe"
+# 模拟模式（不需要微信，调策略用）
+node server.mjs --mock
+# 自检
+node server.mjs --self-test
+node test-policy.mjs   # 策略回归（在 wechat-group-agent 目录）
 ```
 
-> **推荐做法**：把 **[docs/AI-一键部署.md](docs/AI-一键部署.md)** 整段发给 AI（豆包 / Claude / Cursor / DSH），
-> 它会照着手动步骤装完并逐项验证（这份文档是自包含的，不依赖任何一键脚本）。
+## 🔒 版本锁定与防自动更新（血泪教训，必读）
 
-> 想从**原版 Hook 源码**自行编译，见 [docs/安装流程.md](docs/安装流程.md) 2.2 节。
+**hook 与微信版本强绑定**：本 hook（`version.dll`，aixed/WeChat-Hook）只支持 **4.1.10.27**。
 
----
+> 事故记录：微信曾**自己更新**到 4.1.15.55，把 `4.1.10.27` 版本目录删掉重建，
+> 而 hook 是按 4.1.10.27 编译的 → **整个接入层静默失效**（HTTP 30001 不通、收不到消息）。
+> 而且更新器/更新缓存**被改名后客户端还会重新创建**。
 
-## 架构
+现在有三道防线：
 
-```
-微信客户端（含改造版 version.dll）
-        │  HTTP 30001 + 回调
-        ▼
-   wx-bridge（独立 Node 服务）
-        ├── 数据库轮询收消息 / 图片解密 / 语音解码 / 视频抽帧
-        ├── 表情包库 / 生图 / 气泡绘制
-        ├── REST API  ← 控制面板 / 脚本 / 任意 agent
-        └── MCP Server ← Claude Desktop / Cursor / Cline …
-        │  WebSocket
-        ▼
-   大脑（二选一）
-        ├── DSH 插件 wechat-group-agent（人设 + LLM + 记忆 + 识别 + 自检）
-        └── 外部 agent（经托管模式）
-```
+1. **客户端版本必须自洽**：`D:\wxhook\wx4110\` 里的 `Weixin.exe`（启动器）与 `4.1.10.27\`（payload）
+   版本要一致；不一致时客户端**直接退出**（连界面都不出，只有个"启动提示"对话框一闪而过）。
+2. **防更新守卫（自愈）**：`wx-bridge` 看门狗每 10 秒巡检，发现就改名禁用：
+   - 客户端里的 `4.1.10.27\WeixinUpdate.exe`
+   - `%APPDATA%\Tencent\xwechat\xplugin\plugins\WeixinUpdate`
+   - `%APPDATA%\Tencent\xwechat\update\download` 与 `\patch`
+3. **绝不碰用户日常微信**：这台机器上 `D:\Program Files\Tencent\Weixin` 是用户自己用的微信
+   （正好也是 4.1.10.27）。机器人用**另一份独立副本**；杀进程一律**按可执行文件路径精确匹配**，
+   绝不用 `taskkill /IM Weixin.exe`（那会把用户的微信一起杀掉）。
 
-**重要**：`DSH 插件` 与 `托管模式` 是**两个大脑**，同时开会导致**每条消息回复两次**。用哪个开哪个（桥会打印警告）。
+**哪天又失效了，按这个顺序查**：
 
----
-
-## 目录结构
-
-```
-wechat-bot/
-├── wx-bridge/            接入层（Node 服务）: 收消息/解密/媒体/表情包/REST/MCP
-├── wechat-group-agent/   大脑（DSH 插件）
-│   ├── lib/              人设、策略、LLM、记忆
-│   └── panel/            ★ Web 控制面板（单文件 HTML）
-├── scripts/              运维脚本（安全重启、备份等）
-├── docs/                 所有详细文档
-│   ├── 安装流程.md        ★ 从零到能用的完整安装顺序
-│   ├── images/           截图
-│   └── *.md              语音/视频/气泡/抖音/生图/角色设定/运维规则/…
-├── release/              ★ 成品（version.dll + install.ps1 + rollback.ps1 + SHA256.txt）
-├── install.ps1           一键安装
-├── config.example.json   配置模板
-└── DEPLOY.md             部署细节
+```powershell
+# 1) 客户端实际用哪个版本目录？（不是 4.1.10.27 → 版本被换了）
+Get-CimInstance Win32_Process -Filter "Name='Weixin.exe'" | ForEach-Object { $_.CommandLine }
+# 2) hook HTTP 通不通？
+curl http://127.0.0.1:30001/QueryDB/status
+# 3) 客户端进程在不在（正常 5 个）？只有 0~1 个 → 版本不匹配，启动即退出
+Get-Process Weixin
 ```
 
----
+修复：从 `D:\Program Files\Tencent\Weixin`（用户那份 4.1.10.27）**只读复制**一份到
+`D:\wxhook\wx4110`，再把 hook 的 `version.dll` 放进去（见上面"手动启动"）。
 
-## ⚠️ 路径要求（踩过坑）
+## ⚠️ 风险
 
-**微信数据目录（`xwechat_files` 所在路径）不要含中文。**
+- **封号风险**：hook 属非官方协议，违反微信使用条款。**务必用新注册的小号**，别绑支付。
+- **版本锁定**：hook 与微信版本强绑定（4.1.10.27）。已禁自动更新（更新器 + 更新插件 + 缓存目录，看门狗每 10 秒自愈），**别手动升级**。
+- **电脑关机 = 人下线**。
+- 桥自带看门狗：客户端被关掉会自动重新拉起（新实例可能需要重新扫码）；HTTP 服务死了也会重启客户端。
 
-```
-✅ D:\WeChatData\                              纯 ASCII，安全
-✅ C:\Users\alice\Documents\xwechat_files      用户名是英文，安全
-❌ C:\Users\张三\Documents\xwechat_files        用户名是中文 → 路径带中文
-❌ D:\微信数据\
-```
+## 微信 Hook 改造（群成员昵称）
 
-早期版本的库名提取函数只放行 ASCII，中文路径会让库名取不到：
+我们**自编译并部署了改造版 ersion.dll**，修复了上游 QueryDB 永久失效的问题，
+现在能直接读微信数据库拿群成员真实昵称（不再靠 @ 提及猜）。
 
-```
-QueryDB/execute 返回
-  {"status":-1,"desc":"get database handle which named message_0.db failed"}
-```
-
-已修，但仍建议数据目录放纯 ASCII 路径。详见 [docs/DB-句柄修复说明.md](docs/DB-句柄修复说明.md)。
-
-### 装完/重启后读不到 `contact.db`？
-
-微信的 `contact.db` **只在打开通讯录或搜索联系人时才真正打开**。
-登录后点一次左侧「通讯录」（停留 3 秒），桥就能登记句柄；否则会表现为：
-
-- 面板「群与人」成员为空
-- 名字只显示 wxid
-- 真 @ 退化成纯文本 `@昵称`
-- 桥日志：`get database handle which named contact.db failed`
-
-新版 Hook 已加 **late-arm**（每次查询前补装开库钩子），点一次通讯录即可永久登记。
-
----
-
-## 安全提示
-
-**Hook 的 HTTP 接口默认只监听 `127.0.0.1`**（不是 `0.0.0.0`）。
-
-这些接口**没有任何鉴权**：`/SendTextMsg` 能以你的账号发消息，`/QueryDB/execute` 能执行任意 SQL 读写微信数据库。
-如果监听在 `0.0.0.0`，**同一局域网内任何人都能直接控制你的微信账号**。
-
-接入层（wx-bridge）在同一台机器上，用回环地址就够了；确需远程访问请自建反向代理 + 鉴权。
-**控制面板同理** —— 它能控制微信账号，DSH 的 `--trusted-host` 只是浏览器信任栅栏，不是身份认证，**不要暴露公网**。
-
----
-
-## 📚 详细文档
-
-- **[安装流程.md](docs/安装流程.md)** —— ★ 从零到能用：成品包 / 自行编译 / 启动顺序 / 自检清单 / 常见坑
-- **[常见错误与排错](docs/常见错误与排错.md)** —— 症状速查、救命三招（有问题先看这个）
-
-| 文档 | 内容 |
-|---|---|
-| [docs/安装流程.md](docs/安装流程.md) | 完整安装顺序（推荐先读）|
-| [DEPLOY.md](DEPLOY.md) | 部署细节（回调/轮询/排错）|
-| [docs/OPERATIONS-RULES.md](docs/OPERATIONS-RULES.md) | **运维红线 R1–R16**（每条都是事故换来的）|
-| [docs/AI-一键部署.md](docs/AI-一键部署.md) | 给 AI 客户端的部署指引（可整段喂给 AI）|
-| [docs/DB-句柄修复说明.md](docs/DB-句柄修复说明.md) | 数据库句柄问题的根因与修复 |
-| [docs/语音识别.md](docs/语音识别.md) | 语音消息 → 文字 |
-| [docs/视频识别.md](docs/视频识别.md) | 视频抽帧 + 音轨 → 理解画面和台词 |
-| [docs/语音气泡.md](docs/语音气泡.md) | 让机器人发出真正的微信语音 |
-| [docs/抖音自动刷.md](docs/抖音自动刷.md) | 自己去刷推荐流、挑一条发群 |
-| [docs/生图.md](docs/生图.md) | 表情包/配图生成（云端或本地 ComfyUI）|
-| [docs/大肥鱼角色设定.md](docs/大肥鱼角色设定.md) | 示例人设 |
-
----
-
-## 已知限制（诚实说明）
-
-| 限制 | 说明 |
-|---|---|
-| **微信版本** | 只适配 **4.1.10.27 x64**；升级后 Hook 偏移会失效，需要新版本 Hook |
-| **视频原片 / 图片原图** | 依赖 Hook 的 CDN 重放（成品包已含）；没有时退化为封面/缩略图 |
-| **数据库句柄** | 少数环境下取不到库名（见 [DB 文档](docs/DB-句柄修复说明.md)）；建议纯 ASCII 数据目录 |
-| **拍一拍 / 撤回 / 转发** | Hook 侧无实现，面板未暴露 |
-| **多开** | 需要复制独立微信目录 + 独立 Hook，不要和主微信共用 |
-
----
-
-## ⭐ 如果你是"被叫来部署这个项目"的 AI
-
-1. **先读** [docs/OPERATIONS-RULES.md](docs/OPERATIONS-RULES.md) —— 里面是不可违反的运维红线
-2. **再读** [docs/安装流程.md](docs/安装流程.md) —— 完整的安装顺序与验证清单
-3. **部署前必须确认**：微信版本 4.1.10.27、是否准备了可牺牲的小号
-4. **不要**强杀微信、不要自动拉起客户端、不要改 Hook 的监听地址为 `0.0.0.0`
-
----
-
-## 致谢
-
-- [mengyunqwq/wechat-hook](https://github.com/mengyunqwq/wechat-hook) —— 我们自己的微信 Hook（**默认使用**，4.1.10.27 适配版，含源码与逆向笔记）
-- [DeepSeek Harness](https://github.com/deepseek-ai) —— 插件运行时
-- SenseVoice / imageio-ffmpeg / Playwright / yt-dlp 等上游项目
-
-## 许可
-
-MIT（本项目原创部分）。二次开发部分的版权归各自原作者，详见文首「二次开发声明」。
+- 改造内容、编译步骤、**回滚方法**、数据库表结构：见 [docs/hook改造说明.md](docs/hook改造说明.md)
+- 源码：`E:\wxhook-src\WeChat-Hook`（3 处补丁已应用）
+- 旧 DLL 备份：`D:\wxhook\wx4110\version.dll.bak-606208-20261016-0932`r

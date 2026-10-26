@@ -187,6 +187,10 @@ export function createApiHandler({ handle, rooms, log, bridge, counters, started
       if (path === '/api/pollResume') {
         return sendJson(res, 200, await handle('pollResume', {}))
       }
+      // ── 轮询状态（只读）：硬闸/暂停/连续失败/轮数/条数，供面板和自检判断"哑没哑"──
+      if (path === '/api/pollStatus') {
+        return sendJson(res, 200, await handle('pollStatus', {}))
+      }
 
       return sendJson(res, 404, { error: '未知接口：' + path, hint: '见 PROTOCOL.md' })
     } catch (e) {

@@ -1,0 +1,1178 @@
+{
+ "program": "Weixin.dll 4.1.10.27",
+ "imageBase": "0x180000000",
+ "scannedStrings": 297,
+ "matchedStrings": 74,
+ "hits": [
+  {
+   "group": "sns",
+   "keyword": "cmmsns.qpic.cn,mmsns.qpic.cn,szmmsns.qpi",
+   "string": "cmmsns.qpic.cn,mmsns.qpic.cn,szmmsns.qpic.cn,shmmsns.qpic.cn,shsrcmmsns.qpic.cn,szsrcmmsns.qpic.cn,mmsns.qpic.wechatos.net,mmsns.c2c.wechat.com,mmsns.hk.wechat.com",
+   "strRva": 141907472,
+   "func": "0x0294B4AA",
+   "funcName": "",
+   "funcSize": 0
+  },
+  {
+   "group": "sns",
+   "keyword": "cmmsns.qpic.cn,mmsns.qpic.cn,szmmsns.qpi",
+   "string": "cmmsns.qpic.cn,mmsns.qpic.cn,szmmsns.qpic.cn,shmmsns.qpic.cn,shsrcmmsns.qpic.cn,szsrcmmsns.qpic.cn,mmsns.qpic.wechatos.net,mmsns.c2c.wechat.com,mmsns.hk.wechat.com",
+   "strRva": 141907472,
+   "func": "0x0294DE86",
+   "funcName": "",
+   "funcSize": 0
+  },
+  {
+   "group": "sns",
+   "keyword": "cmmsns.qpic.cn,mmsns.qpic.cn,szmmsns.qpi",
+   "string": "cmmsns.qpic.cn,mmsns.qpic.cn,szmmsns.qpic.cn,shmmsns.qpic.cn,shsrcmmsns.qpic.cn,szsrcmmsns.qpic.cn,mmsns.qpic.wechatos.net,mmsns.c2c.wechat.com,mmsns.hk.wechat.com",
+   "strRva": 141907472,
+   "func": "0x0294B480",
+   "funcName": "",
+   "funcSize": 0
+  },
+  {
+   "group": "sns",
+   "keyword": "E:\\xwechat\\agent\\workspace\\mars_win_llvm",
+   "string": "E:\\xwechat\\agent\\workspace\\mars_win_llvm_2\\mars-private\\mars\\cdn\\src\\proto\\mmsnscdn.pb.cc",
+   "strRva": 145647236,
+   "func": "0x049BF0A5",
+   "funcName": "",
+   "funcSize": 0
+  },
+  {
+   "group": "sns",
+   "keyword": "E:\\xwechat\\agent\\workspace\\mars_win_llvm",
+   "string": "E:\\xwechat\\agent\\workspace\\mars_win_llvm_2\\mars-private\\mars\\cdn\\src\\proto\\mmsnscdn.pb.cc",
+   "strRva": 145647236,
+   "func": "0x049BF2B2",
+   "funcName": "",
+   "funcSize": 0
+  },
+  {
+   "group": "sns",
+   "keyword": "E:\\xwechat\\agent\\workspace\\mars_win_llvm",
+   "string": "E:\\xwechat\\agent\\workspace\\mars_win_llvm_2\\mars-private\\mars\\cdn\\src\\proto\\mmsnscdn.pb.cc",
+   "strRva": 145647236,
+   "func": "0x049BF850",
+   "funcName": "",
+   "funcSize": 0
+  },
+  {
+   "group": "sns",
+   "keyword": "E:\\xwechat\\agent\\workspace\\mars_win_llvm",
+   "string": "E:\\xwechat\\agent\\workspace\\mars_win_llvm_2\\mars-private\\mars\\cdn\\src\\proto\\mmsnscdn.pb.cc",
+   "strRva": 145647236,
+   "func": "0x049C0630",
+   "funcName": "",
+   "funcSize": 0
+  },
+  {
+   "group": "sns",
+   "keyword": "TimelineObject",
+   "string": "TimelineObject",
+   "strRva": 144298470,
+   "func": "0x03E35C25",
+   "funcName": "",
+   "funcSize": 0
+  },
+  {
+   "group": "sns",
+   "keyword": "TimelineObject",
+   "string": "TimelineObject",
+   "strRva": 144298470,
+   "func": "0x03E35E8C",
+   "funcName": "",
+   "funcSize": 0
+  },
+  {
+   "group": "sns",
+   "keyword": "TimelineObject",
+   "string": "TimelineObject",
+   "strRva": 144298470,
+   "func": "0x03E3C8D3",
+   "funcName": "",
+   "funcSize": 0
+  },
+  {
+   "group": "sns",
+   "keyword": "TimelineObject",
+   "string": "TimelineObject",
+   "strRva": 144298470,
+   "func": "0x03EC694F",
+   "funcName": "",
+   "funcSize": 0
+  },
+  {
+   "group": "media",
+   "keyword": "E:\\xwechat\\agent\\workspace\\mars_win_llvm",
+   "string": "E:\\xwechat\\agent\\workspace\\mars_win_llvm_2\\mars-private\\mars\\cdn\\marscdn.pb.cc",
+   "strRva": 145648864,
+   "func": "0x049C1D23",
+   "funcName": "",
+   "funcSize": 0
+  },
+  {
+   "group": "media",
+   "keyword": "E:\\xwechat\\agent\\workspace\\mars_win_llvm",
+   "string": "E:\\xwechat\\agent\\workspace\\mars_win_llvm_2\\mars-private\\mars\\cdn\\marscdn.pb.cc",
+   "strRva": 145648864,
+   "func": "0x049C1ED0",
+   "funcName": "",
+   "funcSize": 0
+  },
+  {
+   "group": "media",
+   "keyword": "E:\\xwechat\\agent\\workspace\\mars_win_llvm",
+   "string": "E:\\xwechat\\agent\\workspace\\mars_win_llvm_2\\mars-private\\mars\\cdn\\marscdn.pb.cc",
+   "strRva": 145648864,
+   "func": "0x049C2510",
+   "funcName": "",
+   "funcSize": 0
+  },
+  {
+   "group": "media",
+   "keyword": "E:\\xwechat\\agent\\workspace\\mars_win_llvm",
+   "string": "E:\\xwechat\\agent\\workspace\\mars_win_llvm_2\\mars-private\\mars\\cdn\\marscdn.pb.cc",
+   "strRva": 145648864,
+   "func": "0x049C2B60",
+   "funcName": "",
+   "funcSize": 0
+  },
+  {
+   "group": "media",
+   "keyword": "E:\\x\\x_rel_t3\\kernel\\gen\\protobufs\\micro",
+   "string": "E:\\x\\x_rel_t3\\kernel\\gen\\protobufs\\micromsg\\fav\\fav_check_cdn.pb.cc",
+   "strRva": 147837916,
+   "func": "0x05AB6E99",
+   "funcName": "",
+   "funcSize": 0
+  },
+  {
+   "group": "media",
+   "keyword": "E:\\x\\x_rel_t3\\kernel\\gen\\protobufs\\micro",
+   "string": "E:\\x\\x_rel_t3\\kernel\\gen\\protobufs\\micromsg\\fav\\fav_check_cdn.pb.cc",
+   "strRva": 147837916,
+   "func": "0x05AB7144",
+   "funcName": "",
+   "funcSize": 0
+  },
+  {
+   "group": "media",
+   "keyword": "E:\\x\\x_rel_t3\\kernel\\gen\\protobufs\\micro",
+   "string": "E:\\x\\x_rel_t3\\kernel\\gen\\protobufs\\micromsg\\fav\\fav_check_cdn.pb.cc",
+   "strRva": 147837916,
+   "func": "0x05AB73F4",
+   "funcName": "",
+   "funcSize": 0
+  },
+  {
+   "group": "media",
+   "keyword": "E:\\x\\x_rel_t3\\kernel\\gen\\protobufs\\micro",
+   "string": "E:\\x\\x_rel_t3\\kernel\\gen\\protobufs\\micromsg\\fav\\fav_check_cdn.pb.cc",
+   "strRva": 147837916,
+   "func": "0x05AB8AF4",
+   "funcName": "",
+   "funcSize": 0
+  },
+  {
+   "group": "media",
+   "keyword": "E:\\x\\x_rel_t3\\kernel\\gen\\protobufs\\micro",
+   "string": "E:\\x\\x_rel_t3\\kernel\\gen\\protobufs\\micromsg\\fav\\trans_item_to_cdn.pb.cc",
+   "strRva": 147857084,
+   "func": "0x05AF4257",
+   "funcName": "",
+   "funcSize": 0
+  },
+  {
+   "group": "media",
+   "keyword": "E:\\x\\x_rel_t3\\kernel\\gen\\protobufs\\micro",
+   "string": "E:\\x\\x_rel_t3\\kernel\\gen\\protobufs\\micromsg\\fav\\trans_item_to_cdn.pb.cc",
+   "strRva": 147857084,
+   "func": "0x05AF4564",
+   "funcName": "",
+   "funcSize": 0
+  },
+  {
+   "group": "media",
+   "keyword": "E:\\x\\x_rel_t3\\kernel\\gen\\protobufs\\micro",
+   "string": "E:\\x\\x_rel_t3\\kernel\\gen\\protobufs\\micromsg\\fav\\trans_item_to_cdn.pb.cc",
+   "strRva": 147857084,
+   "func": "0x05AF48C1",
+   "funcName": "",
+   "funcSize": 0
+  },
+  {
+   "group": "media",
+   "keyword": "E:\\x\\x_rel_t3\\kernel\\gen\\protobufs\\micro",
+   "string": "E:\\x\\x_rel_t3\\kernel\\gen\\protobufs\\micromsg\\fav\\trans_item_to_cdn.pb.cc",
+   "strRva": 147857084,
+   "func": "0x05AF56B1",
+   "funcName": "",
+   "funcSize": 0
+  },
+  {
+   "group": "media",
+   "keyword": "AesKey",
+   "string": "AesKey",
+   "strRva": 144767772,
+   "func": "0x0421860D",
+   "funcName": "",
+   "funcSize": 0
+  },
+  {
+   "group": "media",
+   "keyword": "AesKey",
+   "string": "AesKey",
+   "strRva": 144767772,
+   "func": "0x0421971B",
+   "funcName": "",
+   "funcSize": 0
+  },
+  {
+   "group": "media",
+   "keyword": "tpaeskey",
+   "string": "tpaeskey",
+   "strRva": 136128097,
+   "func": "0x001C0C00",
+   "funcName": "",
+   "funcSize": 0
+  },
+  {
+   "group": "media",
+   "keyword": "tpthumbaeskey",
+   "string": "tpthumbaeskey",
+   "strRva": 136128116,
+   "func": "0x001C0C20",
+   "funcName": "",
+   "funcSize": 0
+  },
+  {
+   "group": "media",
+   "keyword": "tpthumbaeskey",
+   "string": "tpthumbaeskey",
+   "strRva": 136128116,
+   "func": "0x00A64AE8",
+   "funcName": "",
+   "funcSize": 0
+  },
+  {
+   "group": "media",
+   "keyword": "tpthumbaeskey",
+   "string": "tpthumbaeskey",
+   "strRva": 136128116,
+   "func": "0x00A67EFC",
+   "funcName": "",
+   "funcSize": 0
+  },
+  {
+   "group": "media",
+   "keyword": "tpthumbaeskey",
+   "string": "tpthumbaeskey",
+   "strRva": 136128116,
+   "func": "0x022C9F39",
+   "funcName": "",
+   "funcSize": 0
+  },
+  {
+   "group": "media",
+   "keyword": "cdnthumbaeskey",
+   "string": "cdnthumbaeskey",
+   "strRva": 137379506,
+   "func": "0x00A64AF1",
+   "funcName": "",
+   "funcSize": 0
+  },
+  {
+   "group": "media",
+   "keyword": "cdnthumbaeskey",
+   "string": "cdnthumbaeskey",
+   "strRva": 137379506,
+   "func": "0x00A67BBD",
+   "funcName": "",
+   "funcSize": 0
+  },
+  {
+   "group": "media",
+   "keyword": "cdnthumbaeskey",
+   "string": "cdnthumbaeskey",
+   "strRva": 137379506,
+   "func": "0x022C84D4",
+   "funcName": "",
+   "funcSize": 0
+  },
+  {
+   "group": "media",
+   "keyword": "cdnthumbaeskey",
+   "string": "cdnthumbaeskey",
+   "strRva": 137379506,
+   "func": "0x022C9DCD",
+   "funcName": "",
+   "funcSize": 0
+  },
+  {
+   "group": "media",
+   "keyword": "aeskey",
+   "string": "aeskey",
+   "strRva": 137379521,
+   "func": "0x05BBF335",
+   "funcName": "",
+   "funcSize": 0
+  },
+  {
+   "group": "media",
+   "keyword": "aeskey",
+   "string": "aeskey",
+   "strRva": 137379521,
+   "func": "0x05D379CE",
+   "funcName": "",
+   "funcSize": 0
+  },
+  {
+   "group": "media",
+   "keyword": "aeskey",
+   "string": "aeskey",
+   "strRva": 137379521,
+   "func": "0x00A64B42",
+   "funcName": "",
+   "funcSize": 0
+  },
+  {
+   "group": "media",
+   "keyword": "aeskey",
+   "string": "aeskey",
+   "strRva": 137379521,
+   "func": "0x00A65852",
+   "funcName": "",
+   "funcSize": 0
+  },
+  {
+   "group": "media",
+   "keyword": "hlsvideo %_ aeskey %_ iv %_",
+   "string": "hlsvideo %_ aeskey %_ iv %_",
+   "strRva": 140884152,
+   "func": "0x021AB9FD",
+   "funcName": "",
+   "funcSize": 0
+  },
+  {
+   "group": "media",
+   "keyword": "md5: %s productid: %s cdnurlstring: %s e",
+   "string": "md5: %s productid: %s cdnurlstring: %s encrypturlstring: %s aeskey: %s externurl: %s externmd5: %s tpurlstring: %s authkey: %s",
+   "strRva": 140928503,
+   "func": "0x02235974",
+   "funcName": "",
+   "funcSize": 0
+  },
+  {
+   "group": "media",
+   "keyword": "newformataeskey",
+   "string": "newformataeskey",
+   "strRva": 141003579,
+   "func": "0x05BBF3EB",
+   "funcName": "",
+   "funcSize": 0
+  },
+  {
+   "group": "media",
+   "keyword": "newformataeskey",
+   "string": "newformataeskey",
+   "strRva": 141003579,
+   "func": "0x022DB6A6",
+   "funcName": "",
+   "funcSize": 0
+  },
+  {
+   "group": "media",
+   "keyword": "cdnrawvideoaeskey",
+   "string": "cdnrawvideoaeskey",
+   "strRva": 141019330,
+   "func": "0x0231B243",
+   "funcName": "",
+   "funcSize": 0
+  },
+  {
+   "group": "media",
+   "keyword": "cdnrawvideoaeskey",
+   "string": "cdnrawvideoaeskey",
+   "strRva": 141019330,
+   "func": "0x0231C470",
+   "funcName": "",
+   "funcSize": 0
+  },
+  {
+   "group": "media",
+   "keyword": "check exist only without fileid and aesk",
+   "string": "check exist only without fileid and aeskey.",
+   "strRva": 141900596,
+   "func": "0x0293AA23",
+   "funcName": "",
+   "funcSize": 0
+  },
+  {
+   "group": "media",
+   "keyword": "download param: fullpath:%_,aeskey:%_,fi",
+   "string": "download param: fullpath:%_,aeskey:%_,fileId:%_,clientid:%_, msgtype:%_,",
+   "strRva": 141901251,
+   "func": "0x02940322",
+   "funcName": "",
+   "funcSize": 0
+  },
+  {
+   "group": "media",
+   "keyword": "download param: fullpath:%_,aeskey:%_,fi",
+   "string": "download param: fullpath:%_,aeskey:%_,fileId:%_,clientid:%_,filelen:%_",
+   "strRva": 141902380,
+   "func": "0x0293EDEE",
+   "funcName": "",
+   "funcSize": 0
+  },
+  {
+   "group": "media",
+   "keyword": "filekey %_ fileid %_ filesize %_ aeskey ",
+   "string": "filekey %_ fileid %_ filesize %_ aeskey %_ thumbfile %_ file %_ midfile %_ progessive %_, file_format:%_, mid_format:%_, q.t %_, t.t %_ fp.t %_ p.t %_",
+   "strRva": 141924006,
+   "func": "0x02976095",
+   "funcName": "",
+   "funcSize": 0
+  },
+  {
+   "group": "media",
+   "keyword": "filekey %_ fileid %_ filesize %_ aeskey ",
+   "string": "filekey %_ fileid %_ filesize %_ aeskey %_ file %_ q.t %_, t.t %_ fp.t %_ p.t %_",
+   "strRva": 141924317,
+   "func": "0x0297CBE8",
+   "funcName": "",
+   "funcSize": 0
+  },
+  {
+   "group": "media",
+   "keyword": "filekey %_ fileid %_ filesize %_ aeskey ",
+   "string": "filekey %_ fileid %_ filesize %_ aeskey %_ cgi %_ thumbfile %_ file %_ q.t %_, t.t %_ fp.t %_ p.t %_",
+   "strRva": 141924477,
+   "func": "0x02981D3D",
+   "funcName": "",
+   "funcSize": 0
+  },
+  {
+   "group": "media",
+   "keyword": "filekey %_ fileid %_ filesize %_ aeskey ",
+   "string": "filekey %_ fileid %_ filesize %_ aeskey %_ file %_ q.t %_ t.t %_ fp.t %_ p.t %_",
+   "strRva": 141924811,
+   "func": "0x02983B08",
+   "funcName": "",
+   "funcSize": 0
+  },
+  {
+   "group": "media",
+   "keyword": "filekey %_ fileid %_ filesize %_ aeskey ",
+   "string": "filekey %_ fileid %_ filesize %_ aeskey %_ file %_ videoformat %_ videomode %_:%_ preload %_ preload.min %_ q.t %_, t.t %_",
+   "strRva": 141924978,
+   "func": "0x02984D10",
+   "funcName": "",
+   "funcSize": 0
+  },
+  {
+   "group": "media",
+   "keyword": "filekey %_ url %_ host %_ filesize %_ ae",
+   "string": "filekey %_ url %_ host %_ filesize %_ aeskey %_ videomode %_:%_ preload %_ preload.min %_ t.t %_",
+   "strRva": 141926348,
+   "func": "0x0298D26A",
+   "funcName": "",
+   "funcSize": 0
+  },
+  {
+   "group": "media",
+   "keyword": "create cdntask %_ for wecom %_ fileid %_",
+   "string": "create cdntask %_ for wecom %_ fileid %_ filetype %_ aeskey %_",
+   "strRva": 141926519,
+   "func": "0x0298BAEA",
+   "funcName": "",
+   "funcSize": 0
+  },
+  {
+   "group": "media",
+   "keyword": "filekey %_ url %_ host %_ filesize %_ ae",
+   "string": "filekey %_ url %_ host %_ filesize %_ aeskey %_ q.t %_, t.t %_",
+   "strRva": 141926619,
+   "func": "0x0298EE30",
+   "funcName": "",
+   "funcSize": 0
+  },
+  {
+   "group": "media",
+   "keyword": "!param.host_.empty() || param.forward_fi",
+   "string": "!param.host_.empty() || param.forward_fileid.empty() || (!param.forward_fileid.empty() && (!param.forward_aeskey.empty() || param.check_exist_only))",
+   "strRva": 141927529,
+   "func": "0x0297777A",
+   "funcName": "",
+   "funcSize": 0
+  },
+  {
+   "group": "media",
+   "keyword": "app aeskey %_(%_)",
+   "string": "app aeskey %_(%_)",
+   "strRva": 141927774,
+   "func": "0x02979243",
+   "funcName": "",
+   "funcSize": 0
+  },
+  {
+   "group": "media",
+   "keyword": "invalid aeskey len, make full upload.",
+   "string": "invalid aeskey len, make full upload.",
+   "strRva": 141927792,
+   "func": "0x02979386",
+   "funcName": "",
+   "funcSize": 0
+  },
+  {
+   "group": "media",
+   "keyword": "safecdn bigfile, fakeaeskey %_, fakesign",
+   "string": "safecdn bigfile, fakeaeskey %_, fakesignature %_",
+   "strRva": 141927830,
+   "func": "0x02979700",
+   "funcName": "",
+   "funcSize": 0
+  },
+  {
+   "group": "media",
+   "keyword": "safecdn bigfile, fakeaeskey %_, fakesign",
+   "string": "safecdn bigfile, fakeaeskey %_, fakesignature %_",
+   "strRva": 141927830,
+   "func": "0x0297ECE2",
+   "funcName": "",
+   "funcSize": 0
+  },
+  {
+   "group": "media",
+   "keyword": "aeskey %_(%_) fileid %_,",
+   "string": "aeskey %_(%_) fileid %_,",
+   "strRva": 141933948,
+   "func": "0x029A5988",
+   "funcName": "",
+   "funcSize": 0
+  },
+  {
+   "group": "media",
+   "keyword": "aeskey %_(%_) fileid %_ storage %_ small",
+   "string": "aeskey %_(%_) fileid %_ storage %_ smallvideo %_ autostart %_,",
+   "strRva": 141934088,
+   "func": "0x029A6451",
+   "funcName": "",
+   "funcSize": 0
+  },
+  {
+   "group": "media",
+   "keyword": ", aeskey:",
+   "string": ", aeskey:",
+   "strRva": 142085288,
+   "func": "0x02B0C4E7",
+   "funcName": "",
+   "funcSize": 0
+  },
+  {
+   "group": "media",
+   "keyword": "!aeskey_.empty()",
+   "string": "!aeskey_.empty()",
+   "strRva": 145051684,
+   "func": "0x0443230A",
+   "funcName": "",
+   "funcSize": 0
+  },
+  {
+   "group": "media",
+   "keyword": "!aeskey_.empty()",
+   "string": "!aeskey_.empty()",
+   "strRva": 145051684,
+   "func": "0x04433263",
+   "funcName": "",
+   "funcSize": 0
+  },
+  {
+   "group": "media",
+   "keyword": "!aeskey_.empty()",
+   "string": "!aeskey_.empty()",
+   "strRva": 145051684,
+   "func": "0x04433E03",
+   "funcName": "",
+   "funcSize": 0
+  },
+  {
+   "group": "media",
+   "keyword": "!option.aeskey.empty()",
+   "string": "!option.aeskey.empty()",
+   "strRva": 145051970,
+   "func": "0x04434756",
+   "funcName": "",
+   "funcSize": 0
+  },
+  {
+   "group": "media",
+   "keyword": "!option.aeskey.empty()",
+   "string": "!option.aeskey.empty()",
+   "strRva": 145051970,
+   "func": "0x05D5B740",
+   "funcName": "",
+   "funcSize": 0
+  },
+  {
+   "group": "media",
+   "keyword": "!option.aeskey.empty()",
+   "string": "!option.aeskey.empty()",
+   "strRva": 145051970,
+   "func": "0x05D5C88F",
+   "funcName": "",
+   "funcSize": 0
+  },
+  {
+   "group": "media",
+   "keyword": "use state aeskey %_ for filekey %_",
+   "string": "use state aeskey %_ for filekey %_",
+   "strRva": 145652146,
+   "func": "0x049CC387",
+   "funcName": "",
+   "funcSize": 0
+  },
+  {
+   "group": "media",
+   "keyword": "mismatch aeskey, param %_, state %_ use ",
+   "string": "mismatch aeskey, param %_, state %_ use state.",
+   "strRva": 145652181,
+   "func": "0x049CBD24",
+   "funcName": "",
+   "funcSize": 0
+  },
+  {
+   "group": "media",
+   "keyword": "safecdn mismatch aeskey, new %_, prev %_",
+   "string": "safecdn mismatch aeskey, new %_, prev %_",
+   "strRva": 145652258,
+   "func": "0x049CC0C3",
+   "funcName": "",
+   "funcSize": 0
+  },
+  {
+   "group": "media",
+   "keyword": "bigfile sign aeskey mismatch. state %_, ",
+   "string": "bigfile sign aeskey mismatch. state %_, param %_",
+   "strRva": 145652299,
+   "func": "0x049CC537",
+   "funcName": "",
+   "funcSize": 0
+  },
+  {
+   "group": "media",
+   "keyword": "cdntask %_ upload with buffer, size %_ a",
+   "string": "cdntask %_ upload with buffer, size %_ aeskey.len %_",
+   "strRva": 145656858,
+   "func": "0x049DC03B",
+   "funcName": "",
+   "funcSize": 0
+  },
+  {
+   "group": "media",
+   "keyword": "cdntask %_ upload with buffer, size %_ a",
+   "string": "cdntask %_ upload with buffer, size %_ aeskey.len %_",
+   "strRva": 145656858,
+   "func": "0x049F4CBE",
+   "funcName": "",
+   "funcSize": 0
+  },
+  {
+   "group": "media",
+   "keyword": "cdntask %_ has fileid without aeskey.",
+   "string": "cdntask %_ has fileid without aeskey.",
+   "strRva": 145657569,
+   "func": "0x049E0D30",
+   "funcName": "",
+   "funcSize": 0
+  },
+  {
+   "group": "media",
+   "keyword": "cdntask %_ has fileid without aeskey.",
+   "string": "cdntask %_ has fileid without aeskey.",
+   "strRva": 145657569,
+   "func": "0x049E57B6",
+   "funcName": "",
+   "funcSize": 0
+  },
+  {
+   "group": "media",
+   "keyword": "cdntask %_ has fileid without aeskey.",
+   "string": "cdntask %_ has fileid without aeskey.",
+   "strRva": 145657569,
+   "func": "0x04AC4966",
+   "funcName": "",
+   "funcSize": 0
+  },
+  {
+   "group": "media",
+   "keyword": "cdntask %_ has fileid without aeskey.",
+   "string": "cdntask %_ has fileid without aeskey.",
+   "strRva": 145657569,
+   "func": "0x04ACF0D6",
+   "funcName": "",
+   "funcSize": 0
+  },
+  {
+   "group": "media",
+   "keyword": "cdntask %_ hit md5 need clear aeskey",
+   "string": "cdntask %_ hit md5 need clear aeskey",
+   "strRva": 145683479,
+   "func": "0x04A550BF",
+   "funcName": "",
+   "funcSize": 0
+  },
+  {
+   "group": "media",
+   "keyword": "cdntask %_ hit fileid with different aes",
+   "string": "cdntask %_ hit fileid with different aeskey. replace my %_ with param %_",
+   "strRva": 145683516,
+   "func": "0x04A5544D",
+   "funcName": "",
+   "funcSize": 0
+  },
+  {
+   "group": "media",
+   "keyword": "aeskey %_ ",
+   "string": "aeskey %_ ",
+   "strRva": 145687477,
+   "func": "0x04A6C6E6",
+   "funcName": "",
+   "funcSize": 0
+  },
+  {
+   "group": "media",
+   "keyword": "upload succeed but aeskey invalid: %_(%_",
+   "string": "upload succeed but aeskey invalid: %_(%_)",
+   "strRva": 148142804,
+   "func": "0x05CE8B81",
+   "funcName": "",
+   "funcSize": 0
+  },
+  {
+   "group": "media",
+   "keyword": "cdntask %_ bf.rsavalue %_ aeskey %_",
+   "string": "cdntask %_ bf.rsavalue %_ aeskey %_",
+   "strRva": 148159491,
+   "func": "0x05D22491",
+   "funcName": "",
+   "funcSize": 0
+  },
+  {
+   "group": "media",
+   "keyword": "cdntask %_ rsavalue %_ aeskey %_",
+   "string": "cdntask %_ rsavalue %_ aeskey %_",
+   "strRva": 148159527,
+   "func": "0x05D21FE1",
+   "funcName": "",
+   "funcSize": 0
+  },
+  {
+   "group": "media",
+   "keyword": "nocheckaeskey",
+   "string": "nocheckaeskey",
+   "strRva": 148159637,
+   "func": "0x05DA6278",
+   "funcName": "",
+   "funcSize": 0
+  },
+  {
+   "group": "media",
+   "keyword": "nocheckaeskey",
+   "string": "nocheckaeskey",
+   "strRva": 148159637,
+   "func": "0x05DA8225",
+   "funcName": "",
+   "funcSize": 0
+  },
+  {
+   "group": "media",
+   "keyword": "raw aeskey %_,",
+   "string": "raw aeskey %_,",
+   "strRva": 148161333,
+   "func": "0x05D368F0",
+   "funcName": "",
+   "funcSize": 0
+  },
+  {
+   "group": "media",
+   "keyword": "raw aeskey %_,",
+   "string": "raw aeskey %_,",
+   "strRva": 148161333,
+   "func": "0x05D37FDF",
+   "funcName": "",
+   "funcSize": 0
+  },
+  {
+   "group": "media",
+   "keyword": "hitmd5 but decrypt aeskey failed.",
+   "string": "hitmd5 but decrypt aeskey failed.",
+   "strRva": 148161348,
+   "func": "0x05D3676C",
+   "funcName": "",
+   "funcSize": 0
+  },
+  {
+   "group": "media",
+   "keyword": "hitmd5 but decrypt aeskey failed.",
+   "string": "hitmd5 but decrypt aeskey failed.",
+   "strRva": 148161348,
+   "func": "0x05D37E0C",
+   "funcName": "",
+   "funcSize": 0
+  },
+  {
+   "group": "media",
+   "keyword": "cdntask %_ use previous aeskey:%_",
+   "string": "cdntask %_ use previous aeskey:%_",
+   "strRva": 148198634,
+   "func": "0x05DBFA60",
+   "funcName": "",
+   "funcSize": 0
+  },
+  {
+   "group": "media",
+   "keyword": "cdntask %_ use previous aeskey:%_",
+   "string": "cdntask %_ use previous aeskey:%_",
+   "strRva": 148198634,
+   "func": "0x05DCCC90",
+   "funcName": "",
+   "funcSize": 0
+  },
+  {
+   "group": "media",
+   "keyword": "cdntask %_ set aeskey history %_",
+   "string": "cdntask %_ set aeskey history %_",
+   "strRva": 148198814,
+   "func": "0x05DC3293",
+   "funcName": "",
+   "funcSize": 0
+  },
+  {
+   "group": "media",
+   "keyword": "cdntask %_ set aeskey history %_",
+   "string": "cdntask %_ set aeskey history %_",
+   "strRva": 148198814,
+   "func": "0x05DD1FA3",
+   "funcName": "",
+   "funcSize": 0
+  },
+  {
+   "group": "media",
+   "keyword": "cdntask %_, aeskey:%_",
+   "string": "cdntask %_, aeskey:%_",
+   "strRva": 148205240,
+   "func": "0x05DE5701",
+   "funcName": "",
+   "funcSize": 0
+  },
+  {
+   "group": "media",
+   "keyword": "cdnvideourl_pd_pri",
+   "string": "cdnvideourl_pd_pri",
+   "strRva": 141017465,
+   "func": "0x02315B3B",
+   "funcName": "",
+   "funcSize": 0
+  },
+  {
+   "group": "media",
+   "keyword": "cdnvideourl_pd",
+   "string": "cdnvideourl_pd",
+   "strRva": 141017484,
+   "func": "0x02315B83",
+   "funcName": "",
+   "funcSize": 0
+  },
+  {
+   "group": "media",
+   "keyword": "tpvideourl",
+   "string": "tpvideourl",
+   "strRva": 141019275,
+   "func": "0x0231AE68",
+   "funcName": "",
+   "funcSize": 0
+  },
+  {
+   "group": "media",
+   "keyword": "tpvideourl",
+   "string": "tpvideourl",
+   "strRva": 141019275,
+   "func": "0x0231C6BD",
+   "funcName": "",
+   "funcSize": 0
+  },
+  {
+   "group": "media",
+   "keyword": "cdnvideourl",
+   "string": "cdnvideourl",
+   "strRva": 141019286,
+   "func": "0x0231B01B",
+   "funcName": "",
+   "funcSize": 0
+  },
+  {
+   "group": "media",
+   "keyword": "cdnvideourl",
+   "string": "cdnvideourl",
+   "strRva": 141019286,
+   "func": "0x0231C5D2",
+   "funcName": "",
+   "funcSize": 0
+  },
+  {
+   "group": "media",
+   "keyword": "cdnrawvideourl",
+   "string": "cdnrawvideourl",
+   "strRva": 141019315,
+   "func": "0x0231B204",
+   "funcName": "",
+   "funcSize": 0
+  },
+  {
+   "group": "media",
+   "keyword": "cdnrawvideourl",
+   "string": "cdnrawvideourl",
+   "strRva": 141019315,
+   "func": "0x0231C30E",
+   "funcName": "",
+   "funcSize": 0
+  },
+  {
+   "group": "media",
+   "keyword": "streamvideourl",
+   "string": "streamvideourl",
+   "strRva": 141055614,
+   "func": "0x0238C4B5",
+   "funcName": "",
+   "funcSize": 0
+  },
+  {
+   "group": "media",
+   "keyword": "streamvideourl",
+   "string": "streamvideourl",
+   "strRva": 141055614,
+   "func": "0x0238C69E",
+   "funcName": "",
+   "funcSize": 0
+  },
+  {
+   "group": "media",
+   "keyword": "streamvideourl",
+   "string": "streamvideourl",
+   "strRva": 141055614,
+   "func": "0x03E1E5A3",
+   "funcName": "",
+   "funcSize": 0
+  },
+  {
+   "group": "media",
+   "keyword": "streamvideourl",
+   "string": "streamvideourl",
+   "strRva": 141055614,
+   "func": "0x03E1EC15",
+   "funcName": "",
+   "funcSize": 0
+  },
+  {
+   "group": "media",
+   "keyword": "voiceurl",
+   "string": "voiceurl",
+   "strRva": 141019612,
+   "func": "0x0231E2D2",
+   "funcName": "",
+   "funcSize": 0
+  },
+  {
+   "group": "media",
+   "keyword": "voiceurl",
+   "string": "voiceurl",
+   "strRva": 141019612,
+   "func": "0x0231EFA3",
+   "funcName": "",
+   "funcSize": 0
+  },
+  {
+   "group": "media",
+   "keyword": "cdnurlstring",
+   "string": "cdnurlstring",
+   "strRva": 137383962,
+   "func": "0x00A7B177",
+   "funcName": "",
+   "funcSize": 0
+  },
+  {
+   "group": "media",
+   "keyword": "cdnurlstring",
+   "string": "cdnurlstring",
+   "strRva": 137383962,
+   "func": "0x00A7B88B",
+   "funcName": "",
+   "funcSize": 0
+  },
+  {
+   "group": "media",
+   "keyword": "cdnurl",
+   "string": "cdnurl",
+   "strRva": 141020017,
+   "func": "0x02320DE3",
+   "funcName": "",
+   "funcSize": 0
+  },
+  {
+   "group": "media",
+   "keyword": "cdnurl",
+   "string": "cdnurl",
+   "strRva": 141020017,
+   "func": "0x029FA7BC",
+   "funcName": "",
+   "funcSize": 0
+  },
+  {
+   "group": "media",
+   "keyword": "cdnurl",
+   "string": "cdnurl",
+   "strRva": 141020017,
+   "func": "0x04CB440D",
+   "funcName": "",
+   "funcSize": 0
+  },
+  {
+   "group": "media",
+   "keyword": "filekey %_ ctrlinfo url %_ bakurl %_ qui",
+   "string": "filekey %_ ctrlinfo url %_ bakurl %_ quic %_ pcdnurl %_ net %_ timestamp %_ useugc %_ usepcdn %_ beginpcdn %_ exitpcdn %_ preloadpcdn %_ pcdn timeout count %_",
+   "strRva": 141901092,
+   "func": "0x0293FDC2",
+   "funcName": "",
+   "funcSize": 0
+  },
+  {
+   "group": "media",
+   "keyword": "cdntask %_ swap cdnurl",
+   "string": "cdntask %_ swap cdnurl",
+   "strRva": 145673948,
+   "func": "0x04A30ADC",
+   "funcName": "",
+   "funcSize": 0
+  },
+  {
+   "group": "media",
+   "keyword": "cdntask %_ use ctrlinfo flag %_ cdnurl %",
+   "string": "cdntask %_ use ctrlinfo flag %_ cdnurl %_ backurl %_ pcdnurl %_ reject_reason %_",
+   "strRva": 145674207,
+   "func": "0x049FCD6D",
+   "funcName": "",
+   "funcSize": 0
+  },
+  {
+   "group": "media",
+   "keyword": "cdntask %_ cdnurl add query %_",
+   "string": "cdntask %_ cdnurl add query %_",
+   "strRva": 145674295,
+   "func": "0x049FD37D",
+   "funcName": "",
+   "funcSize": 0
+  },
+  {
+   "group": "media",
+   "keyword": "cdntask %_ pcdnurl add query %_",
+   "string": "cdntask %_ pcdnurl add query %_",
+   "strRva": 145674406,
+   "func": "0x049FE431",
+   "funcName": "",
+   "funcSize": 0
+  },
+  {
+   "group": "media",
+   "keyword": "regenerate pcdnurl %_,",
+   "string": "regenerate pcdnurl %_,",
+   "strRva": 145675285,
+   "func": "0x04A15B32",
+   "funcName": "",
+   "funcSize": 0
+  },
+  {
+   "group": "media",
+   "keyword": "redirectcdnurl",
+   "string": "redirectcdnurl",
+   "strRva": 145676124,
+   "func": "0x04A17799",
+   "funcName": "",
+   "funcSize": 0
+  },
+  {
+   "group": "media",
+   "keyword": "back_redirectcdnurl",
+   "string": "back_redirectcdnurl",
+   "strRva": 145676139,
+   "func": "0x04A11CA2",
+   "funcName": "",
+   "funcSize": 0
+  },
+  {
+   "group": "media",
+   "keyword": "back_redirectcdnurl",
+   "string": "back_redirectcdnurl",
+   "strRva": 145676139,
+   "func": "0x04A1755D",
+   "funcName": "",
+   "funcSize": 0
+  },
+  {
+   "group": "media",
+   "keyword": "back_redirectcdnurl",
+   "string": "back_redirectcdnurl",
+   "strRva": 145676139,
+   "func": "0x04A83FB6",
+   "funcName": "",
+   "funcSize": 0
+  },
+  {
+   "group": "media",
+   "keyword": "redirectpcdnurl",
+   "string": "redirectpcdnurl",
+   "strRva": 145676233,
+   "func": "0x04A17E4D",
+   "funcName": "",
+   "funcSize": 0
+  },
+  {
+   "group": "media",
+   "keyword": ",empty pcdnurl",
+   "string": ",empty pcdnurl",
+   "strRva": 145692044,
+   "func": "0x04A89DF5",
+   "funcName": "",
+   "funcSize": 0
+  },
+  {
+   "group": "cgi",
+   "keyword": "",
+   "string": "/cgi-bin/micromsg-bin/transfer/",
+   "strRva": 139717351,
+   "func": "0x0196E784",
+   "funcName": "",
+   "funcSize": 0
+  },
+  {
+   "group": "cgi",
+   "keyword": "newgetdns?uin=%u&clientversion=%u&scene=",
+   "string": "/cgi-bin/micromsg-bin/newgetdns?uin=%u&clientversion=%u&scene=%d&net=%d&md5=%s&devicetype=%s&lan=%s&sigver=%d&lasteffecttime=%s&xagreementid=%u&networkid=%s&networkidctx=%s&mccmnc=%s&regctx=%u",
+   "strRva": 141874127,
+   "func": "0x0288953E",
+   "funcName": "",
+   "funcSize": 0
+  },
+  {
+   "group": "cgi",
+   "keyword": "newgetdns?uin=%u&clientversion=%u&scene=",
+   "string": "/cgi-bin/micromsg-bin/newgetdns?uin=%u&clientversion=%u&scene=%d&net=%d&md5=%s&devicetype=%s&lan=%s&sigver=%d&lasteffecttime=%s&xagreementid=%u&networkid=%s&networkidctx=%s&mccmnc=%s&regctx=%u",
+   "strRva": 141874127,
+   "func": "0x02897E49",
+   "funcName": "",
+   "funcSize": 0
+  }
+ ]
+}

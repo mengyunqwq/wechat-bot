@@ -21,6 +21,7 @@ import { fileURLToPath } from 'node:url'
 import { WebSocketServer } from 'ws'
 import { StickerLibrary } from './lib/stickers.mjs'
 import { createApiHandler } from './lib/api-http.mjs'
+import { setForensicsDir, mark as fMark, snapshot as fSnapshot } from './lib/forensics.mjs'
 import { HostedMode } from './lib/hosted.mjs'
 import { splitMessage, gapMs } from './lib/policy.mjs'
 import { WcfBridge } from './lib/wcf.mjs'
@@ -45,6 +46,7 @@ const SDK_PORT = Number(opt('sdk-port', '10086'))
 const DEBUG = flag('debug')
 const ROOT_DIR = dirname(fileURLToPath(import.meta.url))   // 注意：不能用 new URL().pathname（中文会被 URL 编码）
 const DATA_DIR = opt('data-dir', join(HERE, '..', 'data'))
+setForensicsDir(join(DATA_DIR, 'logs'))
 const STICKER_DIR = join(DATA_DIR, 'stickers')
 const LOG_DIR = join(DATA_DIR, 'logs')
 
@@ -100,11 +102,20 @@ try {
 const clients = new Set()
 const counters = { msgsIn: 0, msgsOut: 0, stickersCaptured: 0, drops: 0, errors: 0 }
 
+const LOG_MAX_BYTES = Number(process.env.WECHAT_LOG_MAX_MB || 100) * 1048576
+let logSize = -1
+let logPath = ''
 function log(...args) {
   const line = '[' + new Date().toISOString() + '] ' + args.map(String).join(' ')
   console.log(line)
   try {
-    appendFileSync(join(LOG_DIR, 'bridge-' + new Date().toISOString().slice(0, 10) + '.log'), line + '\n')
+    const p = join(LOG_DIR, 'bridge-' + new Date().toISOString().slice(0, 10) + '.log')
+    // 每次重新 stat（多进程/追加安全）；超过阈值直接丢弃，防止日志打爆磁盘
+    if (p !== logPath) { logPath = p; logSize = existsSync(p) ? statSync(p).size : 0 }
+    if (logSize < 0) logSize = existsSync(p) ? statSync(p).size : 0
+    if (logSize > LOG_MAX_BYTES) { console.log('[log] 文件超过 ' + Math.round(LOG_MAX_BYTES/1048576) + 'MB，丢弃后续日志（防磁盘打爆）'); return }
+    appendFileSync(p, line + '\n')
+    logSize += line.length + 1
   } catch { /* ignore */ }
 }
 
@@ -157,12 +168,13 @@ const events = {
     wcfInjected = false
     setTimeout(() => ensureWcf(), 5000)
   },
-  error: (p) => { counters.errors++; log('error', p.message); broadcast({ t: 'error', ...p }) },
+  error: (p) => { counters.errors++; fMark('error', String(p?.message || '')); log('error', p.message); broadcast({ t: 'error', ...p }) },
   sticker: (p) => { counters.stickersCaptured++; broadcast({ t: 'sticker', ...p }) },
   'sticker-miss': (p) => { log('sticker-miss', JSON.stringify(p)); broadcast({ t: 'sticker-miss', ...p }) },
-  sended: (p) => broadcast({ t: 'sended', ...p }),
+  sended: (p) => { fMark('sent', JSON.stringify({ room: p?.roomId || p?.room || '', kind: p?.kind || p?.type || '' })); broadcast({ t: 'sended', ...p }) },
   msg: (m) => {
     counters.msgsIn++
+    fMark('msg', JSON.stringify({ room: m?.roomId || '', from: m?.senderName || m?.sender || '', type: m?.typeName || m?.type || '', text: String(m?.text || '').slice(0, 60) }))
     // 丢弃历史积压（WCF 注入时可能回放旧消息；真人不会回复 2 分钟前的话）
     const age = Date.now() - (m.ts || 0)
     if (age > 90_000 && !MOCK) {
@@ -342,6 +354,7 @@ setInterval(() => {
 //    ② 轮询连续失败/暂停 → 进程内重新 init 一次
 //    ③ 其它异常只记日志（人能看清、能决定要不要人工介入）
 let _wdFails = 0
+let _lastResumeAt = 0
 setInterval(async () => {
   try {
     let hookOk = false
@@ -361,8 +374,17 @@ setInterval(async () => {
     const poller = bridge.poller
     const consec = Number(poller?._consecFail || 0)
     const paused = typeof poller?.paused === 'function' ? poller.paused() : false
+    const hard = typeof poller?.hardStopped === 'function' ? poller.hardStopped() : false
 
-    if (hookOk && (consec >= 5 || paused)) {
+    // ★ 2026-10-25（A）：硬闸只能用 resume()/restartPoller() 清；init() 不清硬闸。
+    //   之前这里调 init() → init 成功但 _hardGiveUp 仍 true → tick 永远 return 0 → 永久失聪。
+    //   冷却 10 分钟，避免反复探测把微信搞崩（硬闸存在的理由）。
+    if (hookOk && hard && Date.now() - _lastResumeAt > 10 * 60_000) {
+      _lastResumeAt = Date.now()
+      _wdFails++
+      log('看门狗：⚠️ 轮询处于硬闸 → resume + 重启轮询（10 分钟冷却）')
+      try { await bridge.restartPoller?.('看门狗自愈') } catch (e) { log('看门狗：restartPoller 失败 ' + String(e?.message || e)) }
+    } else if (hookOk && (consec >= 5 || paused)) {
       _wdFails++
       log(`看门狗：⚠️ 轮询异常（连续失败 ${consec}，暂停中=${paused}）→ 进程内重新初始化`)
       try { await poller?.init?.() } catch (e) { log('看门狗：重init轮询失败 ' + String(e?.message || e)) }
@@ -384,9 +406,16 @@ async function handle(op, a = {}) {
       return { ...bridge.status(), startedAt, counters, uptimeSec: Math.round((Date.now() - startedAt) / 1000) }
     case 'pollResume': {
       // 手动解除轮询硬闸（探测连续失败 3 轮后会自己停，防把微信探测崩）
-      try { bridge.poller?.resume?.('手动 /api/pollResume') } catch { /* ignore */ }
-      const p = bridge.poller
-      return { ok: true, hardStopped: typeof p?.hardStopped === 'function' ? p.hardStopped() : false }
+      // ★ 2026-10-25：走 restartPoller（resume + 真正重启轮询）。
+      //   只 resume() 的话：硬闸清了、状态看着正常，但如果 poller 处于 stopped
+      //   （_startPoller 没被调），tick 根本不会跑 → 能读库但一条消息都读不到。
+      let restarted = false
+      try { restarted = await bridge.restartPoller?.('手动 /api/pollResume') } catch { /* ignore */ }
+      return { ok: true, restarted, ...bridge.pollStatus?.() }
+    }
+    case 'pollStatus': {
+      // 只读：轮询器快照（硬闸 / 暂停 / 连续失败 / 轮数 / 条数 / 表数）
+      return { ok: true, ...bridge.pollStatus?.() }
     }
     case 'wechatPower': {
       // 微信客户端电源开关：kill = 杀进程，start = 启动并自动点「进入微信」，status = 查状态

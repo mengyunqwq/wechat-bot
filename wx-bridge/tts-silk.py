@@ -194,33 +194,36 @@ def _edge_hint(err):
 
 
 def synth_mp3(text, voice, rate, pitch, out_mp3, timeout=SYNTH_TIMEOUT):
-    """edge-tts 在线合成 → mp3。失败抛 StageError('edge-tts'|'network')"""
+    """GPT-SoVITS 合成（替换 edge-tts）。输出 wav（ffmpeg 可处理）"""
+    import urllib.request
+    import json as _json
+    api = os.environ.get('GPT_SOVITS_API', 'http://127.0.0.1:9880/tts')
+    ref = os.environ.get('GPT_SOVITS_REF', r'D:\微信deepseek\data\sexy-loli-cn\separated\htdemucs\【中文音声】许久未见的雌小鬼，向你表达爱意\cn-a.wav')
+    prompt = os.environ.get('GPT_SOVITS_PROMPT', '就像是一根被流酸泡过的麻辣秋衣一样这么久不见，大哥哥有没有想我呀')
+    body = {
+        'text': text,
+        'text_lang': 'zh',
+        'ref_audio_path': ref,
+        'prompt_lang': 'zh',
+        'prompt_text': prompt,
+        'text_split_method': 'cut5',
+        'batch_size': 1,
+        'media_type': 'wav',
+    }
     try:
-        import edge_tts
+        req = urllib.request.Request(api, data=_json.dumps(body).encode('utf-8'),
+                                     headers={'Content-Type': 'application/json'})
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            data = r.read()
     except Exception as e:
-        raise StageError('edge-tts', '没装 edge-tts：pip install edge-tts ｜ 原始错误: %s' % e)
-
-    async def _save():
-        comm = edge_tts.Communicate(text, voice, rate=rate, pitch=pitch)
-        await comm.save(out_mp3)
-
-    try:
-        asyncio.run(asyncio.wait_for(_save(), timeout=timeout))
-    except asyncio.TimeoutError:
-        raise StageError('edge-tts', '合成超时（>%ss）：网络太慢或文本过长' % timeout)
-    except StageError:
-        raise
-    except Exception as e:
-        hint = _edge_hint(e)
-        stage = 'network' if '网络不通' in hint else 'edge-tts'
-        raise StageError(stage, hint)
-    if not os.path.exists(out_mp3) or os.path.getsize(out_mp3) < 1024:
-        raise StageError('edge-tts', '合成产物异常（%s，%d 字节）——可能是空文本或服务端返回错误'
-                         % (out_mp3, os.path.getsize(out_mp3) if os.path.exists(out_mp3) else 0))
-    return os.path.getsize(out_mp3)
+        raise StageError('tts', 'GPT-SoVITS API 失败: %s' % e)
+    if not data or data[:4] != b'RIFF':
+        raise StageError('tts', 'GPT-SoVITS 返回非 wav: %r' % data[:200])
+    with open(out_mp3, 'wb') as f:
+        f.write(data)
+    return len(data)
 
 
-# ── ② ffmpeg → 24kHz 单声道 PCM16 ─────────────────────────────
 def probe_duration(ff, src):
     """从 ffmpeg 探测输出取时长（秒）；取不到返回 0"""
     rc, out = run([ff, '-hide_banner', '-i', src], timeout=60)

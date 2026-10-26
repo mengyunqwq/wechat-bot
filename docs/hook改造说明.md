@@ -1,5 +1,3 @@
-> 📌 **说明（2026-10-24）**：hook 源码已公开在 https://github.com/mengyunqwq/wechat-hook ，本文档里的补丁流程已过时，仅作历史记录。
-
 # WeChat-Hook 改造说明（群成员昵称）
 
 > 目标：让机器人拿到**微信群成员的真实昵称**。
@@ -24,7 +22,7 @@
 
 ## 二、改了哪三处（共 3 个文件）
 
-源码目录：`C:\wxhook-src\WeChat-Hook`（`git clone https://github.com/aixed/WeChat-Hook.git`）
+源码目录：`E:\wxhook-src\WeChat-Hook`（`git clone https://github.com/aixed/WeChat-Hook.git`）
 
 ### 1. `xdb/db_mgr.cpp` —— 自愈登录标志 + 扫描加固
 
@@ -62,7 +60,7 @@ VFS 扫描命中数、每个候选句柄的 `errcode`/`prepare_rc`、已发现�
 winget install --id Microsoft.VisualStudio.2022.BuildTools `
   --override "--quiet --wait --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended"
 
-cd C:\wxhook-src\WeChat-Hook
+cd E:\wxhook-src\WeChat-Hook
 & "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\MSBuild\Current\Bin\MSBuild.exe" `
   x64_Version_dll.vcxproj /m /t:Build /p:Configuration=Release /p:Platform=x64
 # 产物：x64\Release\version.dll
@@ -119,7 +117,7 @@ FROM chatroom_member m
 JOIN name2id r ON r.rowid = m.room_id
 JOIN name2id u ON u.rowid = m.member_id
 JOIN contact c ON c.username = u.username
-WHERE r.username = '<群ID>@chatroom'
+WHERE r.username = '47390425951@chatroom'
 ```
 
 其余可用的库：`bizchat.db`、`emoticon.db`、`message_0.db`、`session.db`、`media_0.db`、`favorite.db`、
@@ -166,7 +164,7 @@ WHERE r.username = '<群ID>@chatroom'
 
 | 数据 | 正确来源 | 坑 |
 |---|---|---|
-| 会话表 ↔ 群/人 | `md5(wxid)` = `Msg_<hash>` 的表名后缀 | 已验证：`<群ID>@chatroom` → `faba2ca94574a850e8f86710890552de` |
+| 会话表 ↔ 群/人 | `md5(wxid)` = `Msg_<hash>` 的表名后缀 | 已验证：`47390425951@chatroom` → `faba2ca94574a850e8f86710890552de` |
 | 发送者 | **`message_0.db.Name2Id`** 的 `rowid → user_name` | ✗ 不能用 `contact.db.Name2Id`（那是全局编号，实测映射成 weixin/notifymessage） |
 | 自己发的消息 | 无 `wxid_xxx:` 前缀 + `real_sender_id` = 自己 | 自己 wxid 可从数据目录名 `xwechat_files\wxid_xxx_hash` 推出 |
 | 消息时间 | `create_time`（Unix 秒） | 用于匹配图片文件，别用"当前时间" |
