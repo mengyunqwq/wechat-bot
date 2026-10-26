@@ -269,8 +269,19 @@ export class DbPoller {
       } catch { /* ignore */ }
     }
 
+    // ── 新会话表回补（2026-10-27 修复）────────────────────────────────────
+    // ⚠️ 实测坑：被拉进【新群】时微信才创建该群的 Msg_ 表。轮询器 2 分钟重扫发现它时，
+    //    如果按"当前最大 local_id"起步，群里刚建群那几条消息就【永远看不到】——
+    //    用户看到的现象就是"把机器人拉进新群，它不理人"。
+    // 修法：重扫时【新出现】的表，回补最近 NEW_TABLE_BACKFILL 条；
+    //    首次启动（还没跑过一轮）不回补，避免把整段历史当新消息重放。
+    const prevTables = this.tables instanceof Map ? new Map(this.tables) : new Map()
+    const hadTablesBefore = this._hadTablesOnce === true
+    const NEW_TABLE_BACKFILL = 30
+
     this.tables.clear()
     let unknown = 0
+    let backfilled = 0
     for (const t of tabs) {
       const table = String(t.name || '')
       const hash = table.replace(/^Msg_/, '')
@@ -280,11 +291,25 @@ export class DbPoller {
       try {
         const mx = await this.q('message_0.db', `SELECT COALESCE(MAX(local_id),0) AS m FROM ${table}`)
         lastId = Number(mx[0]?.m || 0)
+        // 新出现的会话表 + 已经在跑 → 回补最近一批
+        if (hadTablesBefore && !prevTables.has(table) && lastId > 0) {
+          lastId = Math.max(0, lastId - NEW_TABLE_BACKFILL)
+          backfilled++
+          this.log(`新群/新会话表出现：${roomId || table.slice(0, 18)} → 回补最近 ${Math.min(NEW_TABLE_BACKFILL, lastId + NEW_TABLE_BACKFILL)} 条`)
+        }
       } catch { /* ignore */ }
       // 必须保证是有限数字：坏值会让 pollTableOnce 的 SQL 直接 prepare 失败（见那里的注释）
       if (!Number.isFinite(lastId) || lastId < 0) lastId = 0
       this.tables.set(table, { roomId, lastId })
     }
+    if (this.tables.size > 0) this._hadTablesOnce = true
+    if (backfilled) this.log(`本次重扫：回补了 ${backfilled} 个新会话`)
+
+    // 消息库分片可能被微信轮换（message_0 → message_1 …）：把实际在用的分片记下来，便于排查
+    try {
+      const shard = this._shard || '(未解析)'
+      if (this._lastShardLogged !== shard) { this._lastShardLogged = shard; this.log('当前消息库分片：' + shard) }
+    } catch { /* ignore */ }
     if (typeof this.onReady === 'function') { try { this.onReady(this.selfWxid) } catch { /* ignore */ } }
     this.log(`数据库轮询就绪：${this.tables.size} 个会话（${unknown} 个未匹配到 wxid）｜发送者映射 ${this.senderMap.size} 条`)
     // 关键：0 个会话**不算成功** —— 微信会把闲置的数据库关掉，这时列表就是空的。
