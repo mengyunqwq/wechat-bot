@@ -1673,8 +1673,15 @@ async function renderMomentExtra() {
         `<div class="item"><span class="muted">${esc(k)}</span><span>${esc(String(v))}</span></div>`).join('')}
         ${s2.lastText ? `<div class="item"><span class="muted">上次文案</span><span>${esc(s2.lastText)}</span></div>` : ''}</div>`;
     } catch (e) {
-      st.textContent = '状态读取失败：' + e.message;
-      hist.innerHTML = '<div class="empty">状态读取失败</div>';
+      const msg = String(e.message || e);
+      const needRestart = /不允许的操作/.test(msg);
+      st.textContent = needRestart
+        ? '⚠️ 插件代码是旧版本（页面已更新但插件没重载）'
+        : ('状态读取失败：' + msg);
+      hist.innerHTML = needRestart
+        ? ('<div class="empty">👉 去「诊断」页点<b>热重载插件</b>，或重启 DSH（不是重启微信）<br>' +
+           '<span class="muted small">' + esc(msg) + '</span></div>')
+        : ('<div class="empty">状态读取失败：' + esc(msg) + '</div>');
     }
   }
 
