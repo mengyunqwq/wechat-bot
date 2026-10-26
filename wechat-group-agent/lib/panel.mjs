@@ -31,6 +31,8 @@ const ALLOWED_OPS = new Set([
   'checkUpdate', 'updateInfo', 'applyUpdate',
   // 2026-10-22：微信客户端电源（关进程 / 开进程+自动点进入微信）
   'wechatPower',
+  // 2026-10-26：发朋友圈（hook 内 /Moment/Post，进程内自动操作）
+  'postMoment', 'momentStatus', 'momentNow',
 ])
 
 // 不做模块级缓存：热重载后 panel/index.html 的改动必须立刻可见

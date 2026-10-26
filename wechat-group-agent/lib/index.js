@@ -15,12 +15,14 @@
  * 纯 ESM，无编译步骤（本环境没有可用的 tsc），改完 dev_reload_package 即生效。
  */
 import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, unlinkSync, writeFileSync, copyFileSync, rmSync } from 'node:fs'
-import { execFileSync } from 'node:child_process'
+import { execFileSync, execSync } from 'node:child_process'
 import { request as httpsRequest } from 'node:https'
 import { join, dirname } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { homedir } from 'node:os'
 import { createHash, randomUUID } from 'node:crypto'
 import { BridgeClient } from './bridge-client.mjs'
+import { pickMomentImage } from './moment-image.mjs'
 import { createPetBridge } from './pet-bridge.mjs'
 // 配置元数据先静态拿一份（校验用）；真正挂面板时会用带 cache-bust 的动态 import
 // 再加载一份最新的（热重载后改了 label/范围不用重启 DSH）。
@@ -39,7 +41,9 @@ try {
   appendFileSync(pf, `[${new Date().toISOString()}] [module] 模块求值开始\n`)
 } catch { /* ignore */ }
 
-export const name = '@dsh-external/dsh-wechat-bot'// Cordis 4.0.4 的 inject 只认**数组**或"服务名→配置"映射；
+export const name = '@dsh-external/dsh-wechat-bot'
+export const version = '1.4.0'
+// Cordis 4.0.4 的 inject 只认**数组**或"服务名→配置"映射；
 // 写成 { required, optional } 会让依赖解析失败、fiber 永远 pending（踩过：改了代码却一直跑旧实例）。
 // 这里只声明必然存在的两个服务；attachments（视觉识别用）改为**惰性获取**，
 // 免得某个作用域取不到它时把整个插件卡在 pending。
@@ -68,6 +72,59 @@ function normText(s) {
     .replace(/[\s，。！？!?~…,.、""''（）()\[\]{}:：;；]/g, '')
     .toLowerCase()
     .slice(0, 60)
+}
+
+/**
+ * 记忆专用归一化：和 normText 的区别是**不截短到 60**。
+ *  为什么：记忆条目最长 200 字，用 60 字窗口比较时，后半句的差异会被抹掉，
+ *  导致「同一件事换个说法」既可能漏判重复、也可能误杀。重复回复判定仍用 normText（不变）。
+ */
+function normFact(s) {
+  return String(s || '')
+    .replace(/\[[^\]]{0,20}\]/g, '')
+    .replace(/@[^\s@]{1,24}/g, '')
+    .replace(/[\s，。！？!?~…,.、""''（）()\[\]{}:：;；]/g, '')
+    .toLowerCase()
+    .slice(0, 220)
+}
+
+/**
+ * 两条记忆是否「讲的是同一件事」。
+ *  原先只判断完全相等 → 模型每次换个说法就成新条目，记忆越攒越重复。
+ *  这里加三层判定：完全相等 / 包含关系 / 字符二元组 Jaccard 相似度。
+ *  阈值 0.72：偏保守，宁可少合并，也不把两件不同的事错误合并。
+ */
+function factSimilar(a, b) {
+  const A = String(a || ''), B = String(b || '')
+  if (!A || !B) return false
+  if (A === B) return true
+  // 包含关系（"老王是群主" vs "老王是群主，管得很松"）—— 长度门槛 4 字，避免短串误伤
+  if (A.length >= 4 && B.length >= 4 && (A.includes(B) || B.includes(A))) return true
+  // 编辑距离相似度：对「中间插个字/换个词」比二元组敏感
+  const maxLen = Math.max(A.length, B.length)
+  if (Math.abs(A.length - B.length) / maxLen > 0.5) return false   // 长度差太多，直接否
+  const dist = editDistance(A, B)
+  return 1 - dist / maxLen >= 0.8
+}
+
+/** Levenshtein 编辑距离（两行滚动数组，避免大数组） */
+function editDistance(a, b) {
+  const m = a.length, n = b.length
+  if (!m) return n
+  if (!n) return m
+  let prev = new Array(n + 1)
+  for (let j = 0; j <= n; j++) prev[j] = j
+  for (let i = 1; i <= m; i++) {
+    const cur = new Array(n + 1)
+    cur[0] = i
+    const ai = a.charCodeAt(i - 1)
+    for (let j = 1; j <= n; j++) {
+      const cost = ai === b.charCodeAt(j - 1) ? 0 : 1
+      cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + cost)
+    }
+    prev = cur
+  }
+  return prev[n]
 }
 
 /**
@@ -281,10 +338,14 @@ const DEFAULT_CONFIG = {
   // hook 侧还有独立开关（<客户端目录>\hook-voice-send.on 或 POST /Debug/VoiceSend {"on":true}）——
   // 开关没开时 hook 返回 -1001，日志会打清楚原因（不会静默失败）。
   voiceSay: false,                 // 总开关（默认**关**：先自测通过再开）
+  voiceModelOn: true,               // 语音模型：true=常驻（时刻准备）/ false=关闭（省 GPU）
+  voicePreset: '雌小鬼·A（当前）',  // 音色预设（当前用 GPT-SoVITS）
+  // 更新检查的自定义版本源（不依赖 GitHub）：逗号分隔 URL，返回 {"version":"1.3.x"} 即采用。
+  // 适合自建对象存储 / 局域网共享 / 别的托管；也可填第三方镜像。
+  updateMirror: '',
   voiceSayProbability: 0.2,        // 普通回复改成语音的概率
   voiceSayOnVoiceProbability: 0.5, // 收到**语音**消息时用语音回的概率（对称，最像真人）
   voiceSayMaxChars: 60,            // 超过这么多字就发文字（语音太长很怪）
-  voiceSayEmotion: 'main',         // 音色预设：main/sweet/angry/serious
   visionCacheMax: 500,           // 识图结果缓存条数（同一张图只识别一次；超出丢最早的）
   visionProvider: 'opencodego-extra',
   visionModel: 'deepseek-v4-flash-vision-exp',
@@ -382,6 +443,22 @@ const DEFAULT_CONFIG = {
   proactiveMaxStreak: 2,         // 连续主动 N 次都没人理就不再主动（有人说话才清零）
   proactiveCheckMs: 300_000,     // 检查间隔 5 分钟
   proactiveHours: '08:00-23:00', // 只在这个时间段主动（配合作息：醒了才冒泡，睡了就安静）
+
+  // ── 朋友圈自动发布（2026-10-26）─────────────────────────────────────────
+  // 大肥鱼自己发朋友圈：到点由 LLM 写文案 → 调 hook 的 /Moment/PostSilent 静默发布（不动鼠标/不抢前台）
+  momentAuto: false,             // 总开关（默认关，面板里自己开）
+  momentMinGapMs: 6 * 3_600_000, // 两条之间最短间隔（默认 6 小时）
+  momentMaxGapMs: 12 * 3_600_000,// 两条之间最长间隔（默认 12 小时）—— 实际间隔在区间内随机
+  momentDailyMax: 2,             // 每天最多发几条
+  momentHours: '09:00-23:00',    // 只在这个时间段发
+  momentUseLLM: true,            // true = 由 AI 写文案；false = 从内置句子随机挑
+  momentCheckMs: 300_000,        // 检查间隔（5 分钟）
+  momentTopic: '写一条日常碎碎念：可以是心情、吃的、天气、刷到的东西、吐槽。短句，40 字以内，口语化，不要加引号，不要提"朋友圈"三个字，不要 @ 任何人。',
+  momentNotifyRoom: '',          // 发完在哪个群吱一声（留空 = 不吱声）
+  momentAutoImage: false,        // true = 发之前先配一张图
+  momentImageSource: 'char',     // 配图来源：char=蓝色大肥鱼本人(i2i) | web=网上随机动漫图 | ai=文生图
+  momentImageStyle: '生活感照片，真实质感，自然光，构图干净，竖构图也行；不要任何文字、水印、logo',
+  momentImageRatio: '4:3',       // 生图画幅
   // 记忆与日志
   contextMessages: 24,
   historyLookup: true,             // 群里提起以前的事时，从微信数据库翻历史（本地查询，0 token）
@@ -481,6 +558,33 @@ const BUILD_VER = '2026-10-23.4'   // 抬版本：让新实例压过热重载残
     return v
   }
 
+  /** 语音模型启停（voiceModelOn）：true=启动 api_v2（常驻），false=杀 api_v2（省 GPU） */
+  function applyModelSwitch(on) {
+    // ★ 2026-10-26：这里原来是 `const { execSync } = require('node:child_process')`，
+    //   但本插件是 ESM（package.json type:module），ESM 里没有 require →
+    //   一进函数就 ReferenceError，被调用点的 `catch { /* ignore */ }` 吞掉，
+    //   结果就是**面板开关完全失灵：voiceModelOn=true 但 api_v2 从没被启动过**。
+    //   改用顶部 import 的 execSync（已补进 import）。
+    const listCmd = 'wmic process where "name=\'python.exe\' and commandline like \'%api_v2%\'" get processid /format:list'
+    let pids = []
+    try {
+      const out = execSync(listCmd, { encoding: 'utf8', windowsHide: true })
+      pids = (out.match(/ProcessId=(\d+)/g) || []).map((s) => Number(s.split('=')[1]))
+    } catch { /* ignore */ }
+    if (on) {
+      if (pids.length) { log('语音模型：api_v2 已在跑'); return }
+      try {
+        execSync('start "" /B "D:\\Python311\\python.exe" "D:\\微信deepseek\\data\\GPT-SoVITS\\api_v2.py"', {
+          cwd: 'D:\\微信deepseek\\data\\GPT-SoVITS', windowsHide: true, shell: 'cmd.exe',
+        })
+        log('语音模型：api_v2 已启动（常驻）')
+      } catch (e) { log('语音模型：启动失败 ' + String(e?.message || e).slice(0, 100)) }
+    } else {
+      for (const pid of pids) { try { execSync('taskkill /PID ' + pid + ' /F', { stdio: 'ignore', windowsHide: true }) } catch { /* ignore */ } }
+      if (pids.length) log('语音模型：已关闭 api_v2（释放 GPU）')
+    }
+  }
+
   /** 批量应用配置：要么全部通过校验再写，要么一条都不改。 */
   function applyConfigPatch(patch) {
     const applied = []
@@ -503,6 +607,25 @@ const BUILD_VER = '2026-10-23.4'   // 抬版本：让新实例压过热重载残
       if (k === 'quietHours' && quietNext) { quietWindows.length = 0; quietWindows.push(...quietNext) }
     }
     for (const r of rooms.values()) r.policy.cfg = config
+    // voiceModelOn 变化 → 真正启停 api_v2
+    //  ★ 原来这里是 `catch { /* ignore */ }`，把 ReferenceError 全吞了，
+    //    导致「开关开着但模型没起」这种问题被隐藏了几个月。现在记日志。
+    if (next.voiceModelOn !== undefined) {
+      try { applyModelSwitch(next.voiceModelOn) } catch (e) { log('语音模型启停失败：' + String(e?.message || e).slice(0, 160)) }
+    }
+
+    // 朋友圈参数一变就重新排期 —— 否则用户把间隔调短了，还要等旧的 nextAt 到点才生效
+    if (Object.keys(next).some((k) => k.startsWith('moment'))) {
+      try {
+        if (next.momentAuto === false) {
+          momentState.nextAt = 0
+        } else {
+          planNextMoment(Date.now())
+          log(`朋友圈：参数已更新，下次约 ${Math.round(((momentState.nextAt - Date.now()) / 3600000) * 10) / 10} 小时后`)
+        }
+        saveMomentState()
+      } catch (e) { log('朋友圈重新排期失败：' + String(e?.message || e)) }
+    }
     if (applied.length) {
       persistConfig()
       log('配置变更：' + applied.map((x) => x.key + '=' + JSON.stringify(x.value)).join('，'))
@@ -618,6 +741,19 @@ const namesFile = join(dirname(memoryDir), 'members.json')
     } catch { /* ignore */ }
   }
 
+  // ── 取证日志：崩溃/断线前 60 秒做了什么（只写文件，不影响流程）────────
+  let fLogPath = ''
+  function fMark(cat, detail) {
+    try {
+      if (!fLogPath) {
+        const d = join(dirname(memoryDir), 'logs')
+        mkdirSync(d, { recursive: true })
+        fLogPath = join(d, 'forensics.log')
+      }
+      const text = String(typeof detail === 'string' ? detail : JSON.stringify(detail || {})).replace(/[\r\n]+/g, ' ').slice(0, 400)
+      appendFileSync(fLogPath, new Date().toISOString() + '\t' + cat + '\t' + text + '\n')
+    } catch { /* ignore */ }
+  }
   function log(...args) {
     const line = '[' + new Date().toISOString() + '] ' + args.map(String).join(' ')
     try {
@@ -984,6 +1120,7 @@ const namesFile = join(dirname(memoryDir), 'members.json')
   async function handleMsg(m) {
     if (!m || !m.roomId) return
     stats.msgIn++
+    fMark('msg', { room: m.roomId, from: m.senderName || m.sender || '', type: m.typeName || m.type || '', text: String(m.text || '').slice(0, 50), id: m.id || '' })
     lastMsgAt = Date.now()      // 健康自检用它判断"轮询还在不在工作"（收到消息 = 轮询活着）
     const r = roomState(m.roomId, m.roomName)
     r.lastActivityAt = Date.now()      // 主动找话题要判断"群里多久没动静了"
@@ -1210,12 +1347,112 @@ const namesFile = join(dirname(memoryDir), 'members.json')
   }
 
   /** 写一条长期记忆（自动去重、限量） */
+  /**
+   * 对已有的长期记忆做一次自我去重（治存量）。
+   *  旧代码只判断完全相等，所以历史上攒下不少「换说法」的重复条目。
+   *  合并策略：保留信息更全的（更长的），时间用较新的。
+   * @returns {number} 被合并掉的条数
+   */
+  function dedupFacts(r) {
+    const facts = r.facts || []
+    if (facts.length < 2) return 0
+    // 时间从旧到新处理，这样「保留较新时间」自然成立
+    const sorted = facts.slice().sort((a, b) => (a.at || 0) - (b.at || 0))
+    const out = []
+    for (const f of sorted) {
+      const n = normFact(f.text)
+      const dup = out.find((x) => factSimilar(normFact(x.text), n))
+      if (!dup) { out.push(f); continue }
+      if (String(f.text).length > String(dup.text).length) dup.text = f.text
+      dup.at = Math.max(dup.at || 0, f.at || 0)
+    }
+    const removed = facts.length - out.length
+    if (removed > 0) {
+      out.sort((a, b) => (a.at || 0) - (b.at || 0))
+      r.facts = out
+      r.factsDedupedAt = Date.now()
+      saveFacts(r)
+    }
+    return removed
+  }
+
+  /**
+   * 用 LLM 合并「语义重复」的记忆（字面去重抓不到的那种）。
+   *  例：「wxid_x 被我称作主人」 vs「我会称呼 wxid_x 为主人」——语序不同，编辑距离判定不了。
+   *  只在手动提炼（force）时跑，避免每次自动提炼都花 token。
+   * @returns {Promise<number>} 合并掉的条数
+   */
+  async function compactFacts(r) {
+    const facts = r.facts || []
+    if (facts.length < 12) return 0
+    const BATCH = 20   // 一次喂 75 条会让模型「思考」吃光输出预算返回空，分批更稳
+    const merged = []
+    const now = Date.now()
+    let failedBatches = 0
+    const sys = '你是记忆整理器。合并语义重复的条目，保留信息最完整的表述。只输出条目，每行一条，不要编号、不要解释。'
+    for (let start = 0; start < facts.length; start += BATCH) {
+      const batch = facts.slice(start, start + BATCH)
+      const list = batch.map((f, i) => `${i + 1}. ${String(f.text).slice(0, 120)}`).join('\n')
+      const usr = '下面是一批长期记忆。请把**说的是同一件事**的条目合并成一条（保留信息最全的写法），'
+        + '不重复的原样保留。不要新增原文没有的内容，不要输出解释。\n\n' + list
+      try {
+        const route = resolveRoute()
+        stats.llmCalls++
+        // effort 传 'low'：这个模型做「合并」时会思考到把输出预算吃光，降思考换输出
+        let res = await callLlm(route, sys, usr, 'low')
+        if (!String(res.text || '').trim()) res = await callLlm(route, '', sys + '\n\n' + usr, 'low')
+        const lines = String(res.text || '').split(/\r?\n/).map((s) => s.trim()).filter(Boolean)
+        const got = []
+        for (const l of lines) {
+          if (/^无$/.test(l)) continue
+          const t = l.replace(/^[-•\d.、\s]+/, '').trim()
+          if (!t || t.length > 200) continue
+          if (got.some((m) => factSimilar(normFact(m.text), normFact(t)))) continue
+          got.push({ text: t, kind: 'compact', at: now })
+        }
+        // 这一批合并失败（空/异常）→ 原样保留，不能丢
+        if (!got.length) { failedBatches++; merged.push(...batch); continue }
+        merged.push(...got)
+      } catch (e) {
+        failedBatches++
+        merged.push(...batch)
+        log('记忆合并批次失败，原样保留：' + String(e?.message || e))
+      }
+    }
+    if (!merged.length) return -1
+    // 全批失败 = 模型不可用，别动原数据
+    if (failedBatches * BATCH >= facts.length) {
+      log(`记忆合并放弃：所有批次都没返回有效内容（${failedBatches} 批）`)
+      return -1
+    }
+    // 最后再用字面去重兜一遍（跨批的重复靠这层）
+    const out = []
+    for (const m of merged) {
+      if (out.some((x) => factSimilar(normFact(x.text), normFact(m.text)))) continue
+      out.push(m)
+    }
+    // 保险：至少保留六成，否则视为异常
+    if (out.length < Math.max(6, Math.floor(facts.length * 0.5))) {
+      log(`记忆合并放弃：结果只有 ${out.length}/${facts.length} 条，疑似异常`)
+      return 0
+    }
+    out.forEach((m, i) => { m.at = now - (out.length - i) * 1000 })
+    const removed = facts.length - out.length
+    r.facts = out
+    saveFacts(r)
+    log(`「${r.roomName}」记忆合并：${facts.length} → ${out.length} 条（合并 ${removed} 条语义重复）`)
+    return removed
+  }
+
+  /** 写一条长期记忆（相似度去重、限量、单条上限 200 字） */
   function addFact(r, text, kind = 'auto') {
     const t = String(text || '').trim()
-    if (!t || t.length > 120) return false
+    // 上限从 120 提到 200：用户要求「记忆做长一点」，一条能写完整背景
+    if (!t || t.length > 200) return false
     r.facts ||= []
-    const n = normText(t)
-    if (r.facts.some((f) => normText(f.text) === n)) return false
+    const n = normFact(t)
+    // 去重从「完全相等」升级为「讲的是同一件事」（换说法也算重复）
+    if (r.facts.some((f) => factSimilar(normFact(f.text), n))) return false
     r.facts.push({ text: t, kind, at: Date.now() })
     if (r.facts.length > 80) r.facts = r.facts.slice(-80)
     saveFacts(r)
@@ -1234,6 +1471,16 @@ const namesFile = join(dirname(memoryDir), 'members.json')
     const seen = r.msgs.length
     r.factsExtractedAt = Date.now()
     r.factsExtractedCount = seen
+    // 顺便清理存量重复（旧版只做完全相等比较，历史条目里有大量换说法的重复）
+    const removed = dedupFacts(r)
+    if (removed) log(`「${r.roomName}」记忆去重：合并掉 ${removed} 条重复（剩 ${r.facts.length} 条）`)
+    // 手动提炼时，再让模型合并一次语义重复（字面去重抓不到语序重排/同义替换）
+    //  这个模型（deepseek-flash）对「合并列表」会思考到返空，连续失败 2 次就停用，省 token
+    if (force && (r.compactFails || 0) < 2) {
+      const rc = await compactFacts(r)
+      r.compactFails = rc < 0 ? (r.compactFails || 0) + 1 : 0
+      if (rc < 0 && r.compactFails >= 2) log('记忆合并已停用：模型连续返回空（改配置后可手动重置）')
+    }
     const recent = r.msgs.slice(-30)
       .map((m) => `${m.isSelf ? '我' : m.senderName}: ${m.text}`)
       .join('\n')
@@ -1242,10 +1489,14 @@ const namesFile = join(dirname(memoryDir), 'members.json')
       const route = resolveRoute()
       stats.llmCalls++
       const sys = '你是一个记忆整理器。只输出事实条目，每行一条，不要编号、不要解释。'
-      const usr = '从下面的群聊记录里提炼 1~3 条**值得长期记住**的事实，例如：\n'
+      // 把已有记忆喂给模型，从源头减少重复（之前的重复主要来自「模型不知道已经记过什么」）
+      const existing = (r.facts || []).slice(-24).map((f) => '- ' + String(f.text).slice(0, 120)).join('\n')
+      const usr = '从下面的群聊记录里提炼 1~4 条**值得长期记住**的事实，例如：\n'
         + '谁是谁（昵称/身份）、某人的喜好或习惯、群里的约定或梗、重要事件、我答应过别人的事。\n'
-        + '只记长期有用的；日常闲聊不要记。没有值得记的就只输出：无\n\n'
-        + '群聊记录：\n' + recent
+        + '**每条写完整一点**（建议 30~100 字）：带上是谁、什么场合、什么细节，别只写半句。\n'
+        + '只记长期有用的；日常闲聊不要记。没有值得记的就只输出：无\n'
+        + (existing ? '\n【已经记过下面这些，不要重复提炼同一件事（换个说法也算重复）】\n' + existing + '\n' : '')
+        + '\n群聊记录：\n' + recent
 let res = await callLlm(route, sys, usr, undefined)
       // 这个模型会先"思考"，有时把输出预算吃光导致空回复 → 降级重试（把 system 并进 user）
       if (!String(res.text || '').trim()) {
@@ -1455,6 +1706,7 @@ let res = await callLlm(route, sys, usr, undefined)
       : (trigger.imageDesc ? 'image' : detectTrigger(trigger, { aliases: config.aliases, selfNames: r.selfNames }))
     const quiet = isQuiet(quietWindows)
     const d = r.policy.decide({ priority, quiet, text: trigger.text || '' })
+    fMark('decide', { room: r.roomId, priority, reply: d.reply, reason: String(d.reason || '').slice(0, 60) })
     if (!d.reply) {
       // 闲聊概率没命中 → **不再直接跳过**，继续交给模型判断
       // （用户要求：不必每句都回，但每句都要看，由它理解后决定）
@@ -1580,8 +1832,10 @@ let res = await callLlm(route, sys, usr, undefined)
       '  · 别炫耀这些能力，也别解释你怎么看到的；就像普通人"看了一眼"那样自然。',
       known.length ? `群里的人：${known.join('、')}` : (names ? `群成员：${names}` : ''),
       // 长期记忆：每次都带上（用户要求"每次都通过记忆系统"）
+      //  从 12 条提到 18 条 —— 单条上限同时放宽到 200 字，记忆能带更多细节；
+      //  18×200 字约 3.6K 字符，仍在预算内。
       (r.facts || []).length
-        ? '\n【长期记忆（关于这个群和这些人，别忘）】\n' + r.facts.slice(-12).map((f) => '- ' + f.text).join('\n')
+        ? '\n【长期记忆（关于这个群和这些人，别忘）】\n' + r.facts.slice(-18).map((f) => '- ' + f.text).join('\n')
         : '',
       // 我刚问过、还没人回答的问题：不许再问第二遍
       r.pendingQuestion
@@ -2884,6 +3138,7 @@ let res = await callLlm(route, sys, usr, undefined)
   let lastDeliveredRoom = ''
   async function deliver(r, trigger, priority, reply) {
     const roomId = r.roomId
+    fMark('deliver', { room: roomId, priority, text: String(reply?.text || '').slice(0, 40), sticker: !!reply?.wantSticker, voice: !!reply?.voiceText })
     // 记住"我刚刚回了谁" —— 对方再接话就进对话延续模式（否则会回一句就哑）
     r.lastRepliedSender = trigger.sender
     r.lastRepliedAt = Date.now()
@@ -2932,11 +3187,11 @@ let res = await callLlm(route, sys, usr, undefined)
           let vs = null
           try {
             vs = await client.call('sayVoice', {
-              roomId, text: voiceText, emotion: config.voiceSayEmotion || 'main',
+              roomId, text: voiceText, emotion: 'main',
             }, 150_000)
           } catch (e) { vs = { ok: false, error: String(e?.message || e) } }
           if (vs?.ok) {
-            log(`发语音气泡成功：${vs.bytes} 字节 / ${vs.durationMs}ms（${config.voiceSayEmotion || 'main'}）`)
+            log(`发语音气泡成功：${vs.bytes} 字节 / ${vs.durationMs}ms（main）`)
             stats.sentVoice = (stats.sentVoice || 0) + 1
             ;(r.sentTexts ||= []).push({ text: voiceText, at: Date.now() })
             if (r.sentTexts.length > 40) r.sentTexts = r.sentTexts.slice(-40)
@@ -3099,6 +3354,10 @@ let res = await callLlm(route, sys, usr, undefined)
   // ── 生命周期 ────────────────────────────────────────────────
   ctx.effect(() => {
     client.connect()
+    // 启动时自动打开 hook 语音发送开关（省得每次手动点；hook 默认是关的）
+    setTimeout(() => {
+      try { client.call('voiceSwitch', { on: true }).then(() => log('hook 语音发送开关：已自动打开')).catch(() => {}) } catch { /* ignore */ }
+    }, 3000)
     return () => {
       // 卸载时清掉全局登记（否则下次热重载会去 close 一个已经没用的对象）
       try { if (globalThis.__WECHAT_BOT_CLIENT__ === client) delete globalThis.__WECHAT_BOT_CLIENT__ } catch { /* ignore */ }
@@ -3163,6 +3422,175 @@ let res = await callLlm(route, sys, usr, undefined)
     const iv = setInterval(() => { void healthTick() }, Number(config.healthCheckMs) || 300_000)
     return () => clearInterval(iv)
   }, SHORT + ': health heartbeat')
+
+  // ── 朋友圈自动发布（2026-10-26）────────────────────────────────────────────
+  // 状态：{ lastAt, nextAt, dayKey, dayCount, lastText, lastRet, lastErr, lastVerified }
+  // 落盘到 <dshHome>/wechat-bot/moment.json，重启不丢
+  const momentFile = join(dirname(memoryDir), 'moment.json')
+  let momentState = { lastAt: 0, nextAt: 0, dayKey: '', dayCount: 0, lastText: '', lastRet: null, lastErr: '', lastVerified: 0 }
+
+  function momentDayKey(t = Date.now()) {
+    const d = new Date(t)
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+  }
+  function loadMomentState() {
+    try {
+      const j = JSON.parse(readFileSync(momentFile, 'utf8'))
+      if (j && typeof j === 'object') momentState = { ...momentState, ...j }
+    } catch { /* 首次没有文件，正常 */ }
+  }
+  function saveMomentState() {
+    try {
+      mkdirSync(dirname(momentFile), { recursive: true })
+      writeFileSync(momentFile, JSON.stringify(momentState, null, 2))
+    } catch (e) { log('朋友圈状态保存失败：' + String(e?.message || e)) }
+  }
+  loadMomentState()
+
+  // 在 momentHours 之内？（复用 quietHours 那套解析思路）
+  function inMomentHours(now = new Date()) {
+    const raw = String(config.momentHours || '').trim()
+    if (!raw) return true
+    const mins = now.getHours() * 60 + now.getMinutes()
+    for (const seg of raw.split(',')) {
+      const m = seg.trim().match(/^(\d{1,2}):(\d{2})\s*-\s*(\d{1,2}):(\d{2})$/)
+      if (!m) continue
+      const a = Number(m[1]) * 60 + Number(m[2])
+      const b = Number(m[3]) * 60 + Number(m[4])
+      if (a <= b ? (mins >= a && mins <= b) : (mins >= a || mins <= b)) return true
+    }
+    return false
+  }
+
+  function planNextMoment(from = Date.now()) {
+    const lo = Math.max(60_000, Number(config.momentMinGapMs) || 6 * 3_600_000)
+    const hi = Math.max(lo, Number(config.momentMaxGapMs) || 12 * 3_600_000)
+    const gap = lo + Math.floor(Math.random() * (hi - lo + 1))
+    momentState.nextAt = from + gap
+  }
+
+  const MOMENT_FALLBACKS = [
+    '今天天气不错，适合发呆。',
+    '刚吃完一顿，整个人都活过来了。',
+    '突然觉得，安静一会儿也挺好。',
+    '今天有点懒得动，就想趴着。',
+    '喝了杯热的，心情好了点。',
+    '又是普普通通、但还不错的一天。',
+  ]
+
+  async function makeMomentText() {
+    if (!config.momentUseLLM) {
+      return MOMENT_FALLBACKS[Math.floor(Math.random() * MOMENT_FALLBACKS.length)]
+    }
+    const route = resolveRoute()
+    const sys = `你在给"${config.botName || '大肥鱼'}"写一条朋友圈文案。要求：${config.momentTopic || '短句、日常、口语化，40 字以内。'}\n只输出文案本身，不要任何解释、不要引号、不要话题标签。`
+    const { text } = await callLlm(route, sys, '写一条吧。', config.reasoningEffort || undefined)
+    const t = String(text || '').trim().replace(/^["'「『]|["'」』]$/g, '').slice(0, 300)
+    return t || MOMENT_FALLBACKS[Math.floor(Math.random() * MOMENT_FALLBACKS.length)]
+  }
+
+  // ── 配图：统一走 lib/moment-image.mjs（同一份代码有独立测试脚本 test-moment-image.mjs）──
+  //    web = 网上搜动漫图（nekos.best / nekosapi，均 SFW）
+  //    ai  = Agnes 按文案生成
+  //    两种来源互相兜底；产物统一归一化成微信能发的 JPEG（webp 微信不认）
+  const MOMENT_IMG_DIR = join(dirname(memoryDir || join(homedir(), '.dsh')), 'moment-images')
+  const pickMomentImg = (text) => pickMomentImage(text, {
+    dir: MOMENT_IMG_DIR,
+    source: config.momentImageSource || 'char',
+    style: config.momentImageStyle || '',
+    ratio: config.momentImageRatio || '4:3',
+    log,
+  })
+
+  async function postMomentNow(text, images = []) {
+    const ac = new AbortController()
+    const timer = setTimeout(() => ac.abort(new Error('发朋友圈超时')), 150_000)
+    try {
+      // 静默发表：走 hook 的消息级驱动（不动鼠标、不抢前台、可在后台运行）
+      const res = await fetch(`${HOOK_API_BASE}/Moment/PostSilent`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ text, images }),
+        signal: ac.signal,
+      })
+      const j = await res.json().catch(() => ({}))
+      return { ok: j.ret === 0, ret: j.ret, retmsg: j.retmsg, diag: j.diag }
+    } catch (e) {
+      return { ok: false, ret: -1, error: String(e?.message || e).slice(0, 200) }
+    } finally {
+      clearTimeout(timer)
+    }
+  }
+
+  let momentBusy = false
+  async function momentTick(force = false, opts = {}) {
+    if (momentBusy) return { ok: false, error: '正在发布中' }
+    if (!config.momentAuto && !force) return { ok: false, error: '未开启' }
+    const now = Date.now()
+    const day = momentDayKey(now)
+    if (momentState.dayKey !== day) { momentState.dayKey = day; momentState.dayCount = 0 }
+    if (!force) {
+      if (!inMomentHours()) return { ok: false, error: '不在设定时段' }
+      if (momentState.dayCount >= Math.max(1, Number(config.momentDailyMax) || 2)) return { ok: false, error: '今天已经发够了' }
+      if (momentState.nextAt && now < momentState.nextAt) return { ok: false, error: '还没到点' }
+    }
+
+    momentBusy = true
+    try {
+      const text = await makeMomentText()
+      if (!text) return { ok: false, error: '文案为空' }
+      log(`朋友圈：准备发布「${text.slice(0, 40)}」`)
+
+      // 配图：图生图锁「蓝色大肥鱼」形象（失败就只发文字，绝不发别的形象）
+      let images = []
+      if (opts.image === true || (opts.image !== false && config.momentAutoImage)) {
+        log('朋友圈：正在生成配图（图生图，锁角色）…')
+        const g = await pickMomentImg(text)
+        if (g.ok) { images = [g.file]; momentState.lastImage = g.file; momentState.lastImageProvider = g.provider || '' }
+        else log(`朋友圈：配图失败（${g.error}），这条改发纯文字`)
+      }
+
+      const r = await postMomentNow(text, images)
+      // /Moment/PostSilent 的 ret=0 表示编辑器已关闭（即已发表成功）
+      const verified = r.ok ? 1 : 0
+      momentState.lastAt = Date.now()
+      momentState.lastText = text
+      momentState.lastRet = r.ret
+      momentState.lastErr = r.ok ? '' : (r.error || ('ret=' + r.ret))
+      momentState.lastVerified = verified ? 1 : 0
+      if (r.ok) momentState.dayCount += 1
+      planNextMoment(Date.now())
+      saveMomentState()
+      log(`朋友圈：${r.ok ? '已发布' : '失败'} verified=${momentState.lastVerified} ret=${r.ret}`)
+      // 可选：在群里吱一声
+      const room = String(config.momentNotifyRoom || '').trim()
+      if (r.ok && room) {
+        try {
+          await client.call('sendText', { room, text: `刚发了个朋友圈：${text}` }, 15000)
+        } catch { /* 吱声失败无所谓 */ }
+      }
+      return { ok: r.ok, text, ret: r.ret, diag: r.diag }
+    } catch (e) {
+      momentState.lastErr = String(e?.message || e).slice(0, 200)
+      planNextMoment(Date.now())
+      saveMomentState()
+      return { ok: false, error: momentState.lastErr }
+    } finally {
+      momentBusy = false
+    }
+  }
+
+  ctx.effect(() => {
+    // 启动后 2 分钟首次检查（避开初始化高峰）；没设 nextAt 就规划一次
+    const first = setTimeout(() => {
+      if (!momentState.nextAt) { planNextMoment(Date.now()); saveMomentState() }
+      void momentTick().catch((e) => log('朋友圈循环异常：' + String(e?.message || e)))
+    }, 120_000)
+    const iv = setInterval(() => {
+      void momentTick().catch((e) => log('朋友圈循环异常：' + String(e?.message || e)))
+    }, Math.max(60_000, Number(config.momentCheckMs) || 300_000))
+    return () => { clearTimeout(first); clearInterval(iv) }
+  }, SHORT + ': moment loop')
 
   // 自动更新：启动 40 秒后查一次（避开插件初始化高峰），之后每 24 小时一次。
   // 只检查、不自动装 —— 面板会弹提示，用户点「立即更新」才动文件。
@@ -3480,18 +3908,41 @@ let res = await callLlm(route, sys, usr, undefined)
     add('hook 存活', dbOk ? 'ok' : dbLevel, dbOk ? 'QueryDB 有响应（hook 正常）' : dbText, dbAdvice)
     add('数据库可读', dbLevel, dbText, dbAdvice)
 
-    // ⑤ 消息轮询：只认"有证据的失败"，避免"群里没人说话"被误报成失联
+    // ⑤ 消息轮询：判断「轮询到底在不在跑」，而不是「库能不能读」。
+    //   硬闸（_hardGiveUp）状态下探针查 filehelper 照样成功 → 只看 dbOk 会全绿，
+    //   但 tick 早就不干活了，群里说话一条都进不来。
+    //   这是 2026-10-24「自检全绿却八小时没收到消息」的根因。
     const idleMin = lastMsgAt ? Math.round((Date.now() - lastMsgAt) / 60000) : null
     const wakeMin = lastWakeAt ? Math.round((Date.now() - lastWakeAt) / 60000) : null
+    const poll = (br && br.poll) || {}
+    const pollInfo = poll.exists
+      ? `已查 ${poll.polls || 0} 轮、读到 ${poll.msgs || 0} 条 / ${poll.tables || 0} 表`
+      : '轮询器未启动'
     let pollLevel = 'ok'
-    let pollText = idleMin == null ? '还没收到过消息（可能群里一直没人说话）' : `最近一条消息 ${idleMin} 分钟前`
+    let pollText = idleMin == null
+      ? `还没收到过消息（${pollInfo}）`
+      : `最近一条消息 ${idleMin} 分钟前（${pollInfo}）`
     let pollAdvice = ''
-    if (!dbOk && cs.connected && probeRoom) {
+    if (poll.hardStopped) {
+      pollLevel = 'bad'
+      pollText += '｜轮询被硬停（客户端不重登就一直哑）'
+      pollAdvice = '面板点「恢复轮询」，或 POST /api/pollResume'
+    } else if (poll.stopped) {
+      pollLevel = 'bad'
+      pollText += '｜轮询器已停止（进程在，但没在跑）'
+      pollAdvice = '点「恢复轮询」或重启桥'
+    } else if (poll.paused) {
+      pollLevel = 'warn'
+      pollText += `｜轮询暂停中（剩 ${poll.pauseLeftSec || 0} 秒，连续失败 ${poll.consecFail || 0} 次）`
+      pollAdvice = '桥会自动重试；持续出现说明 message_0.db 打不开'
+    } else if (!dbOk && cs.connected && probeRoom) {
       pollLevel = 'bad'; pollText += '｜数据库读不到，轮询必然停了'; pollAdvice = '先修 hook/数据库（见上）'
     } else if (wakeMin != null && wakeMin <= 15) {
       pollLevel = 'bad'; pollText += `｜${wakeMin} 分钟前桥喊过"数据库打不开"`; pollAdvice = '桥会自己重试；持续出现说明 message_0.db 打不开'
     } else if (idleMin != null && idleMin > 180) {
       pollLevel = 'warn'; pollText += '（超过 3 小时没消息）'; pollAdvice = '如果群里明明有人在说话，说明轮询断了'
+    } else if (idleMin == null && !poll.exists) {
+      pollLevel = 'warn'; pollText += '｜轮询器未启动'; pollAdvice = '桥可能刚起来；一直这样说明 startPoller 没跑起来'
     }
     add('消息轮询', pollLevel, pollText, pollAdvice)
 
@@ -4006,9 +4457,62 @@ let res = await callLlm(route, sys, usr, undefined)
   //   为什么用 main 分支而不是 Release：用户要求"新功能都要更新"，
   //   走 main 就不用每次手动发 Release。
   const UPDATE_REPO = process.env.WECHAT_UPDATE_REPO || 'mengyunqwq/wechat-bot'
+
+  // 启动时做一次「热重载自身」的预检演练（只 import + 校验导出，不替换旧代，零风险）。
+  //   面板诊断页的「热重载插件」按钮走的是同一段逻辑，这里先证明它在本宿主上跑得通。
+  setTimeout(() => {
+    try {
+      const lc = ctx.loader?.internal?.loadCache
+      let url = null
+      if (lc && typeof lc.keys === 'function') {
+        for (const u of lc.keys()) {
+          if (typeof u === 'string' && decodeURIComponent(u).includes('wechat-group-agent/lib/index.js')) { url = u; break }
+        }
+      }
+      log('[selfReload] 能力探测：loadCache=' + (lc ? 'ok' : '不可用')
+        + '，自身模块=' + (url ? '命中' : '未命中')
+        + '，registry=' + (ctx.registry && typeof ctx.registry.plugin === 'function' ? 'ok' : '不可用'))
+      if (!url) return
+      const oldJob = lc.get(url)
+      Map.prototype.delete.call(lc, url)
+      ctx.loader.import(url, () => []).then((ns) => {
+        const fresh = ctx.loader.unwrapExports(ns)
+        const good = !!(fresh && (typeof fresh === 'function' || typeof fresh.apply === 'function'))
+        if (!good && oldJob) lc.set(url, oldJob)   // 预检不过 → 恢复缓存，旧代不受影响
+        log('[selfReload] 预检演练：' + (good ? '✅ 新代码可加载（缓存已恢复，未替换旧代）' : '❌ 导出无效'))
+      }).catch((e) => {
+        if (oldJob) lc.set(url, oldJob)
+        log('[selfReload] 预检演练：❌ import 失败（缓存已恢复）：' + String(e?.message || e).slice(0, 160))
+      })
+    } catch (e) { log('[selfReload] 能力探测异常：' + String(e?.message || e)) }
+  }, 8000)
+
+  // 让 clientModules 重新扫描本插件的 client 声明（DSH 侧边栏的「微信机器人」入口）。
+  //   为什么需要：注入/重载进来的插件是运行时才进 loader 的，client 注册表可能没它，
+  //   于是侧边栏入口消失。clientModules 监听 internal/plugin 事件，手动 emit 一次就能重扫。
+  setTimeout(() => {
+    try {
+      ctx.emit('internal/plugin', ctx.fiber)
+      const cm = ctx.get('clientModules')
+      // 直接调 flush 并捕获真实错误（只 emit 不够，dirty 可能没包含本包）
+      try {
+        if (cm && cm.dirty && typeof cm.dirty.add === 'function') cm.dirty.add('@dsh-external/dsh-wechat-bot')
+        if (cm && typeof cm.flush === 'function') cm.flush((err) => {
+          log('[client] flush：' + (err ? '❌ ' + String(err?.message || err).slice(0, 240) : 'ok'))
+        })
+      } catch (e) { log('[client] flush 调用异常：' + String(e?.message || e)) }
+      setTimeout(() => {
+        try {
+          const p = cm && typeof cm.clientPath === 'function' ? cm.clientPath('@dsh-external/dsh-wechat-bot') : ''
+          log('[client] 侧栏入口注册：' + (p ? 'ok（' + String(p).split(/[\\/]/).slice(-2).join('/') + '）' : '仍未注册（clientPath 为空）'))
+        } catch (e) { log('[client] 查询失败：' + String(e?.message || e)) }
+      }, 1200)
+    } catch (e) { log('[client] 触发 internal/plugin 失败：' + String(e?.message || e)) }
+  }, 10000)
+
   const UPDATE_STATE_FILE = join(dirname(memoryDir), 'update-state.json')
   const UPDATE_BACKUP_DIR = join(dirname(memoryDir), 'backups')
-  const updateState = { commit: '', version: '', checkedAt: 0, latest: null, history: [] }
+  const updateState = { commit: '', version: '', checkedAt: 0, latest: null, history: [], lastResult: null }
   try {
     const u = JSON.parse(readFileSync(UPDATE_STATE_FILE, 'utf8')) || {}
     updateState.commit = String(u.commit || '')
@@ -4025,31 +4529,48 @@ let res = await callLlm(route, sys, usr, undefined)
   // 为什么不用 powershell：execFileSync 在 Windows 上会闪一个控制台窗口（用户能看到）。
   // 所以用 node:https + 仅对 GitHub 这两个域名关闭证书校验 —— 只读公开仓库、不传任何凭据，
   // 被劫持最多是拿到假代码，所以风险可接受。
-  const httpsGet = (url, ms = 20000) => new Promise((resolve, reject) => {
+  // ★ 2026-10-25：拆出「能看到状态码/响应头」的版本 —— ETag 条件请求需要读 304 和 etag。
+  const httpsGetRaw = (url, ms = 20000, extraHeaders = null) => new Promise((resolve, reject) => {
     let u
     try { u = new URL(url) } catch { reject(new Error('bad url')); return }
     const req = httpsRequest(u, {
       method: 'GET',
       timeout: ms,
       rejectUnauthorized: false,
-      headers: { 'user-agent': 'dsh-wechat-bot', accept: 'application/vnd.github+json' },
+      headers: Object.assign({ 'user-agent': 'dsh-wechat-bot', accept: 'application/vnd.github+json' }, extraHeaders || {}),
     }, (res) => {
       const chunks = []
       res.on('data', (d) => chunks.push(d))
-      res.on('end', () => {
-        const buf = Buffer.concat(chunks)
-        if (res.statusCode >= 400) { reject(new Error('HTTP ' + res.statusCode)); return }
-        resolve(buf)
-      })
+      res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, body: Buffer.concat(chunks) }))
     })
     req.on('timeout', () => req.destroy(new Error('请求超时')))
     req.on('error', reject)
     req.end()
   })
+  const httpsGet = async (url, ms = 20000) => {
+    const r = await httpsGetRaw(url, ms)
+    if (r.status >= 400) throw new Error('HTTP ' + r.status)
+    return r.body
+  }
+  // ★ 2026-10-25：GitHub API 走 ETag 条件请求。
+  //   GitHub 明确规定：返回 304 的请求**不计入 rate limit**（匿名只有 60 次/小时）。
+  //   所以「没发新版」的时候怎么查都不烧额度，发了新版才真正消耗一次。
+  const ghEtagCache = new Map()   // path -> { etag, body }
   const ghJson = async (path, ms = 20000) => {
-    const buf = await httpsGet('https://api.github.com' + path, ms)
-    const text = buf.toString('utf8')
-    try { return JSON.parse(text) } catch { throw new Error('响应不是 JSON：' + text.slice(0, 80)) }
+    const prev = ghEtagCache.get(path)
+    const headers = prev && prev.etag ? { 'if-none-match': prev.etag } : null
+    const res = await httpsGetRaw('https://api.github.com' + path, ms, headers)
+    if (res.status === 304) {
+      if (prev) return prev.body
+      throw new Error('HTTP 304 但本地无缓存')
+    }
+    if (res.status >= 400) throw new Error('HTTP ' + res.status)
+    const text = res.body.toString('utf8')
+    let body
+    try { body = JSON.parse(text) } catch { throw new Error('响应不是 JSON：' + text.slice(0, 80)) }
+    const etag = res.headers.etag || ''
+    if (etag) ghEtagCache.set(path, { etag, body })
+    return body
   }
   /** 检查更新：返回 { available, local, remote, behind, commits[] } */
   // ── 版本号（2026-10-22 改）──────────────────────────────────────
@@ -4057,41 +4578,149 @@ let res = await callLlm(route, sys, usr, undefined)
   //     · commit 每次 push 都变 → 开发者自己改代码/提交，部署方就会看到"有更新"（误报）
   //     · 版本号只在"发版"时升 → 改代码不升版本 = 不提示（开发场景正确）
   //   发版流程：改代码 → 改仓库 version.json 的 version → push
-  const LOCAL_VERSION_FILE = join(process.env.WECHAT_BOT_HOME || 'D:\\微信deepseek', 'version.json')
+  // ★ 2026-10-25：本地版本号定位不再只认 WECHAT_BOT_HOME。
+  //   现象：面板「本地」显示 v0.0.0，但 D:\微信deepseek\version.json 明明存在且合法（无 BOM，329B）。
+  //   → 说明插件进程里的 WECHAT_BOT_HOME 指到了别的目录，单路径读取进了 catch。
+  //   现在按候选顺序试，谁先读到合法的 version 字段就用谁；全失败才回 0.0.0 并留下诊断。
+  const SELF_LIB_DIR = dirname(fileURLToPath(import.meta.url))   // …/wechat-group-agent/lib
+  const PKG_ROOT = dirname(SELF_LIB_DIR)                          // …/wechat-group-agent
+  // ★ 2026-10-25：项目根自动探测，不再死认 D:\微信deepseek。
+  //   实测一台机器把机器人装在 X:\DeepSeek\wechat-bot（WECHAT_BOT_HOME 没设）：
+  //     → 版本读到 0.0.0（去 D:\微信deepseek 找 version.json，当然没有）
+  //     → 「立即更新」把代码覆盖到 D:\微信deepseek（那里根本没有项目），
+  //       而 DSH 实际加载的是 X:\DeepSeek\wechat-bot\wechat-group-agent
+  //     → 更新「成功」但永远不生效，重启也没用。
+  //   规则：WECHAT_BOT_HOME 显式指定优先 → 插件包上一级若含 wx-bridge 就当项目根 → 最后兜底老路径。
+  const PROJECT_ROOT = dirname(PKG_ROOT)
+  const BOT_HOME = process.env.WECHAT_BOT_HOME
+    || (existsSync(join(PROJECT_ROOT, 'wx-bridge')) ? PROJECT_ROOT : 'D:\\微信deepseek')
+  const VERSION_CANDIDATES = Array.from(new Set([
+    join(BOT_HOME, 'version.json'),
+    'D:\\微信deepseek\\version.json',
+    join(PROJECT_ROOT, 'version.json'),
+    join(process.cwd(), 'version.json'),
+  ].filter(Boolean)))
+  const LOCAL_VERSION_FILE = VERSION_CANDIDATES[0]
+  const versionDiag = { file: '', errors: [] }
   function readLocalVersion() {
-    try {
-      const j = JSON.parse(readFileSync(LOCAL_VERSION_FILE, 'utf8')) || {}
-      return {
-        version: String(j.version || '0.0.0'),
-        notes: String(j.notes || ''),
-        releasedAt: String(j.releasedAt || ''),
+    const errs = []
+    for (const f of VERSION_CANDIDATES) {
+      try {
+        const j = JSON.parse(readFileSync(f, 'utf8')) || {}
+        // ★ 空版本 / 0.0.0 视为无效：某些插件脚手架目录里就有 {"version":"0.0.0"} 的 version.json，
+        //   一旦 WECHAT_BOT_HOME 指过去就会先命中它（这正是面板显示 v0.0.0 的来源）。
+        if (!j.version || String(j.version) === '0.0.0') throw new Error('version 为空或 0.0.0，视为无效')
+        versionDiag.file = f
+        versionDiag.errors = errs
+        return {
+          version: String(j.version),
+          notes: String(j.notes || ''),
+          releasedAt: String(j.releasedAt || ''),
+        }
+      } catch (e) {
+        errs.push(f + ' → ' + String(e?.message || e).slice(0, 60))
       }
-    } catch { return { version: '0.0.0', notes: '', releasedAt: '' } }
+    }
+    versionDiag.file = ''
+    versionDiag.errors = errs
+    // ★ 2026-10-25 第二次修：所有候选都读不到时**必须**回插件自身的版本常量。
+    //   之前这里返回 '0.0.0'，而 checkUpdate 的失败分支是 `localVersion: readLocalVersion().version`
+    //   → 网络一抖（GitHub 限流 / CDN 超时）面板就显示 v0.0.0。
+    //   那台机器「仓库最新 1.3.7」来自上次成功的缓存，本地却是 0.0.0，就是这个组合。
+    return { version, notes: '', releasedAt: '' }
   }
   async function readRepoVersion() {
-    // ★ 2026-10-23：GitHub 匿名 API 有 60 次/小时限流，超了直接 403（今天实测）。
-    //   通道顺序：GitHub API → jsDelivr CDN（国内可达）→ 都失败才抛。
+    // ★ 2026-10-25：通道优先级重排 —— API 与 Release 是权威，CDN 只做兜底。
+    //   旧逻辑只靠 jsDelivr，而它的节点缓存不同步（@main 可能还停在几天前），
+    //   ?ts= 查询参数也绕不过缓存，于是「仓库最新」会读出旧版本甚至来回跳。
     let j = null
     let apiErr = null
+    const cands = []
+    // ① 权威源：API contents/version.json（带 ETag，304 不计限额）
     try {
       const r = await ghJson(`/repos/${UPDATE_REPO}/contents/version.json`)
       const txt = Buffer.from(String(r.content || '').replace(/\n/g, ''), 'base64').toString('utf8')
-      j = JSON.parse(txt) || {}
+      const jj = JSON.parse(txt) || {}
+      if (jj.version) { j = jj; cands.push({ via: 'api', j: jj }) }
     } catch (e) {
       apiErr = e
     }
-    if (!j) {
-      const cdn = `https://cdn.jsdelivr.net/gh/${UPDATE_REPO}@main/version.json?ts=${Date.now()}`
+    // ② 权威源：Releases API —— 官方发布的 tag 是"最新版本"的事实依据，不经过任何 CDN。
+    //   它同时用来给 CDN 结果做上限校验：CDN 不可能比官方发布更新，超过的一律是脏数据。
+    let releaseVer = ''
+    try {
+      const rel = await ghJson(`/repos/${UPDATE_REPO}/releases/latest`)
+      const tag = String(rel?.tag_name || '').replace(/^v/i, '')
+      if (tag) {
+        releaseVer = tag
+        // Release body 是 markdown，取第一行有意义的文字当发布说明，避免面板里全是符号
+        const line = String(rel?.body || '').split('\n').map((s) => s.trim())
+          .find((s) => s && !/^[#>*\-|`]/.test(s))
+        cands.push({ via: 'release', j: { version: tag, notes: line || '', releasedAt: String(rel?.published_at || '') } })
+      }
+    } catch { /* Release 拿不到不影响，CDN 仍可用 */ }
+    // ③ 自定义版本源：真正不依赖 GitHub。用户在面板里填 URL（可多个），返回
+    //   {"version":"1.3.x","notes":"..."} 就采用。这一档**不受 Release 上限校验**——
+    //   它可能是自己发布的版本，比 GitHub 上的还新。
+    const mirrorUrls = String(config.updateMirror || '')
+      .split(/[\s,;，]+/).map((s) => s.trim()).filter((u) => /^https?:\/\//i.test(u))
+    if (mirrorUrls.length) {
+      const ms = await Promise.allSettled(mirrorUrls.map((url) => (async () => {
+        const ac = new AbortController()
+        const timer = setTimeout(() => ac.abort(), 12000)
+        try {
+          const res = await fetch(url, { signal: ac.signal, headers: { 'cache-control': 'no-cache' } })
+          if (!res.ok) throw new Error('HTTP ' + res.status)
+          const jj = await res.json()
+          if (!jj || !jj.version) throw new Error('无 version 字段')
+          return { via: 'mirror', j: jj }
+        } finally { clearTimeout(timer) }
+      })()))
+      for (const r of ms) {
+        if (r.status === 'fulfilled') cands.push(r.value)
+        else log('[update] 自定义版本源失败：' + String(r.reason?.message || r.reason).slice(0, 80))
+      }
+    }
+    // ④ 兜底：多节点 CDN 并发。实测各节点缓存不同步（gcore 新鲜、fastly@main 可能停在几天前）。
+    const cdns = [
+      ['gcore', `https://gcore.jsdelivr.net/gh/${UPDATE_REPO}@main/version.json`],
+      ['testingcf', `https://testingcf.jsdelivr.net/gh/${UPDATE_REPO}@main/version.json`],
+      ['cdn@latest', `https://cdn.jsdelivr.net/gh/${UPDATE_REPO}@latest/version.json`],
+      ['ghproxy', `https://gh-proxy.com/https://raw.githubusercontent.com/${UPDATE_REPO}/main/version.json`],
+      ['cdn@main', `https://cdn.jsdelivr.net/gh/${UPDATE_REPO}@main/version.json`],
+      ['fastly@main', `https://fastly.jsdelivr.net/gh/${UPDATE_REPO}@main/version.json`],
+    ]
+    const settled = await Promise.allSettled(cdns.map(([via, url]) => (async () => {
       const ac = new AbortController()
-      const timer = setTimeout(() => ac.abort(), 15000)
+      const timer = setTimeout(() => ac.abort(), 12000)
       try {
-        const res = await fetch(cdn, { signal: ac.signal, headers: { 'cache-control': 'no-cache' } })
-        if (!res.ok) throw new Error('jsDelivr HTTP ' + res.status)
-        j = await res.json()
-        log('[update] GitHub API 不可用（' + String(apiErr?.message || apiErr).slice(0, 60) + '）→ 已用 jsDelivr 兜底')
-      } catch (e2) {
-        throw new Error('版本读取失败：API=' + String(apiErr?.message || apiErr).slice(0, 50) + '；CDN=' + String(e2?.message || e2).slice(0, 50))
+        const res = await fetch(url, { signal: ac.signal, headers: { 'cache-control': 'no-cache' } })
+        if (!res.ok) throw new Error('HTTP ' + res.status)
+        const jj = await res.json()
+        if (!jj || !jj.version) throw new Error('无 version 字段')
+        return { via, j: jj }
       } finally { clearTimeout(timer) }
+    })()))
+    for (const r of settled) {
+      if (r.status !== 'fulfilled') continue
+      const c = r.value
+      // ★ 有官方 Release 版本时，CDN 报出比它还高的版本 = 脏数据/幻觉，直接丢弃，
+      //   否则会误判"有更新"然后去下载一个不存在的 commit。
+      if (releaseVer && cmpSemver(c.j.version, releaseVer) > 0) {
+        log('[update] CDN(' + c.via + ') 报 v' + c.j.version + '，高于 Release v' + releaseVer + ' → 视为脏数据丢弃')
+        continue
+      }
+      cands.push(c)
+    }
+    if (!cands.length) {
+      throw new Error('版本读取失败：API=' + String(apiErr?.message || apiErr).slice(0, 50) + '；CDN 全部失败')
+    }
+    let best = cands[0]
+    for (const c of cands) if (cmpSemver(c.j.version, best.j.version) > 0) best = c
+    j = best.j
+    if (best.via !== 'api') {
+      log('[update] 用 ' + best.via + ' 读到仓库版本 v' + j.version
+        + (apiErr ? '（API=' + String(apiErr?.message || apiErr).slice(0, 40) + '）' : ''))
     }
     // ★ 2026-10-22：r.sha 是**文件内容的 blob sha**，不能拿去 codeload 下载 zip
     //   （codeload.github.com/<repo>/zip/<blob sha> → HTTP 404，实测 14 字节的 404 响应）。
@@ -4107,6 +4736,7 @@ let res = await callLlm(route, sys, usr, undefined)
       notes: String(j.notes || ''),
       releasedAt: String(j.releasedAt || ''),
       sha,
+      via: best.via,
     }
   }
   /** semver 比较（容忍 v 前缀和位数不同）：a>b 返回 1 */
@@ -4124,10 +4754,16 @@ let res = await callLlm(route, sys, usr, undefined)
   /** 检查更新：比较本地 version.json 与仓库 version.json */
   async function checkUpdate() {
     const local = readLocalVersion()
+    // 本地文件读不到时用插件版本常量，避免拿 0.0.0 去比较、误报"有更新"
+    let localVer = local.version === '0.0.0' ? version : local.version
+    // ★ 2026-10-25：version.json 落后于代码本身时以代码为准。
+    //   旧更新器不覆盖根目录 version.json（代码 1.3.10、文件 1.3.9），
+    //   会让「本地版本」永远停在旧值、检查更新无限提示"有更新"。
+    if (cmpSemver(version, localVer) > 0) localVer = version
     const remote = await readRepoVersion()
-    const available = cmpSemver(remote.version, local.version) > 0
+    const available = cmpSemver(remote.version, localVer) > 0
     updateState.checkedAt = Date.now()
-    updateState.version = local.version
+    updateState.version = localVer
     updateState.latest = {
       version: remote.version, notes: remote.notes, releasedAt: remote.releasedAt, sha: remote.sha,
     }
@@ -4143,11 +4779,12 @@ let res = await callLlm(route, sys, usr, undefined)
         }))
       } catch { /* 提交列表拿不到不影响 */ }
     }
-    log('[update] 本地 v' + local.version + ' 远程 v' + remote.version + ' → ' + (available ? '有更新' : '已是最新'))
+    log('[update] 本地 v' + localVer + ' 远程 v' + remote.version + ' → ' + (available ? '有更新' : '已是最新'))
     return {
       available,
-      localVersion: local.version, remoteVersion: remote.version,
+      localVersion: localVer, remoteVersion: remote.version,
       localNotes: local.notes, notes: remote.notes, releasedAt: remote.releasedAt,
+      source: remote.via,
       commits,
     }
   }
@@ -4222,8 +4859,7 @@ let res = await callLlm(route, sys, usr, undefined)
   }
   /** 运行时目录 ↔ 仓库目录 的映射（白名单：只覆盖这些） */
   function runtimeDirs() {
-    const home = process.env.USERPROFILE || homedir()
-    const base = process.env.WECHAT_BOT_HOME || 'D:\\微信deepseek'
+    const base = BOT_HOME
     return [
       { repo: 'wechat-group-agent/lib',    dir: join(base, 'wechat-group-agent', 'lib'),    label: '插件代码' },
       { repo: 'wechat-group-agent/panel',  dir: join(base, 'wechat-group-agent', 'panel'),  label: '控制面板' },
@@ -4252,7 +4888,7 @@ let res = await callLlm(route, sys, usr, undefined)
       report.push({ label: rt.label, files: n, dir: rt.dir })
     }
     // 桥根目录的 .mjs 文件（server.mjs / 其他）
-    const bridgeRoot = join(process.env.WECHAT_BOT_HOME || 'D:\\微信deepseek', 'wx-bridge')
+    const bridgeRoot = join(BOT_HOME, 'wx-bridge')
     const srcBridge = join(srcRoot, 'wx-bridge')
     if (existsSync(srcBridge)) {
       let n = 0
@@ -4262,6 +4898,28 @@ let res = await callLlm(route, sys, usr, undefined)
         }
       }
       if (n) report.push({ label: '桥入口文件', files: n, dir: bridgeRoot })
+    }
+    // ★ 2026-10-25：根目录的 version.json 必须一起更新。
+    //   之前白名单里只有 lib/panel/scripts，版本号文件不覆盖 →
+    //   代码已经是 1.3.10，version.json 还停在 1.3.9 →
+    //   面板「本地」永远显示旧版、检查更新又提示有更新，形成死循环（用户实测踩到）。
+    try {
+      const srcVer = join(srcRoot, 'version.json')
+      if (existsSync(srcVer)) {
+        const vj = JSON.parse(readFileSync(srcVer, 'utf8')) || {}
+        const dst = join(BOT_HOME, 'version.json')
+        writeFileSync(dst, JSON.stringify({
+          version: String(vj.version || ''),
+          notes: String(vj.notes || ''),
+          releasedAt: String(vj.releasedAt || ''),
+        }, null, 2) + '\n', 'utf8')
+        if (vj.version) updateState.version = String(vj.version)
+        report.push({ label: '版本号', files: 1, detail: 'v' + String(vj.version || '?'), dir: dst })
+      } else {
+        report.push({ label: '版本号', skipped: '仓库里没有 version.json' })
+      }
+    } catch (e) {
+      report.push({ label: '版本号', skipped: String(e?.message || e).slice(0, 60) })
     }
     return report
   }
@@ -4404,6 +5062,77 @@ let res = await callLlm(route, sys, usr, undefined)
     switch (op) {
       case 'status':
         return await client.call('status', {}, 8000)
+      case 'postMoment': {
+        // 手动发一条（面板「立即发一条」/ 指定文案两条路都走这里）
+        const text = String(a.text || '').trim()
+        if (!text) return { ok: false, error: '朋友圈内容不能为空' }
+        if (text.length > 1500) return { ok: false, error: '内容太长（最多 1500 字）' }
+        // 手动发布也支持配图（面板勾了「配图」才生成，避免白等 25 秒）
+        let images = []
+        if (a.image === true) {
+          log(`[postMoment] 正在生成配图（图生图，锁角色）…`)
+          const g = await pickMomentImg(text)
+          if (g.ok) images = [g.file]
+          else log(`[postMoment] 配图失败（${g.error}），改发纯文字`)
+        }
+        const r = await postMomentNow(text, images)
+        const verified = r.ok ? 1 : 0
+        momentState.lastAt = Date.now()
+        momentState.lastText = text
+        momentState.lastRet = r.ret
+        momentState.lastErr = r.ok ? '' : (r.error || ('ret=' + r.ret))
+        momentState.lastVerified = verified ? 1 : 0
+        if (r.ok) { if (momentState.dayKey === momentDayKey()) momentState.dayCount += 1 }
+        saveMomentState()
+        log(`[postMoment] ret=${r.ret} verified=${momentState.lastVerified} len=${text.length}`)
+        return { ok: r.ok, ret: r.ret, diag: r.diag, text }
+      }
+      case 'momentNow': {
+        // 让 AI 自己写一条并立刻发（不用等排期）
+        // args.image === true 时强制生成配图；=== false 时强制纯文字；不传则看开关
+        const opt = {}
+        if (a.image === true) opt.image = true
+        else if (a.image === false) opt.image = false
+        const r = await momentTick(true, opt)
+        return r
+      }
+      case 'momentStatus': {
+        let hwnd = 0, hasEditor = false, hookOk = false
+        try {
+          const res = await fetch(`${HOOK_API_BASE}/Moment/Ready`)
+          const j = await res.json().catch(() => ({}))
+          hwnd = Number(j.main || 0)
+          hasEditor = Number(j.editor || 0) > 0
+          hookOk = j.ok === true
+        } catch { /* hook 不在也不影响状态展示 */ }
+        return {
+          ok: true,
+          hookOk,
+          hasEditor,
+          hwnd,
+          auto: !!config.momentAuto,
+          hours: config.momentHours || '',
+          useLLM: !!config.momentUseLLM,
+          autoImage: !!config.momentAutoImage,
+          imageSource: config.momentImageSource || 'char',
+          imageStyle: config.momentImageStyle || '',
+          imageRatio: config.momentImageRatio || '4:3',
+          minGapMs: Number(config.momentMinGapMs) || 0,
+          maxGapMs: Number(config.momentMaxGapMs) || 0,
+          dailyMax: Number(config.momentDailyMax) || 0,
+          state: {
+            lastAt: momentState.lastAt || 0,
+            nextAt: momentState.nextAt || 0,
+            dayCount: momentState.lastDayKey === momentDayKey() ? 0 : 0,
+            dayKey: momentState.dayKey || '',
+            todayCount: momentState.dayKey === momentDayKey() ? momentState.dayCount : 0,
+            lastText: momentState.lastText || '',
+            lastRet: momentState.lastRet,
+            lastErr: momentState.lastErr || '',
+            lastVerified: momentState.lastVerified || 0,
+          },
+        }
+      }
       case 'wechatPower': {
         // 微信客户端电源开关：关 = 杀进程，开 = 启动并自动点「进入微信」
         // 实际动作在桥 → scripts/wechat-power.ps1（UIA 点击只能在 PowerShell 做）
@@ -4656,16 +5385,105 @@ let res = await callLlm(route, sys, usr, undefined)
         }
         return { ok: true, removed, dir }
       }
-      case 'checkUpdate': {
+      case 'selfReload': {
+        // 热重载插件自身：改完 lib/index.js 不用重启 DSH。
+        //   流程照抄注入器的稳态路径：找 entry → 清 loadCache → import 新代码 →
+        //   预检导出有效 → 延迟 dispose 旧 fiber + registry.plugin 重建。
+        //   关键安全点：**先预检再替换**，新代码加载失败时旧代继续跑，不会把插件搞挂。
         try {
-          return await checkUpdate()
+          const me = 'dsh-wechat-bot'
+          const entry = [...ctx.loader.entries()].find((e) => String(e.options?.name || '').includes(me))
+          if (!entry) return { ok: false, error: '找不到自己的 loader entry' }
+          const loadCache = ctx.loader.internal?.loadCache
+          if (!loadCache || typeof loadCache.keys !== 'function') {
+            return { ok: false, error: 'loader.internal.loadCache 不可用（宿主版本不支持）' }
+          }
+          let url = null
+          for (const u of loadCache.keys()) {
+            if (typeof u !== 'string') continue
+            if (decodeURIComponent(u).includes('wechat-group-agent/lib/index.js')) { url = u; break }
+          }
+          if (!url) return { ok: false, error: 'loadCache 里找不到自己的模块（可能刚启动还没缓存）' }
+          const oldJob = loadCache.get(url)
+          Map.prototype.delete.call(loadCache, url)
+          let fresh = null
+          try {
+            fresh = ctx.loader.unwrapExports(await ctx.loader.import(url, () => []))
+          } catch (e) {
+            if (oldJob) loadCache.set(url, oldJob)
+            return { ok: false, error: '新代码 import 失败（旧代继续运行）：' + String(e?.message || e).slice(0, 200) }
+          }
+          if (!fresh || (typeof fresh !== 'function' && typeof fresh.apply !== 'function')) {
+            if (oldJob) loadCache.set(url, oldJob)
+            return { ok: false, error: '新代码导出无效（缺 apply），已取消，旧代继续运行' }
+          }
+          // 预检通过 → 延迟替换（先把 HTTP 响应送回面板，避免请求被自己掐断）
+          setTimeout(async () => {
+            try {
+              const fiber = entry.fiber
+              if (fiber && typeof fiber.dispose === 'function') await fiber.dispose()
+              const registry = ctx.registry
+              if (registry && typeof registry.delete === 'function') registry.delete(fiber)
+              const nf = registry.plugin(fresh, entry.options?.config ?? {}, () => [])
+              nf.entry = entry
+              entry.fiber = nf
+              log('[selfReload] ✅ 热重载完成（' + new Date().toLocaleTimeString() + '）')
+            } catch (e) {
+              log('[selfReload] ❌ 重建失败，需要重启 DSH：' + String(e?.message || e))
+            }
+          }, 300)
+          return { ok: true, hint: '新代码预检通过，300ms 后替换旧代（约 1 秒不可用）' }
         } catch (e) {
-          return { available: false, error: String(e?.message || e).slice(0, 160) }
+          return { ok: false, error: String(e?.message || e).slice(0, 200) }
+        }
+      }
+      case 'pollStatus': {
+        // 只读：轮询器快照（硬闸/暂停/连续失败/轮数/条数/表数），转发给桥
+        try { return await client.call('pollStatus', {}, 8000) } catch (e) { return { ok: false, error: String(e?.message || e).slice(0, 120) } }
+      }
+      case 'pollResume': {
+        // 解除硬闸 + 真正重启轮询（桥侧走 restartPoller）
+        try { return await client.call('pollResume', {}, 15000) } catch (e) { return { ok: false, error: String(e?.message || e).slice(0, 120) } }
+      }
+      case 'checkUpdate': {
+        // ★ 60 秒节流：面板刷新会触发检查，GitHub 匿名限额只有 60 次/小时，
+        //   连刷几次就 403，之后只能读 CDN 缓存（会看到版本倒退）。点按钮时带 force 绕过。
+        const now = Date.now()
+        if (!a.force && updateState.lastResult && now - updateState.checkedAt < 60_000) {
+          return updateState.lastResult
+        }
+        try {
+          const r = await checkUpdate()
+          updateState.lastResult = r
+          return r
+        } catch (e) {
+          // ★ 远程失败也要带上本地版本号：本地版本是纯本地读取，永远拿得到。
+          //   否则面板会退化成 "v?"（用户 2026-10-25 报的就是这个）。
+          return {
+            available: false,
+            error: String(e?.message || e).slice(0, 160),
+            localVersion: readLocalVersion().version,
+          }
         }
       }
       case 'updateInfo': {
+        // ★ 兜底：候选 version.json 全都读不到时，用插件自身的版本常量（export const version），
+        //   绝不再把 "v0.0.0" 抛给用户看。
+        const lv = readLocalVersion()
+        // 同上：version.json 若落后于代码（旧更新器不覆盖根文件），以代码版本为准
+        let localVer = lv.version === '0.0.0' ? version : lv.version
+        if (cmpSemver(version, localVer) > 0) localVer = version
         return {
           repo: UPDATE_REPO,
+          // ★ version 必须从本地 version.json 现读：它是纯本地操作，绝不依赖网络/GitHub 限流。
+          //   之前只返回 commit，面板回退到 info.version（undefined）→ 网络失败时显示 "v?"。
+          version: localVer,
+          // 读的是哪个文件 / 哪些候选失败了 —— 面板悬停可见，出问题不用再猜
+          versionFile: (localVer === lv.version && versionDiag.file)
+            ? versionDiag.file
+            : `(以代码版本为准 @ ${version}；version.json=${versionDiag.file || '未读到'})`,
+          versionErrors: versionDiag.errors,
+          botHome: BOT_HOME,
           local: updateState.commit,
           checkedAt: updateState.checkedAt,
           latest: updateState.latest,
@@ -4691,7 +5509,7 @@ let res = await callLlm(route, sys, usr, undefined)
           // 记录新版本
           const oldCommit = updateState.commit
           updateState.commit = target
-          try { const vj = JSON.parse(readFileSync(join(tmpRoot, '..', 'version.json'), 'utf8')); updateState.version = String(vj.version || updateState.version) } catch { /* ignore */ }
+          try { const vj = JSON.parse(readFileSync(join(tmpRoot, 'version.json'), 'utf8')); updateState.version = String(vj.version || updateState.version) } catch { /* applyFiles 已处理 */ }
           updateState.history.unshift({ at: Date.now(), from: oldCommit.slice(0, 7), to: target.slice(0, 7) })
           updateState.history = updateState.history.slice(0, 20)
           updateState.latest = null
@@ -4722,7 +5540,7 @@ let res = await callLlm(route, sys, usr, undefined)
                 await new Promise((r) => setTimeout(r, 500))
               }
               // 拉起新桥
-              const base = process.env.WECHAT_BOT_HOME || 'D:\\微信deepseek'
+              const base = BOT_HOME
               const bridgeDir = join(base, 'wx-bridge')
               let nodeArgs
               if (oldCmd && /server\.mjs/.test(oldCmd)) {
@@ -4857,7 +5675,7 @@ let res = await callLlm(route, sys, usr, undefined)
         const text = String(a.text ?? '').trim()
         if (!text) throw new Error('text 不能为空')
         const r = await client.call('sayVoice', {
-          roomId: room.roomId, text, emotion: String(a.emotion || config.voiceSayEmotion || 'main'),
+          roomId: room.roomId, text, emotion: String(a.emotion || 'main'),
         }, 90_000)
         if (r?.ok) {
           stats.sentVoice = (stats.sentVoice || 0) + 1
@@ -5095,7 +5913,7 @@ let res = await callLlm(route, sys, usr, undefined)
 
   ctx.effect(() => safeRegister({
     name: 'wechat_bot_config',
-    description: '读取或实时修改微信机器人的拟人参数（无需重启）。key 留空 = 查看全部；给了 value = 修改。可改：enabled/dryRun/persona/replyProbability/minReplyGapMs/maxRepliesPer10Min/quietHours/stickerChance/splitChance/botName/rooms/temperature/voiceOnVoice/voiceSay/voiceSayProbability/voiceSayOnVoiceProbability/voiceSayMaxChars/voiceSayEmotion/healthAlert/healthAlertQuietMs/healthCheckMs/videoDeleteAfterRead/videoUpgradeDelayMs/videoFrames/linkVideo/linkVideoProbability/linkVideoMaxSeconds/linkVideoMaxMB/linkVideoCooldownMs/linkVideoTimeoutMs/linkVideoFrames。',
+    description: '读取或实时修改微信机器人的拟人参数（无需重启）。key 留空 = 查看全部；给了 value = 修改。可改：enabled/dryRun/persona/replyProbability/minReplyGapMs/maxRepliesPer10Min/quietHours/stickerChance/splitChance/botName/rooms/temperature/voiceOnVoice/voiceSay/voiceSayProbability/voiceSayOnVoiceProbability/voiceSayMaxChars/healthAlert/healthAlertQuietMs/healthCheckMs/videoDeleteAfterRead/videoUpgradeDelayMs/videoFrames/linkVideo/linkVideoProbability/linkVideoMaxSeconds/linkVideoMaxMB/linkVideoCooldownMs/linkVideoTimeoutMs/linkVideoFrames。',
     parameters: {
       type: 'object',
       properties: {

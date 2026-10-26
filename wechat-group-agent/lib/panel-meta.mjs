@@ -21,6 +21,7 @@
 export const GROUPS = [
   { id: 'reply', title: '回复节奏', icon: '💬', desc: '什么时候回、回多快、一次聊多久' },
   { id: 'proactive', title: '主动行为', icon: '🌱', desc: '没人说话时自己冒泡、睡前晚安/醒来说早' },
+  { id: 'moment', title: '朋友圈', icon: '📸', desc: '自己发朋友圈：频率、时段、每天上限、文案由 AI 写' },
   { id: 'style', title: '说话方式', icon: '🗣', desc: '拆句、@、拍一拍、敷衍' },
   { id: 'sticker', title: '表情包', icon: '😄', desc: '补图概率、现场生成、题材库' },
   { id: 'vision', title: '识图与视频', icon: '🖼', desc: '图片、表情包、群视频' },
@@ -102,6 +103,49 @@ export const CONFIG_META = {
   proactive: {
     group: 'proactive', label: '主动找话题', type: 'bool',
     help: '群里安静一段时间后自己冒个泡，不做"只应答的客服"。',
+  },
+  // ── 朋友圈（2026-10-26）：让自己发朋友圈，频率/时段/每日上限都可调 ──
+  momentAuto: {
+    group: 'moment', label: '自动发朋友圈', type: 'bool',
+  },
+  momentUseLLM: {
+    group: 'moment', label: '文案由 AI 写', type: 'bool',
+  },
+  momentMinGapMs: {
+    group: 'moment', label: '最短间隔', type: 'number', min: 600000, max: 86400000, step: 600000, unit: 'ms',
+  },
+  momentMaxGapMs: {
+    group: 'moment', label: '最长间隔（区间随机）', type: 'number', min: 600000, max: 172800000, step: 600000, unit: 'ms',
+  },
+  momentDailyMax: {
+    group: 'moment', label: '每天最多', type: 'number', min: 1, max: 12, step: 1, unit: '条',
+  },
+  momentHours: {
+    group: 'moment', label: '允许时段', type: 'text',
+  },
+  momentCheckMs: {
+    group: 'moment', label: '检查间隔', type: 'number', min: 60000, max: 3600000, step: 60000, unit: 'ms',
+  },
+  momentTopic: {
+    group: 'moment', label: '文案风格提示', type: 'text',
+  },
+  momentNotifyRoom: {
+    group: 'moment', label: '发完在群里吱一声', type: 'text',
+  },
+  momentAutoImage: {
+    group: 'moment', label: '自动配图', type: 'bool',
+    help: '开启后：发之前先配一张图（来源见下一项）；配图失败自动退回纯文字',
+  },
+  momentImageSource: {
+    group: 'moment', label: '配图方式', type: 'enum', options: ['char', 'ai', 'web'],
+    help: 'char = 图生图（锁「蓝色大肥鱼」形象，约 20 秒，推荐）；ai = 文生图（不锁角色，可能不是她）；web = 网上随机动漫图（不保证是她）',
+  },
+  momentImageStyle: {
+    group: 'moment', label: '配图风格提示', type: 'text',
+    help: '给生图的风格要求，例如「生活感照片，真实质感，自然光」',
+  },
+  momentImageRatio: {
+    group: 'moment', label: '配图画幅', type: 'enum', options: ['1:1', '4:3', '3:4', '16:9', '9:16'],
   },
   proactiveQuietMs: {
     group: 'proactive', label: '安静多久才考虑', type: 'number', min: 60000, max: 86400000, step: 60000, unit: 'ms',
@@ -333,9 +377,6 @@ export const CONFIG_META = {
   voiceSayMaxChars: {
     group: 'voiceOut', label: '超过多少字改文字', type: 'number', min: 1, max: 300, step: 5, unit: '字',
   },
-  voiceSayEmotion: {
-    group: 'voiceOut', label: '音色预设', type: 'enum', options: ['main', 'sweet', 'angry', 'serious'],
-  },
 
   // ── 记忆与检索 ──────────────────────────────────────────────
   memoryExtract: {
@@ -470,7 +511,7 @@ export const FEATURES = [
   { id: 'visionVideo', icon: '🎬', title: '识视频', key: 'visionOnVideo', kind: 'bool', desc: '抽帧 + 音轨转写，看懂群里视频', related: ['videoFrames', 'videoDeleteAfterRead'] },
   { id: 'linkVideo', icon: '🔗', title: '链接视频', key: 'linkVideo', kind: 'bool', desc: '抖音/B站/小红书链接下载后看懂', risk: 'warn', related: ['linkVideoProbability'] },
   { id: 'voiceIn', icon: '🎧', title: '语音识别', key: 'voiceOnVoice', kind: 'bool', desc: '群里语音转文字，当普通消息回', related: ['voiceLanguage', 'voiceAutoPrepare'] },
-  { id: 'voiceOut', icon: '🎙', title: '语音发送', key: 'voiceSay', kind: 'bool', desc: '把回复合成微信语音气泡', risk: 'warn', related: ['voiceSayProbability', 'voiceSayEmotion'] },
+  { id: 'voiceOut', icon: '🎙', title: '语音发送', key: 'voiceSay', kind: 'bool', desc: '把回复合成微信语音气泡', risk: 'warn', related: ['voiceSayProbability'] },
   { id: 'sticker', icon: '😄', title: '表情包', key: 'stickerChance', kind: 'chance', defaultChance: 0.22, desc: '文字后补一张图库表情', related: ['genStickerChance'] },
   { id: 'split', icon: '✂️', title: '拆句', key: 'splitChance', kind: 'chance', defaultChance: 0.3, desc: '像真人一样分两三条发', related: ['maxLines'] },
   { id: 'canned', icon: '💤', title: '敷衍回复', key: 'cannedChance', kind: 'chance', defaultChance: 0.1, desc: '少量"哈哈/确实/6"短句', related: [] },

@@ -293,6 +293,7 @@ const NAV = [
   {id:'voice', title:'语音', icon:'🎙', groups:['voiceIn','voiceOut'], special:'voice'},
   {id:'memory', title:'记忆', icon:'🧠', groups:['memory'], special:'memory'},
   {id:'identity', title:'群与人', icon:'👥', groups:['identity'], special:'members'},
+  {id:'moment', title:'朋友圈', icon:'📸', groups:['moment'], special:'moment'},
   {id:'model', title:'人设模型', icon:'🐟', groups:['model']},
   {id:'diag', title:'诊断', icon:'🔬', special:'diag'},
   {id:'update', title:'更新', icon:'📦', special:'update'},
@@ -455,6 +456,7 @@ function renderActive(opts) {
     if (nav.special === 'members') renderMembersExtra();
     if (nav.special === 'ops') renderOpsExtra();
     if (nav.special === 'voice') renderVoiceExtra();
+    if (nav.special === 'moment') renderMomentExtra();
   }
 }
 
@@ -908,7 +910,9 @@ function renderFeatures() {
         <div class="top"><div class="ico">${f.icon}</div><div class="grow">
           <div class="t">${esc(f.title)} ${risk ? `<span class="risk ${risk==='critical'?'critical':''}">${risk==='critical'?'高危':risk==='high'?'高风险':'注意'}</span>` : ''}</div>
           <div class="d">${esc(f.desc)}</div></div>
-          <label class="sw"><input type="checkbox" data-feature="${f.id}" ${on ? 'checked' : ''}><i></i></label>
+          ${f.kind === 'select'
+            ? `<select data-select="${f.id}" style="padding:4px">${(f.options||[]).map(o => `<option ${S.config[f.key]===o?'selected':''}>${esc(o)}</option>`).join('')}</select>`
+            : `<label class="sw"><input type="checkbox" data-feature="${f.id}" ${on ? 'checked' : ''}><i></i></label>`}
         </div>
         <div class="small muted" style="margin-top:8px">${f.kind === 'chance'
           ? '概率 ' + pct(S.config[f.key]) + (S.config[f.key] ? '' : '（关）')
@@ -938,6 +942,23 @@ function renderFeatures() {
       } catch (e) {
         S.config[f.key] = old;
         el.checked = !on;
+        toast('保存失败：' + e.message, 'err');
+      }
+    };
+  });
+  // 音色下拉（select）
+  $$('select[data-select]').forEach(el => {
+    el.onchange = async () => {
+      const f = feats.find(x => x.id === el.dataset.select);
+      if (!f) return;
+      const v = el.value;
+      const old = S.config[f.key];
+      S.config[f.key] = v;
+      try {
+        await api('/config', { method:'POST', body: JSON.stringify({ patch: { [f.key]: v } }) });
+        toast('已切换：' + f.title + ' → ' + v, 'ok');
+      } catch (e) {
+        S.config[f.key] = old;
         toast('保存失败：' + e.message, 'err');
       }
     };
@@ -1022,6 +1043,7 @@ function renderParams(nav) {
   if (nav.special === 'stickers') html += '<div id="sticker-extra"></div>';
   if (nav.special === 'memory') html += '<div id="memory-extra"></div>';
   if (nav.special === 'members') html += '<div id="members-extra"></div>';
+  if (nav.special === 'moment') html += '<div id="moment-extra"></div>';
   view.innerHTML = html;
   bindFields();
 }
@@ -1339,14 +1361,34 @@ async function loadMembers() {
 /* ── 运维 ─────────────────────────────────────────────── */
 async function renderVoiceExtra() {
   const box = $('#voice-extra'); if (!box) return;
-  box.innerHTML = `<div class="section"><div class="hd">🔌 hook 语音发送开关</div>
-    <div class="row"><button class="btn" id="btn-voice-q">查询状态</button>
-      <button class="btn primary" id="btn-voice-on">打开</button>
-      <span id="voice-state" class="muted small">查询中…</span></div>
-    <div class="small muted" style="margin-top:8px">voiceSay 打开但这里没开时，hook 会返回 -1001，机器人会自动降级发文字。</div></div>`;
-  $('#btn-voice-q').onclick = () => voiceSwitch();
-  $('#btn-voice-on').onclick = () => voiceSwitch(true);
-  voiceSwitch();
+  const cfg = App.S.config || {};
+  const modelOn = cfg.voiceModelOn !== false;
+  const preset = cfg.voicePreset || '雌小鬼·A（当前）';
+  const PRESETS = ['雌小鬼·A（当前）','雌小鬼·B','雌小鬼·C','雌小鬼·D','训练版（12轮）'];
+  box.innerHTML = `<div class="section"><div class="hd">🧠 语音模型</div>
+    <div class="row"><label class="sw"><input type="checkbox" id="voice-model-sw" ${modelOn ? 'checked' : ''}><i></i></label>
+      <span id="voice-model-state" class="muted small">${modelOn ? '常驻（时刻准备）' : '已关闭（省 GPU）'}</span></div>
+    <div class="small muted" style="margin-top:8px">开=模型常驻（2 秒出语音）；关=释放模型（省 4GB GPU，开时需加载 15 秒）。</div></div>
+
+    <div class="section"><div class="hd">🎭 音色预设</div>
+    <div class="row"><select id="voice-preset" style="padding:4px">${PRESETS.map(o => `<option ${o===preset?'selected':''}>${esc(o)}</option>`).join('')}</select>
+      <span class="muted small">切换后立即生效</span></div></div>
+`;
+  $('#voice-preset').onchange = async (e) => {
+    const v = e.target.value;
+    try {
+      await api('/config', { method:'POST', body: JSON.stringify({ patch: { voicePreset: v } }) });
+      toast('音色已切换：' + v, 'ok');
+    } catch (err) { toast('失败：' + err.message, 'err'); }
+  };
+  $('#voice-model-sw').onchange = async (e) => {
+    const on = e.target.checked;
+    try {
+      await api('/config', { method:'POST', body: JSON.stringify({ patch: { voiceModelOn: on } }) });
+      $('#voice-model-state').textContent = on ? '常驻（时刻准备）' : '已关闭（省 GPU）';
+      toast(on ? '语音模型：已开启（常驻）' : '语音模型：已关闭（省 GPU）', 'ok');
+    } catch (err) { e.target.checked = !on; toast('失败：' + err.message, 'err'); }
+  };
 }
 
 async function voiceSwitch(on) {
@@ -1435,21 +1477,47 @@ function renderUpdate() {
       .catch(() => { App.updInfo = {} })
   }
   if (!App.upd) {
-    api('/action', { method: 'POST', body: JSON.stringify({ op: 'checkUpdate' }) })
-      .then(j => { App.upd = (j && j.result) || null; if (App.tab === 'update') renderActive({}); })
-      .catch(() => {})
+    // ★ 不再每次进页面都打 GitHub API：匿名限额只有 60 次/小时，刷新几次就烧光，
+    //   烧光后 403 → 退到 jsDelivr → 读到陈旧版本（用户看到「仓库最新」倒退）。
+    //   10 分钟内直接用上次检查的缓存，点「检查更新」才强制查。
+    const i0 = App.updInfo || {};
+    const fresh = Date.now() - (i0.checkedAt || 0) < 10 * 60 * 1000;
+    if (fresh && i0.latest) {
+      App.upd = { available: false, cached: true, remoteVersion: i0.latest.version, notes: i0.latest.notes, localVersion: i0.version, checkedAt: i0.checkedAt };
+    } else {
+      api('/action', { method: 'POST', body: JSON.stringify({ op: 'checkUpdate' }) })
+        .then(j => { App.upd = (j && j.result) || null; if (App.tab === 'update') renderActive({}); })
+        .catch(() => {})
+    }
   }
   const u = App.upd || null;
   const info = App.updInfo || {};
   const has = u && u.available;
+  // ★ 仓库版本取「本次检查结果」与「上次成功缓存」里更大的那个：
+  //   CDN 节点不同步时本次可能读回旧值，不能让它把已经确认过的新版本盖回去。
+  const cmpV = (a, b) => {
+    const pa = String(a || '').replace(/^v/i, '').split('.').map(n => parseInt(n, 10) || 0);
+    const pb = String(b || '').replace(/^v/i, '').split('.').map(n => parseInt(n, 10) || 0);
+    for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+      const x = pa[i] || 0, y = pb[i] || 0;
+      if (x !== y) return x > y ? 1 : -1;
+    }
+    return 0;
+  };
+  const localV = info.version || (u && u.localVersion) || '';
+  const remoteCands = [u && u.remoteVersion, info.latest && info.latest.version].filter(Boolean);
+  let remoteV = remoteCands[0] || '';
+  for (const c of remoteCands) if (cmpV(c, remoteV) > 0) remoteV = c;
+  const staleHint = localV && remoteV && cmpV(remoteV, localV) < 0
+    ? ' <span class="small muted">（CDN 缓存滞后，实际不旧于本地）</span>' : '';
   view.innerHTML = `<h2>更新 <span class="muted small">从 GitHub 拉最新代码</span></h2>
 
     <div class="section"><div class="hd">📦 版本</div>
       <table class="table"><tbody>
-        <tr><td class="muted">本地</td><td class="mono"><b>${esc('v' + ((u && u.localVersion) || info.version || '?'))}</b></td></tr>
-        <tr><td class="muted">仓库最新</td><td class="mono"><b>${esc('v' + ((u && u.remoteVersion) || (info.latest && info.latest.version) || '?'))}</b></td></tr>
+        <tr><td class="muted">本地</td><td class="mono"><b title="${esc((info.versionFile || '') + (info.botHome ? '｜项目根：' + info.botHome : ''))}">${esc('v' + (info.version || (u && u.localVersion) || '?'))}</b>${info.versionErrors && info.versionErrors.length ? ` <span class="small muted">（${esc(info.versionErrors[0])}）</span>` : ''}</td></tr>
+        <tr><td class="muted">仓库最新</td><td class="mono"><b>${esc('v' + (remoteV || '?'))}</b>${staleHint}</td></tr>
         <tr><td class="muted">发布说明</td><td>${esc((u && u.notes) || (info.latest && info.latest.notes) || '—')}</td></tr>
-        <tr><td class="muted">仓库</td><td class="mono">${esc(info.repo || u && u.repo || '')}</td></tr>
+        <tr><td class="muted">仓库</td><td class="mono">${esc(info.repo || u && u.repo || '')}${u && u.source ? ` <span class="small muted">（来源：${esc(u.source)}）</span>` : ''}</td></tr>
         <tr><td class="muted">上次检查</td><td>${(u && u.checkedAt) || info.checkedAt ? esc(ago((u && u.checkedAt) || info.checkedAt)) : '从未'}</td></tr>
       </tbody></table>
       <div class="row" style="margin-top:10px">
@@ -1457,6 +1525,14 @@ function renderUpdate() {
         <span id="upd-msg" class="small"></span>
       </div>
       <div class="small muted" style="margin-top:8px">版本号只在「发版」时才升 —— 开发过程中改代码、提交都不会提示更新。</div>
+    </div>
+
+    <div class="section"><div class="hd">🌐 自定义版本源 <span class="muted">不依赖 GitHub API</span></div>
+      <div class="small muted">填一个直接返回 <span class="mono">{"version":"1.3.x"}</span> 的 URL（可填多个，逗号分隔）。适合自建对象存储 / 局域网共享 / 别的托管；这一档不受 GitHub 限额和 CDN 缓存影响。</div>
+      <div class="row" style="margin-top:8px">
+        <input type="text" id="mirror-input" style="flex:1;min-width:260px" placeholder="https://example.com/wechat-bot/version.json" value="${esc((App.S && App.S.config && App.S.config.updateMirror) || '')}">
+        <button class="btn primary" id="mirror-save">保存</button>
+      </div>
     </div>
     </div>
 
@@ -1483,16 +1559,30 @@ function renderUpdate() {
     <div class="section"><div class="hd">ℹ️ 说明</div>
       <div class="small muted">
         · 每天自动检查一次（插件启动 40 秒后先查一次）<br>
-        · 只覆盖代码：插件 lib/、面板 panel/、桥 lib/、桥入口 *.mjs、scripts/<br>
+        · 只覆盖代码：插件 lib/、面板 panel/、桥 lib/、桥入口 *.mjs、scripts/、根 version.json<br>
         · <b>绝不碰</b> config.json / data/ / facts/ / memory/ / node_modules/<br>
         · 更新后：面板刷新即生效；桥会自动重启；<b>插件代码需要重启 DSH</b> 才加载
       </div>
     </div>`;
 
+  // 自定义版本源：保存后立刻重查一次，让用户马上看到效果
+  const mSave = $('#mirror-save');
+  if (mSave) mSave.onclick = async () => {
+    const inp = $('#mirror-input');
+    const v = inp ? inp.value.trim() : '';
+    try {
+      await api('/config', { method: 'POST', body: JSON.stringify({ patch: { updateMirror: v } }) });
+      if (App.S && App.S.config) App.S.config.updateMirror = v;
+      App.upd = null;
+      App.updInfo = null;
+      toast(v ? '已保存，正在重新检查…' : '已清空自定义源', 'ok');
+      renderUpdate();
+    } catch (e) { toast('保存失败：' + e.message, 'err'); }
+  };
   $('#upd-check').onclick = async () => {
     const btn = $('#upd-check'); btn.disabled = true; btn.textContent = '检查中…';
     try {
-      const j = await api('/action', { method: 'POST', body: JSON.stringify({ op: 'checkUpdate' }) });
+      const j = await api('/action', { method: 'POST', body: JSON.stringify({ op: 'checkUpdate', force: true }) });
       App.upd = j.result || {};
       toast(App.upd.available ? '发现新版本' : '已是最新', 'ok');
       renderUpdate();
@@ -1522,10 +1612,120 @@ function renderUpdate() {
 }
 
 /* ── 诊断（崩溃 / 数据库 / 磁盘 / 路由）────────────── */
+async function renderMomentExtra() {
+  const box = $('#moment-extra'); if (!box) return;
+  box.innerHTML = `<div class="section"><div class="hd">📸 现在发一条 <span class="muted">手动 / 让 AI 现写</span></div>
+    <div class="row" style="margin-bottom:8px">
+      <button class="btn primary" id="moment-ai">🤖 让 AI 写一条并发布</button>
+      <button class="btn" id="moment-ai-img">🖼 AI 写 + 配图发布</button>
+      <button class="btn" id="moment-check">检查微信窗口</button>
+      <span class="small muted" id="moment-st">读取状态…</span>
+    </div>
+    <textarea id="moment-text" rows="4" placeholder="或者自己写一条…（最多 1500 字）"
+      style="width:100%;box-sizing:border-box;resize:vertical;font:inherit;padding:10px;border-radius:8px;border:1px solid #e5e5e5;color:inherit"></textarea>
+    <div class="row" style="margin-top:8px;align-items:center">
+      <button class="btn" id="moment-post">发布这条</button>
+      <label class="hswitch" style="margin-left:6px">
+        <input type="checkbox" id="moment-post-img">
+        <span class="small">配图（图生图）</span>
+      </label>
+      <span class="small muted" id="moment-count">0 字</span>
+    </div>
+  </div>
+  <div class="section"><div class="hd">📈 发布记录</div><div id="moment-hist"><div class="empty">读取中…</div></div></div>`;
+
+  const st = $('#moment-st');
+  const ta = $('#moment-text');
+  const cnt = $('#moment-count');
+  const hist = $('#moment-hist');
+  ta.oninput = () => { cnt.textContent = ta.value.length + ' 字' };
+
+  const fmtGap = (ms) => {
+    if (!ms) return '—';
+    const m = Math.round(ms / 60000);
+    if (m < 60) return m + ' 分钟';
+    const h = m / 60;
+    return (Number.isInteger(h) ? h : h.toFixed(1)) + ' 小时';
+  };
+
+  async function refresh() {
+    try {
+      const r = await api('/action', { method: 'POST', body: JSON.stringify({ op: 'momentStatus', args: {} }) });
+      const s2 = r.state || {};
+      st.textContent = r.hookOk
+        ? ('微信就绪' + (r.hasEditor ? '（编辑器里还有一份草稿）' : ''))
+        : '⚠️ hook 未连接';
+      const nextIn = s2.nextAt ? Math.max(0, s2.nextAt - Date.now()) : 0;
+      const rows = [
+        ['自动发布', r.auto ? '✅ 已开启' : '⏸ 已关闭'],
+        ['AI 写文案', r.useLLM ? '是' : '否（用内置句子）'],
+        ['配图', r.autoImage
+          ? ('✅ 开（' + (r.imageSource === 'char' ? '蓝色大肥鱼本人' : r.imageSource === 'ai' ? 'AI 文生图' : '网上随机动漫图') + '）')
+          : '关（纯文字）'],
+        ['间隔区间', fmtGap(r.minGapMs) + ' ~ ' + fmtGap(r.maxGapMs) + '（随机）'],
+        ['每天上限', (r.dailyMax || 0) + ' 条'],
+        ['允许时段', r.hours || '不限'],
+        ['今日已发', (s2.todayCount || 0) + ' 条'],
+        ['下次预计', r.auto ? (nextIn ? ('约 ' + fmtGap(nextIn) + '后') : '下一次检查时') : '—'],
+        ['上次', s2.lastAt ? (fmtTime(s2.lastAt) + ' · ' + (s2.lastVerified ? '✅ 已发布' : (s2.lastErr ? '❌ ' + s2.lastErr : '—'))) : '还没发过'],
+      ];
+      hist.innerHTML = `<div class="list">${rows.map(([k, v]) =>
+        `<div class="item"><span class="muted">${esc(k)}</span><span>${esc(String(v))}</span></div>`).join('')}
+        ${s2.lastText ? `<div class="item"><span class="muted">上次文案</span><span>${esc(s2.lastText)}</span></div>` : ''}</div>`;
+    } catch (e) {
+      st.textContent = '状态读取失败：' + e.message;
+      hist.innerHTML = '<div class="empty">状态读取失败</div>';
+    }
+  }
+
+  $('#moment-check').onclick = () => { st.textContent = '检查中…'; refresh() };
+
+  $('#moment-ai').onclick = async () => {
+    const btn = $('#moment-ai');
+    btn.disabled = true; btn.textContent = 'AI 写作+发布中…';
+    try {
+      const r = await api('/action', { method: 'POST', body: JSON.stringify({ op: 'momentNow', args: {} }) });
+      if (r.ok) toast('已发布：' + String(r.text || '').slice(0, 30), 'ok');
+      else toast('未发布：' + (r.error || ('ret=' + r.ret)), 'err');
+    } catch (e) { toast('失败：' + e.message, 'err') }
+    finally { btn.disabled = false; btn.textContent = '🤖 让 AI 写一条并发布'; refresh() }
+  };
+
+  $('#moment-ai-img').onclick = async () => {
+    const btn = $('#moment-ai-img');
+    btn.disabled = true; btn.textContent = '生图 + 发布中…（约 20 秒）';
+    try {
+      const r = await api('/action', { method: 'POST', body: JSON.stringify({ op: 'momentNow', args: { image: true } }) });
+      if (r.ok) toast('已发布（带图）：' + String(r.text || '').slice(0, 24), 'ok');
+      else toast('未发布：' + (r.error || ('ret=' + r.ret)), 'err');
+    } catch (e) { toast('失败：' + e.message, 'err') }
+    finally { btn.disabled = false; btn.textContent = '🖼 AI 写 + 配图发布'; refresh() }
+  };
+
+  $('#moment-post').onclick = async () => {
+    const text = ta.value.trim();
+    if (!text) return toast('先写点内容', 'err');
+    const withImg = !!$('#moment-post-img')?.checked;
+    const btn = $('#moment-post');
+    btn.disabled = true; btn.textContent = withImg ? '生成配图中…（约 25 秒）' : '发布中…';
+    try {
+      const r = await api('/action', { method: 'POST', body: JSON.stringify({ op: 'postMoment', args: { text, image: withImg } }) });
+      if (r.ok) { toast(withImg ? '已发布（带图）' : '已发布', 'ok'); ta.value = ''; cnt.textContent = '0 字' }
+      else toast('失败：' + (r.error || ('ret=' + r.ret)), 'err');
+    } catch (e) { toast('失败：' + e.message, 'err') }
+    finally { btn.disabled = false; btn.textContent = '发布这条'; refresh() }
+  };
+
+  refresh();
+}
+
 function renderDiag() {
   view.innerHTML = `<h2>诊断 <span class="muted small">环境与链路体检</span></h2>
     <div class="row" style="margin-bottom:10px">
       <button class="btn primary" id="diag-refresh">重新检测</button>
+      <button class="btn" id="diag-poll">恢复轮询</button>
+      <button class="btn" id="diag-reload" title="重新加载 lib/index.js —— 改完插件代码不用重启 DSH">热重载插件</button>
+      <span class="muted small" id="diag-poll-st">轮询状态读取中…</span>
       <span class="muted small" id="diag-at">${App.diag ? esc(ago(App.diagAt)) : '加载中…'}</span>
       <span class="muted small">（要连 hook 的三个端点，最慢约 6 秒）</span>
     </div>
@@ -1624,6 +1824,51 @@ function renderDiag() {
         App.diag = null; renderDiag();
       } catch (e) { toast('清理失败：' + e.message, 'err'); }
     };
+  };
+
+  // ── 轮询状态 + 恢复按钮 ─────────────────────────────────
+  //  「库读得动」不等于「轮询在跑」：硬闸状态下探针照样成功，自检会全绿。
+  //   所以这里直接把轮询器的真实状态摆出来，并给一个能真正重启轮询的按钮。
+  const showPoll = (st) => {
+    const el = $('#diag-poll-st');
+    if (!el) return;
+    if (!st || st.ok === false) { el.textContent = '取不到：' + ((st && st.error) || '桥未连接'); return; }
+    const bits = [];
+    if (st.hardStopped) bits.push('⛔ 硬闸');
+    else if (st.stopped) bits.push('⛔ 已停止');
+    else if (st.paused) bits.push('⏸ 暂停 ' + (st.pauseLeftSec || 0) + 's');
+    else bits.push('✅ 运行中');
+    bits.push('已查 ' + (st.polls || 0) + ' 轮 / 读到 ' + (st.msgs || 0) + ' 条 / ' + (st.tables || 0) + ' 表');
+    if (st.consecFail) bits.push('连续失败 ' + st.consecFail);
+    el.textContent = bits.join(' · ');
+    el.style.color = (st.hardStopped || st.stopped) ? 'var(--warn)' : '';
+    el.title = st.lastError || '';
+  };
+  api('/action', { method: 'POST', body: JSON.stringify({ op: 'pollStatus' }) })
+    .then((j) => showPoll(j.result)).catch((e) => showPoll({ ok: false, error: e.message }));
+  const pollBtn = $('#diag-poll');
+  if (pollBtn) pollBtn.onclick = async () => {
+    if (!confirm('解除轮询硬闸并重启轮询？')) return;
+    pollBtn.disabled = true; pollBtn.textContent = '恢复中…';
+    try {
+      const j = await api('/action', { method: 'POST', body: JSON.stringify({ op: 'pollResume' }) });
+      showPoll(j.result);
+      toast(j.result && j.result.restarted ? '轮询已重启' : '已解除硬闸', 'ok');
+    } catch (e) { toast('恢复失败：' + e.message, 'err'); }
+    finally { pollBtn.disabled = false; pollBtn.textContent = '恢复轮询'; }
+  };
+
+  const rlBtn = $('#diag-reload');
+  if (rlBtn) rlBtn.onclick = async () => {
+    if (!confirm('热重载插件代码？\n\n会重新加载 lib/index.js（约 1 秒不可用）；新代码加载失败会自动保留旧代。')) return;
+    rlBtn.disabled = true; rlBtn.textContent = '重载中…';
+    try {
+      const j = await api('/action', { method: 'POST', body: JSON.stringify({ op: 'selfReload' }) });
+      const r = j.result || {};
+      if (r.ok) { toast('已触发热重载，1.5 秒后刷新页面', 'ok'); setTimeout(() => location.reload(), 1500); }
+      else toast('重载失败：' + (r.error || '未知原因'), 'err');
+    } catch (e) { toast('请求失败：' + e.message, 'err'); }
+    finally { rlBtn.disabled = false; rlBtn.textContent = '热重载插件'; }
   };
 
   loadDiag(true).then(() => draw());
