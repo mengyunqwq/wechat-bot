@@ -1,5 +1,5 @@
 {
-  "version": "1.4.2",
-  "notes": "1.4.2：修「不允许的操作：selfReload / pollStatus / pollResume」——诊断页的「热重载插件」「恢复轮询」按钮用到的操作从来没进白名单，任何机器点击都失败；另：朋友圈页遇到旧插件时直接提示去热重载/重启 DSH。",
+  "version": "1.4.3",
+  "notes": "1.4.3：面板操作白名单加「启动自检」兜底——插件启动/热重载时自动比对 panel/index.html 用到的 op 与 ALLOWED_OPS，缺失直接打日志并在面板顶部挂横幅；新增 scripts/check-panel-ops.mjs 可独立检查（缺失 exit 1）；运维规则新增 R15（白名单必须同步）/ R16（更新后页面变了≠插件生效）。",
   "releasedAt": "2026-10-26"
 }

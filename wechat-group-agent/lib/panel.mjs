@@ -36,6 +36,65 @@ const ALLOWED_OPS = new Set([
   'selfReload', 'pollStatus', 'pollResume',   // ★ 2026-10-26：诊断页的「热重载插件」「恢复轮询」按钮，原来没进白名单，点了必报「不允许的操作」
 ])
 
+/**
+ * 面板操作覆盖自检（2026-10-26）
+ *
+ * 为什么放进底层：面板里每个按钮都对应一个 op，op 必须同时出现在
+ *   - panel/index.html 的 `op: 'xxx'` 调用
+ *   - 本文件的 ALLOWED_OPS
+ * 两边靠人工同步，加功能时极易只改一边 → 用户点按钮直接 500
+ * （真实事故：selfReload / pollStatus / pollResume 从未进白名单，
+ *   「热重载插件」「恢复轮询」按钮一直坏着，排查时才被发现）。
+ *
+ * 所以这里在模块加载时就比对一次，缺的立刻打日志；
+ * 同时通过 /api/state 的 opsAudit 字段交给面板显示横幅。
+ */
+function readPanelOps() {
+  let html = ''
+  for (const f of PAGE_CANDIDATES) {
+    try { html = readFileSync(f, 'utf8'); if (html) break } catch { /* 下一个 */ }
+  }
+  if (!html) return { used: [], from: '' }
+  const used = new Set()
+  // 只认真正的操作调用：op: 'xxx' / op:"xxx"（'s 兼容单双引号）
+  for (const m of html.matchAll(/\bop:\s*['"]([A-Za-z][\w.]*)['"]/g)) used.add(m[1])
+  return { used: [...used], from: '' }
+}
+
+let _opsAuditCache = null
+let _opsAuditAt = 0
+export function getOpsAudit(force = false) {
+  const now = Date.now()
+  if (!force && _opsAuditCache && now - _opsAuditAt < 5000) return _opsAuditCache
+  const { used } = readPanelOps()
+  const missing = used.filter((o) => !ALLOWED_OPS.has(o))
+  const extra = [...ALLOWED_OPS].filter((o) => !used.includes(o))
+  _opsAuditCache = {
+    used: used.length,
+    allowed: ALLOWED_OPS.size,
+    missing,
+    unusedCount: extra.length,
+    ok: missing.length === 0,
+    checkedAt: new Date().toISOString(),
+  }
+  _opsAuditAt = now
+  return _opsAuditCache
+}
+
+// 模块加载即自检：缺失项直接打到插件日志（启动/热重载都能看到）
+try {
+  const a = getOpsAudit(true)
+  if (a.ok) {
+    console.log(`[panel][自检] 面板操作覆盖 ${a.used}/${a.used} ✅（白名单 ${a.allowed} 项）`)
+  } else {
+    console.warn(`[panel][自检] ❌ 面板有 ${a.missing.length} 个操作不在白名单里，点对应按钮会报「不允许的操作」：`)
+    console.warn(`[panel][自检]    缺失 = ${a.missing.join(', ')}`)
+    console.warn(`[panel][自检]    修复 = 把上面这些加进 lib/panel.mjs 的 ALLOWED_OPS`)
+  }
+} catch (e) {
+  console.warn('[panel][自检] 自检本身失败（不影响面板）：' + String(e?.message || e))
+}
+
 // 不做模块级缓存：热重载后 panel/index.html 的改动必须立刻可见
 // （踩过：cachedPage 留在旧模块里，页面看起来"改了不生效"）。
 function pageHtml() {
@@ -139,6 +198,17 @@ export function setupPanel(ctx, api) {
       ctx.effect(() => ws.register({ kind: 'prefix', path: '/wechat-bot', handler: handle }), 'dsh-wechat-bot: panel route')
       // 端口是用户启动 `dsh web --port N` 时自己定的，插件拿不到，
       // 所以只打印路径 + 教用户怎么拼完整地址（避免文档写死 3080 误导）。
+      // ★ 面板操作覆盖自检结果写进插件日志（启动/热重载都能看到，不用等用户点按钮才发现）
+      try {
+        const a = getOpsAudit(true)
+        if (a.ok) {
+          api.log(`[自检] 面板操作覆盖 ${a.used}/${a.used} ✅（白名单 ${a.allowed} 项）`)
+        } else {
+          api.log(`[自检] ❌ 面板有 ${a.missing.length} 个操作不在白名单，点了会报「不允许的操作」：${a.missing.join(', ')}`)
+          api.log('[自检] 修复：把它们加进 lib/panel.mjs 的 ALLOWED_OPS，然后热重载插件')
+        }
+      } catch (e) { api.log('[自检] 失败（不影响面板）：' + String(e?.message || e)) }
+
       api.log('面板已挂载：/wechat-bot')
       api.log('  → 完整地址 = 你的 DSH 地址 + /wechat-bot')
       api.log('  → DSH 地址看 dsh web 启动时的输出，或浏览器地址栏')
@@ -332,6 +402,7 @@ export function setupPanel(ctx, api) {
     if (!lite && api.client.status.connected) {
       try { bridge = await api.client.call('status', {}, 2500) } catch (e) { bridgeErr = String(e?.message || e) }
     }
+    const opsAudit = getOpsAudit()   // 面板据此提示「有按钮没进白名单」
     const rooms = [...api.rooms.values()].map((r) => {
       let snap = null
       try { snap = r.policy.snapshot() } catch { /* ignore */ }
@@ -365,6 +436,7 @@ export function setupPanel(ctx, api) {
       ok: true,
       at: Date.now(),
       version: api.version,
+      opsAudit,          // ★ 面板操作覆盖自检结果：missing 非空时面板顶部挂横幅
       config: cfg,
       defaults: api.defaults,
       meta: api.meta || {},

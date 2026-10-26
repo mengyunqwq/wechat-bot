@@ -243,6 +243,7 @@
 </style>
 </head>
 <body class="wx-standalone">
+<div id="ops-banner"></div>
 <div id="wx-panel" class="wx-panel-root">
 <header>
   <div class="brand">🐟 微信机器人控制台 <small id="ver"></small><small id="panel-url" title="点一下复制" style="cursor:pointer;margin-left:10px;font-family:ui-monospace,Consolas,monospace;font-size:11px;opacity:.7"></small></div>
@@ -348,6 +349,7 @@ async function refresh(opts) {
     App.S = j;
     if (u && u.result) App.usage = u.result;
     renderHeader();
+    renderOpsBanner();   // 每次拿到状态都刷新横幅（白名单缺失/已修复都能立刻反映）
     if (App.tab === 'overview' || !opts.lite) renderActive(opts);
   } catch (e) {
     toast('读取状态失败：' + e.message, 'err');
@@ -373,6 +375,19 @@ async function loadDiag(force) {
   }
 }
 
+
+function renderOpsBanner() {
+  const box = document.querySelector('#ops-banner');
+  if (!box) return;
+  const a = (App.S && App.S.opsAudit) || null;
+  if (!a || a.ok) { box.innerHTML = ''; return; }
+  box.innerHTML = `<div style="margin:10px 0;padding:10px 14px;border-radius:10px;
+      background:#fff1f0;border:1px solid #ffccc7;color:#a8071a;font:14px/1.6 system-ui">
+    ⚠️ <b>面板有 ${a.missing.length} 个按钮没进白名单</b>，点了会报「不允许的操作」：
+    <code>${a.missing.map(esc).join(' / ')}</code><br>
+    <span style="opacity:.8">修复：把它们加进 <code>lib/panel.mjs</code> 的 <code>ALLOWED_OPS</code>，然后热重载插件。
+    若当前插件是旧版本，先「诊断 → 热重载插件」或重启 DSH。</span></div>`;
+}
 
 function renderHeader() {
   const S = App.S;
@@ -1971,6 +1986,7 @@ $('#m-dry').onchange = async (e) => {
 
 renderNav();
 refresh();
+try { renderOpsBanner() } catch (e) { /* 横幅失败不影响面板 */ }
 setInterval(() => refresh({ lite:true }), 10000);
 document.addEventListener('visibilitychange', () => { if (!document.hidden) refresh({ lite:true }); });
 </script>
