@@ -42,7 +42,7 @@ try {
 } catch { /* ignore */ }
 
 export const name = '@dsh-external/dsh-wechat-bot'
-export const version = '1.4.9'
+export const version = '1.4.10'
 // Cordis 4.0.4 的 inject 只认**数组**或"服务名→配置"映射；
 // 写成 { required, optional } 会让依赖解析失败、fiber 永远 pending（踩过：改了代码却一直跑旧实例）。
 // 这里只声明必然存在的两个服务；attachments（视觉识别用）改为**惰性获取**，
@@ -5483,22 +5483,42 @@ let res = await callLlm(route, sys, usr, undefined)
             restoreAll()
             return { ok: false, error: '新代码导出无效（缺 apply），已取消，旧代继续运行' }
           }
-          // 预检通过 → 延迟替换（先把 HTTP 响应送回面板，避免请求被自己掐断）
+          // ★ 2026-10-27 修（事故复盘）：
+          //   原来是【先 dispose 旧 fiber、再建新的】。一旦新建失败
+          //   （实测错误：cannot create effect on inactive context —— 旧 ctx 已经失效），
+          //   旧实例已拆、新实例没建 → /wechat-bot 整站 404，只能重启 DSH。
+          //   现在改成【先建新的，成功才拆旧的】；任何一步失败都保留旧实例继续跑。
+          const registry = ctx.registry
+          if (!registry || typeof registry.plugin !== 'function') {
+            restoreAll()
+            return { ok: false, error: '宿主不支持 registry.plugin，无法热重载（旧实例继续运行）' }
+          }
+          let nf = null
+          try {
+            nf = registry.plugin(fresh, entry.options?.config ?? {}, () => [])
+          } catch (e) {
+            restoreAll()
+            log('[selfReload] ❌ 新实例创建失败（旧实例继续运行）：' + String(e?.message || e))
+            return { ok: false, error: '新实例创建失败，旧实例继续运行：' + String(e?.message || e).slice(0, 160) }
+          }
+          if (!nf) {
+            restoreAll()
+            return { ok: false, error: '新实例为空，旧实例继续运行' }
+          }
+          // 新实例已就位 → 再拆旧的（延迟，避免把当前 HTTP 响应掐断）
+          const oldFiber = entry.fiber
+          nf.entry = entry
+          entry.fiber = nf
           setTimeout(async () => {
             try {
-              const fiber = entry.fiber
-              if (fiber && typeof fiber.dispose === 'function') await fiber.dispose()
-              const registry = ctx.registry
-              if (registry && typeof registry.delete === 'function') registry.delete(fiber)
-              const nf = registry.plugin(fresh, entry.options?.config ?? {}, () => [])
-              nf.entry = entry
-              entry.fiber = nf
+              if (oldFiber && typeof oldFiber.dispose === 'function') await oldFiber.dispose()
+              if (registry && typeof registry.delete === 'function') registry.delete(oldFiber)
               log('[selfReload] ✅ 热重载完成（' + new Date().toLocaleTimeString() + '）')
             } catch (e) {
-              log('[selfReload] ❌ 重建失败，需要重启 DSH：' + String(e?.message || e))
+              log('[selfReload] 旧实例清理异常（新实例不受影响）：' + String(e?.message || e))
             }
-          }, 300)
-          return { ok: true, hint: '新代码预检通过，300ms 后替换旧代（约 1 秒不可用）' }
+          }, 1500)
+          return { ok: true, hint: '新实例已接管，1.5 秒后清理旧实例（页面可随即刷新）' }
         } catch (e) {
           return { ok: false, error: String(e?.message || e).slice(0, 200) }
         }
