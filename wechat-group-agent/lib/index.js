@@ -42,7 +42,7 @@ try {
 } catch { /* ignore */ }
 
 export const name = '@dsh-external/dsh-wechat-bot'
-export const version = '1.4.11'
+export const version = '1.4.12'
 // Cordis 4.0.4 的 inject 只认**数组**或"服务名→配置"映射；
 // 写成 { required, optional } 会让依赖解析失败、fiber 永远 pending（踩过：改了代码却一直跑旧实例）。
 // 这里只声明必然存在的两个服务；attachments（视觉识别用）改为**惰性获取**，
@@ -5488,42 +5488,29 @@ let res = await callLlm(route, sys, usr, undefined)
           //   （实测错误：cannot create effect on inactive context —— 旧 ctx 已经失效），
           //   旧实例已拆、新实例没建 → /wechat-bot 整站 404，只能重启 DSH。
           //   现在改成【先建新的，成功才拆旧的】；任何一步失败都保留旧实例继续跑。
-          const registry = ctx.registry
-          if (!registry || typeof registry.plugin !== 'function') {
-            restoreAll()
-            return { ok: false, error: '宿主不支持 registry.plugin，无法热重载（旧实例继续运行）' }
+          // ════════════════════════════════════════════════════════════════
+          //  ⚠️ 2026-10-27 结论：**不要从插件内部替换自己**。
+          //
+          //  试过两条路，都会把面板搞挂 / 把 reload 卡死：
+          //   ① 先 dispose 再 registry.plugin(新) → 旧 ctx 失效，新实例建不起来 → 404
+          //   ② 先 registry.plugin(新) 再 dispose 旧 → 新实例挂载撞车(duplicate route)，
+          //      旧实例拆掉后路由为空 → 404；且新实例的父 ctx 就是旧实例，父一死子也死
+          //   ③ entry.fiber=undefined + entry.refresh() → 第一次成功，第二次 fiber 状态未知、
+          //      再 404；且留下"半死实例"（工具注册没注销），之后每次 reload 都 await 卡死
+          //
+          //  每次失败都会留一具残骸（日志里 11 条"工具已存在（热重载残留）"就是它），
+          //  残骸让下一次 reload 的 await fiber.dispose() 永远等不到 → 卡死。
+          //
+          //  所以现在：**只做预检（确认新代码能加载），绝不碰运行中的实例**。
+          //  改完代码请**重启 DSH**（或在干净状态下用注入器重载）。
+          // ════════════════════════════════════════════════════════════════
+          return {
+            ok: true,
+            verified: true,
+            needRestart: true,
+            hint: '新代码已确认可加载（预检通过）。插件不支持在内部替换自身——请重启 DSH 生效；'
+              + '面板此期间保持可用。',
           }
-          let nf = null
-          try {
-            nf = registry.plugin(fresh, entry.options?.config ?? {}, () => [])
-          } catch (e) {
-            restoreAll()
-            log('[selfReload] ❌ 新实例创建失败（旧实例继续运行）：' + String(e?.message || e))
-            return { ok: false, error: '新实例创建失败，旧实例继续运行：' + String(e?.message || e).slice(0, 160) }
-          }
-          if (!nf) {
-            restoreAll()
-            return { ok: false, error: '新实例为空，旧实例继续运行' }
-          }
-          // 新实例已就位 → 再拆旧的（延迟，避免把当前 HTTP 响应掐断）
-          const oldFiber = entry.fiber
-          nf.entry = entry
-          entry.fiber = nf
-          setTimeout(async () => {
-            try {
-              if (oldFiber && typeof oldFiber.dispose === 'function') await oldFiber.dispose()
-              if (registry && typeof registry.delete === 'function') registry.delete(oldFiber)
-              // 旧实例拆除后路由会一起消失 → 立刻让新实例补挂一次（否则面板 404）
-              try {
-                const remount = globalThis.__DSH_WECHAT_PANEL_REMOUNT__
-                if (typeof remount === 'function') { remount(); log('[selfReload] 已请求新实例重新挂载面板路由') }
-              } catch (e) { log('[selfReload] remount 请求失败：' + String(e?.message || e)) }
-              log('[selfReload] ✅ 热重载完成（' + new Date().toLocaleTimeString() + '）')
-            } catch (e) {
-              log('[selfReload] 旧实例清理异常（新实例不受影响）：' + String(e?.message || e))
-            }
-          }, 1500)
-          return { ok: true, hint: '新实例已接管，1.5 秒后清理旧实例（页面可随即刷新）' }
         } catch (e) {
           return { ok: false, error: String(e?.message || e).slice(0, 200) }
         }
