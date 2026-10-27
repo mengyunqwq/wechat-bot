@@ -183,6 +183,7 @@ export function setupPanel(ctx, api) {
   const getConn = () => getService('connection')
 
   let mounted = false
+  let mountRetry = 0
   let tries = 0
   const mount = () => {
     if (mounted) return
@@ -214,9 +215,25 @@ export function setupPanel(ctx, api) {
       api.log('  → DSH 地址看 dsh web 启动时的输出，或浏览器地址栏')
     } catch (e) {
       mounted = false
-      api.log('面板挂载失败：' + String(e?.message || e))
+      const msg = String(e?.message || e)
+      // ★ 2026-10-27 事故：热重载时【新实例先建、旧实例还占着路由】，
+      //   ws.register 抛 `duplicate prefix route "/wechat-bot"` → 新实例没挂上；
+      //   随后旧实例被 dispose（路由随之移除）→ 面板整站 404。
+      //   修法：撞车就重试（旧实例通常 1.5~3 秒内被拆掉），最多 20 次 × 500ms。
+      const dup = /duplicate|已经存在|already exists|prefix route/i.test(msg)
+      if (dup && ++mountRetry <= 20) {
+        if (mountRetry === 1) api.log('面板挂载撞车（旧实例还占着路由），将重试最多 10 秒：' + msg)
+        setTimeout(mount, 500)
+        return
+      }
+      api.log('面板挂载失败：' + msg)
     }
   }
+
+  // 供 selfReload 在"旧实例拆除后"主动再挂一次（确保路由不空）
+  try {
+    globalThis.__DSH_WECHAT_PANEL_REMOUNT__ = () => { try { mount() } catch (e) { api.log('remount 异常：' + String(e?.message || e)) } }
+  } catch { /* ignore */ }
 
   // 审计日志轮转：超 5MB 滚一份，留 2 份（panel-audit.log.1/.2）。
   // 这个文件以前无上限增长（实测到过 1.7MB 且没人清理）。
