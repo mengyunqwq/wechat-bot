@@ -26,8 +26,7 @@ const ALLOWED_OPS = new Set([
   'names.set', 'names.add', 'names.refresh',
   // 2026-10-22 新增：用量统计 / 环境诊断 / 自动更新
   'usage', 'diag', 'diagCleanHires',
-  'eyesInfo', 'eyesSetDir', 'eyesToggle', 'eyesClean',
-  'eyesUpload', 'eyesInstall', 'eyesCheck',
+
   'checkUpdate', 'updateInfo', 'applyUpdate',
   // 2026-10-22：微信客户端电源（关进程 / 开进程+自动点进入微信）
   'wechatPower',

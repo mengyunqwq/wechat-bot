@@ -1302,7 +1302,8 @@ async function renderMembersExtra() {
   box.innerHTML = `<div class="section"><div class="hd">👥 群成员名字</div>
     <div class="row"><select id="mem-room2" style="min-width:220px"></select>
       <button class="btn" id="btn-mem-load2">从桥拉成员</button>
-      <span class="muted small">hook 拿不到联系人库，这里手动补名字，机器人才能 @ 对人。</span></div>
+      <button class="btn" id="btn-names-refresh" title="重新读一遍联系人/群名缓存（names.refresh）">刷新名字缓存</button>
+      <span class="muted small" id="names-refresh-st"></span></div>
     <div id="member-list" class="muted small" style="margin-top:10px">选群后点「从桥拉成员」。</div>
     <div class="row" style="margin-top:10px"><input id="name-add" type="text" placeholder="直接补名字（逗号分隔，不需要 wxid）" style="flex:1;min-width:240px">
       <button class="btn" id="btn-name-add">添加</button></div></div>
@@ -1311,6 +1312,18 @@ async function renderMembersExtra() {
   fillRoomSelect($('#mem-room2'), false);
   ensureBridgeRooms().then(() => { fillRoomSelect($('#mem-room2'), false); renderRoomPicker(); });
   $('#btn-mem-load2').onclick = loadMembers;
+  $('#btn-names-refresh').onclick = async () => {
+    const st = $('#names-refresh-st');
+    st.textContent = '刷新中…';
+    try {
+      const j = await api('/action', { method: 'POST', body: JSON.stringify({ op: 'names.refresh' }) });
+      const r = j.result || {};
+      const people = Object.keys(r.memberNames || {}).length;
+      const ats = (r.atNames || []).length;
+      st.textContent = `已刷新：${people} 个人名 / ${ats} 个可 @ 的名字`;
+      toast('名字缓存已刷新', 'ok');
+    } catch (e) { st.textContent = '失败：' + e.message; toast('刷新失败：' + e.message, 'err') }
+  };
   $('#btn-name-add').onclick = async () => {
     const names = $('#name-add').value.trim(); if (!names) return;
     try {
@@ -1782,6 +1795,9 @@ function renderDiag() {
       <button class="btn primary" id="diag-refresh">重新检测</button>
       <button class="btn" id="diag-poll">恢复轮询</button>
       <button class="btn" id="diag-reload" title="重新加载 lib/index.js —— 改完插件代码不用重启 DSH">热重载插件</button>
+      <button class="btn" id="diag-wx-status" title="查询微信进程状态（wechatPower.status）">微信状态</button>
+      <button class="btn" id="diag-wx-start" title="启动微信并自动点「进入微信」（wechatPower.start）">启动微信</button>
+      <span class="muted small" id="diag-wx-st"></span>
       <span class="muted small" id="diag-poll-st">轮询状态读取中…</span>
       <span class="muted small" id="diag-at">${App.diag ? esc(ago(App.diagAt)) : '加载中…'}</span>
       <span class="muted small">（要连 hook 的三个端点，最慢约 6 秒）</span>
@@ -1913,6 +1929,32 @@ function renderDiag() {
       toast(j.result && j.result.restarted ? '轮询已重启' : '已解除硬闸', 'ok');
     } catch (e) { toast('恢复失败：' + e.message, 'err'); }
     finally { pollBtn.disabled = false; pollBtn.textContent = '恢复轮询'; }
+  };
+
+  // 微信客户端：状态 / 启动（不提供"关闭"——项目规矩 R1：绝不强杀微信）
+  const wxSt = $('#diag-wx-st');
+  const wxCall = async (action, label) => {
+    if (!wxSt) return;
+    wxSt.textContent = label + '…';
+    try {
+      const j = await api('/action', { method: 'POST', body: JSON.stringify({ op: 'wechatPower', args: { action } }) });
+      const r = j.result || {};
+      let txt;
+      if (action === 'status') {
+        txt = '进程 ' + (r.count ?? r.processes ?? '?') + ' 个' + (r.running ? '（运行中）' : '（未运行）');
+      } else {
+        txt = r.ok ? '已启动' + (r.clicked ? '，已点进入微信' : '') : ('失败：' + (r.error || '未知'));
+      }
+      wxSt.textContent = txt;
+      toast(txt, r.ok === false ? 'err' : 'ok');
+    } catch (e) { wxSt.textContent = '失败：' + e.message; toast('微信操作失败：' + e.message, 'err') }
+  };
+  const wxStatusBtn = $('#diag-wx-status');
+  if (wxStatusBtn) wxStatusBtn.onclick = () => wxCall('status', '查询中');
+  const wxStartBtn = $('#diag-wx-start');
+  if (wxStartBtn) wxStartBtn.onclick = async () => {
+    if (!confirm('启动微信客户端，并自动点「进入微信」？\n\n（会等待登录确认，最长约 150 秒）')) return;
+    await wxCall('start', '启动中');
   };
 
   const rlBtn = $('#diag-reload');
