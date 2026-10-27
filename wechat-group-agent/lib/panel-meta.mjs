@@ -224,6 +224,11 @@ export const CONFIG_META = {
   },
 
   // ── 表情包 ──────────────────────────────────────────────────
+  voiceImageExclusive: {
+    group: 'voice', label: '语音/图片互斥', type: 'bool',
+    help: '同一轮回复里不同时发语音和表情包/图片。客户端在两条媒体发送连着触发时会偶发崩溃，'
+      + '默认开；关掉就恢复"发完语音再补一张表情包"。',
+  },
   stickerChance: {
     group: 'sticker', label: '文字后补表情包概率', type: 'number', min: 0, max: 1, step: 0.01,
   },

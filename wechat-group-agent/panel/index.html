@@ -77,6 +77,11 @@
   .pill{display:inline-flex;align-items:center;gap:6px;padding:3px 9px;border-radius:999px;
     background:var(--chip);font-size:12px;color:var(--muted);border:1px solid var(--line-2);white-space:nowrap}
   .pill b{font-weight:500;color:var(--text)}
+  /* 状态胶囊：让"开/关/异常"一眼能分（2026-10-27：用户反馈只看文字分不出状态） */
+  .pill.ok{background:rgba(22,163,74,.12);border-color:rgba(22,163,74,.35);color:var(--ok)}
+  .pill.warn{background:rgba(217,119,6,.12);border-color:rgba(217,119,6,.35);color:var(--warn)}
+  .pill.bad{background:rgba(220,38,38,.12);border-color:rgba(220,38,38,.35);color:var(--bad)}
+  .small.ok{color:var(--ok)} .small.warn{color:var(--warn)} .small.bad{color:var(--bad)}
   .dot{width:7px;height:7px;border-radius:50%;background:var(--muted)}
   .dot.ok{background:var(--ok)} .dot.warn{background:var(--warn)} .dot.bad{background:var(--bad)}
   .hswitch{display:flex;align-items:center;gap:7px;font-size:12px;color:var(--muted);white-space:nowrap}
@@ -1545,14 +1550,28 @@ async function renderVoiceExtra() {
   const modelOn = cfg.voiceModelOn !== false;
   const preset = cfg.voicePreset || '雌小鬼·A（当前）';
   const PRESETS = ['雌小鬼·A（当前）','雌小鬼·B','雌小鬼·C','雌小鬼·D','训练版（12轮）'];
-  box.innerHTML = `<div class="section"><div class="hd">🧠 语音模型</div>
-    <div class="row"><label class="sw"><input type="checkbox" id="voice-model-sw" ${modelOn ? 'checked' : ''}><i></i></label>
-      <span id="voice-model-state" class="muted small">${modelOn ? '常驻（时刻准备）' : '已关闭（省 GPU）'}</span></div>
-    <div class="small muted" style="margin-top:8px">开=模型常驻（2 秒出语音）；关=释放模型（省 4GB GPU，开时需加载 15 秒）。</div></div>
-
+  box.innerHTML = `
     <div class="section"><div class="hd">🎭 音色预设</div>
     <div class="row"><select id="voice-preset" style="padding:4px">${PRESETS.map(o => `<option ${o===preset?'selected':''}>${esc(o)}</option>`).join('')}</select>
       <span class="muted small">切换后立即生效</span></div></div>
+
+    <div class="section"><div class="hd">🔈 TTS 服务（GPT-SoVITS）</div>
+      <div class="row">
+        <span id="tts-state" class="pill">读取中…</span>
+        <span id="tts-config" class="muted small"></span>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <label class="sw" title="勾上 = DSH 启动时自动拉起 TTS 服务"><input type="checkbox" id="tts-autostart" ${cfg.voiceModelOn !== false ? 'checked' : ''}><i></i></label>
+        <span class="small muted">开机自启（DSH 启动时自动拉起）</span>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <button class="btn" id="tts-start">启动</button>
+        <button class="btn" id="tts-stop">停止</button>
+        <button class="btn primary" id="tts-restart" title="杀掉旧进程再重新加载模型">重启</button>
+        <button class="btn" id="tts-test" title="真的合成一句话，把服务端返回原样显示">试合成</button>
+      </div>
+      <div id="tts-msg" class="small" style="margin-top:8px">语音发不出来时先点「试合成」——它会真的合成一句，把服务端的报错原文显示在这里。</div>
+    </div>
 `;
   $('#voice-preset').onchange = async (e) => {
     const v = e.target.value;
@@ -1561,13 +1580,138 @@ async function renderVoiceExtra() {
       toast('音色已切换：' + v, 'ok');
     } catch (err) { toast('失败：' + err.message, 'err'); }
   };
-  $('#voice-model-sw').onchange = async (e) => {
+  // ── TTS 服务控制（状态 / 启动 / 停止 / 重启 / 试合成）──
+  //   设计要点（2026-10-27 修）：
+  //   · 点按钮**立刻**给反馈，不等后端；
+  //   · 启动/重启后自动轮询状态，就绪了明确写「✅ 已启动成功（用了几秒）」；
+  //   · 状态不再只显示"运行中"：区分 已停止 / 启动中 / 已就绪 / 端口异常。
+  const ttsStateEl = $('#tts-state'), ttsConfigEl = $('#tts-config'), ttsMsgEl = $('#tts-msg');
+  let ttsPollTimer = null, ttsWaitStart = 0;
+
+  const ttsPaint = (r) => {
+    if (!ttsStateEl) return;
+    const pids = (r.pids || []).join(',');
+    const st = r.state || (r.running ? 'loading' : 'stopped');
+    if (st === 'ready') {
+      ttsStateEl.textContent = '🟢 已就绪（端口 ' + r.port + '，PID ' + pids + '）';
+      ttsStateEl.className = 'pill ok';
+    } else if (st === 'loading') {
+      const waited = ttsWaitStart ? Math.round((Date.now() - ttsWaitStart) / 1000) : 0;
+      ttsStateEl.textContent = '🟡 启动中…（PID ' + pids + '，端口还没通' + (waited ? '，已等 ' + waited + 's' : '') + '）';
+      ttsStateEl.className = 'pill warn';
+    } else if (st === 'stray') {
+      ttsStateEl.textContent = '⚠️ 端口 ' + r.port + ' 有人应答，但没找到 api_v2 进程';
+      ttsStateEl.className = 'pill warn';
+    } else {
+      ttsStateEl.textContent = '⚪ 已停止（模型未加载）';
+      ttsStateEl.className = 'pill';
+    }
+    if (ttsConfigEl) {
+      const L = r.last || {};
+      let t = '配置：' + (r.configOn ? '开机自启（voiceModelOn=开）' : '不自动启动（voiceModelOn=关）');
+      if (L.testAt) t += '｜上次试合成：' + (L.testOk ? '✅ ' + L.testMsg : '❌ ' + L.testMsg);
+      ttsConfigEl.textContent = t;
+    }
+  };
+
+  const ttsFetch = async () => {
+    const j = await api('/action', { method: 'POST', body: JSON.stringify({ op: 'ttsStatus' }) });
+    return j.result || {};
+  };
+
+  const ttsRefresh = async () => {
+    if (!ttsStateEl) return;
+    try { ttsPaint(await ttsFetch()) }
+    catch (e) { ttsStateEl.textContent = '状态读取失败：' + e.message; ttsStateEl.className = 'pill bad' }
+  };
+
+  const ttsStopPolling = () => { if (ttsPollTimer) { clearInterval(ttsPollTimer); ttsPollTimer = null } };
+
+  // 启动/重启后轮询到就绪（最多 60 秒），就绪即报"成功"
+  const ttsPollUntilReady = () => {
+    ttsStopPolling();
+    ttsWaitStart = Date.now();
+    ttsPollTimer = setInterval(async () => {
+      let r = null;
+      try { r = await ttsFetch() } catch { return }
+      ttsPaint(r);
+      const spent = Math.round((Date.now() - ttsWaitStart) / 1000);
+      if (r.state === 'ready') {
+        ttsStopPolling(); ttsWaitStart = 0;
+        ttsMsgEl.textContent = '✅ 已启动成功，用时 ' + spent + ' 秒。现在可以点「试合成」确认音质。';
+        ttsMsgEl.className = 'small ok';
+        toast('TTS 已就绪（' + spent + 's）', 'ok');
+      } else if (spent > 60) {
+        ttsStopPolling(); ttsWaitStart = 0;
+        ttsMsgEl.textContent = '⚠️ 60 秒还没就绪：进程在但端口没通，多半是模型加载失败。点「试合成」看服务端原文报错。';
+        ttsMsgEl.className = 'small warn';
+        toast('TTS 60 秒未就绪', 'err');
+      }
+    }, 1500);
+  };
+
+  const ttsAct = async (action) => {
+    if (!ttsMsgEl) return;
+    const label = { start: '启动', stop: '停止', restart: '重启' }[action] || action;
+    ttsMsgEl.className = 'small';
+    ttsMsgEl.textContent = '正在执行：' + label + '…';
+    try {
+      const j = await api('/action', { method: 'POST', body: JSON.stringify({ op: 'ttsControl', args: { action } }) });
+      const r = j.result || {};
+      const notes = (r.notes || []).join('；');
+      if (action === 'stop') {
+        ttsStopPolling(); ttsWaitStart = 0;
+        await ttsRefresh();
+        ttsMsgEl.textContent = '✅ 已停止：' + (notes || '进程已结束');
+        ttsMsgEl.className = 'small ok';
+        toast('TTS 已停止', 'ok');
+      } else {
+        ttsMsgEl.textContent = '⏳ ' + (notes || '已发出命令') + '，正在等端口就绪…';
+        ttsMsgEl.className = 'small';
+        toast('TTS ' + label + '：已发出命令', 'ok');
+        ttsPollUntilReady();
+      }
+    } catch (e) {
+      ttsMsgEl.textContent = '❌ ' + label + '失败：' + e.message;
+      ttsMsgEl.className = 'small bad';
+      toast('TTS ' + label + '失败：' + e.message, 'err');
+    }
+  };
+
+  if ($('#tts-start')) $('#tts-start').onclick = () => ttsAct('start');
+  if ($('#tts-stop')) $('#tts-stop').onclick = () => ttsAct('stop');
+  if ($('#tts-restart')) $('#tts-restart').onclick = () => {
+    if (!confirm('重启 TTS 服务？会杀掉当前 api_v2 并重新加载模型（10~40 秒，期间发不出语音）。')) return;
+    ttsAct('restart');
+  };
+  if ($('#tts-test')) $('#tts-test').onclick = async () => {
+    ttsMsgEl.className = 'small';
+    ttsMsgEl.textContent = '合成中（最长 90 秒）…';
+    try {
+      const j = await api('/action', { method: 'POST', body: JSON.stringify({ op: 'ttsTest' }) });
+      const r = j.result || {};
+      if (r.ok) {
+        ttsMsgEl.textContent = '✅ 合成成功：' + r.bytes + ' 字节 / ' + r.ms + 'ms —— 语音链路正常';
+        ttsMsgEl.className = 'small ok';
+        toast('TTS 正常', 'ok');
+      } else {
+        ttsMsgEl.textContent = '❌ 合成失败：' + (r.error || '未知');
+        ttsMsgEl.className = 'small bad';
+        toast('TTS 异常', 'err');
+      }
+      await ttsRefresh();
+    } catch (e) { ttsMsgEl.textContent = '❌ 试合成失败：' + e.message; ttsMsgEl.className = 'small bad' }
+  };
+  void ttsRefresh();
+
+  // 「开机自启」勾选：只改意图；要停服务请点「停止」
+  if ($('#tts-autostart')) $('#tts-autostart').onchange = async (e) => {
     const on = e.target.checked;
     try {
-      await api('/config', { method:'POST', body: JSON.stringify({ patch: { voiceModelOn: on } }) });
-      $('#voice-model-state').textContent = on ? '常驻（时刻准备）' : '已关闭（省 GPU）';
-      toast(on ? '语音模型：已开启（常驻）' : '语音模型：已关闭（省 GPU）', 'ok');
-    } catch (err) { e.target.checked = !on; toast('失败：' + err.message, 'err'); }
+      await api('/config', { method: 'POST', body: JSON.stringify({ patch: { voiceModelOn: on } }) });
+      toast(on ? '已设为开机自启' : '已取消开机自启（当前进程不动）', 'ok');
+      await ttsRefresh();
+    } catch (err) { e.target.checked = !on; toast('设置失败：' + err.message, 'err') }
   };
 }
 

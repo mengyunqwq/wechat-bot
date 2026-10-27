@@ -207,3 +207,21 @@
 
 判断是否踩坑：日志出现 `cannot create effect on inactive context`，
 插件列表里该插件变成 `[disposed]`，面板整站 404。
+
+## R18. 插件里禁止阻塞式外部命令（`execSync` / 忙等循环）
+
+2026-10-27 事故：给面板加「TTS 服务 启动/停止/重启」时，用 `execSync` + `while` 轮询等进程退出。
+
+- 现象：点一次「重启」，**整个面板无响应、DSH 像死了一样**，只能重启 DSH；之后"经常没反应"。
+- 原因：插件跑在 **DSH 同一个 Node 进程**里，`execSync` / 忙等会**占住事件循环**，
+  HTTP 请求全部排队 —— 面板、DSH 界面、其它插件一起卡死。
+- 判据：`execSync`、`Atomics.wait`、`while(Date.now()<t)` 忙等，出现在**请求路径**上就是 bug。
+
+规范：
+- ❌ 请求路径（面板 op / HTTP handler / 定时器回调）里不许 `execSync`、不许忙等
+- ✅ 用 `exec`/`spawn`（回调或 Promise 版）、`setTimeout` 异步等待
+- ✅ 长操作（起服务、加载模型）**立刻返回**，进度交给前端轮询状态接口
+- ✅ 必须同步的地方（比如极短的配置落盘）要极其克制，且要能说明为什么不能异步
+
+踩坑特征：日志正常、但面板/DSH 卡住几十秒；`curl /wechat-bot` 超时；
+CPU 不高（是在等而不是在算）。

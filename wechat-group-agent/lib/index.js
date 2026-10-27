@@ -14,8 +14,9 @@
  *
  * 纯 ESM，无编译步骤（本环境没有可用的 tsc），改完 dev_reload_package 即生效。
  */
-import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, unlinkSync, writeFileSync, copyFileSync, rmSync } from 'node:fs'
-import { execFileSync, execSync } from 'node:child_process'
+import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, unlinkSync, writeFileSync, copyFileSync, rmSync, openSync, closeSync } from 'node:fs'
+import { execFileSync, execSync, exec as execCb, spawn as spawnCb } from 'node:child_process'
+import net from 'node:net'
 import { request as httpsRequest } from 'node:https'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -42,7 +43,7 @@ try {
 } catch { /* ignore */ }
 
 export const name = '@dsh-external/dsh-wechat-bot'
-export const version = '1.4.14'
+export const version = '1.4.15'
 // Cordis 4.0.4 的 inject 只认**数组**或"服务名→配置"映射；
 // 写成 { required, optional } 会让依赖解析失败、fiber 永远 pending（踩过：改了代码却一直跑旧实例）。
 // 这里只声明必然存在的两个服务；attachments（视觉识别用）改为**惰性获取**，
@@ -425,6 +426,7 @@ const DEFAULT_CONFIG = {
   debounceMs: 1200,              // 连发消息合并窗口（实测 2.2s 太拖，压到 1.2s）
   // 表情包：库里现成的 + 可用 Agnes 现场生成的情绪
   stickerChance: 0.22,           // 文字后补表情包的概率
+  voiceImageExclusive: true,     // 同一轮回复里不同时发语音和图片/表情包（避免客户端偶发崩溃）
   genActivities: ['吃饭', '睡觉', '摸鱼', '打游戏', '上班', '加班', '写代码', '喝奶茶', '做饭', '洗澡', '看书', '发呆', '健身', '追剧', '逛街', '起床', '下雨', '夏天', '冬天', '被夸', '被骂', '撒娇', '等消息'],
     genEmotions: ['大笑', '开心', '得意', '无语', '生气', '委屈', '震惊', '困', '馋', '害羞', '认真', '比心', '点赞', '疑惑', '晚安', '摸鱼'],
   genStickerChance: 0.25,        // 需要表情包时，"现场生成"（而非用现成图）的概率
@@ -565,31 +567,220 @@ const BUILD_VER = '2026-10-23.4'   // 抬版本：让新实例压过热重载残
     return v
   }
 
+  // ══════════════════════════════════════════════════════════════════════
+  //  TTS 服务（GPT-SoVITS api_v2.py）控制面
+  //
+  //  ★ 2026-10-27 事故复盘（重要）：
+  //    第一版用了 execSync + while 轮询等进程退出 —— **同步阻塞 DSH 主线程**。
+  //    点一次「重启」就把宿主卡住十几秒，面板全站无响应、DSH 像死了一样，
+  //    只能重启 DSH。这里全部改成异步（exec/spawn + await sleep），
+  //    并且「启动/重启」**立即返回**，由面板轮询状态看进度，不再让请求吊着。
+  //
+  //  规范（写进 R18）：插件不能在自己进程里跑阻塞式外部命令 —— 它和 DSH 共用事件循环。
+  // ══════════════════════════════════════════════════════════════════════
+  const TTS_API = () => process.env.GPT_SOVITS_API || 'http://127.0.0.1:9880/tts'
+  const TTS_PORT = () => { try { return Number(new URL(TTS_API()).port) || 9880 } catch { return 9880 } }
+  const TTS_REF = () => process.env.GPT_SOVITS_REF
+    || 'D:/微信deepseek/data/sexy-loli-cn/separated/htdemucs/【中文音声】许久未见的雌小鬼，向你表达爱意/cn-a.wav'
+  const TTS_PROMPT = () => process.env.GPT_SOVITS_PROMPT
+    || '就像是一根被流酸泡过的麻辣秋衣一样这么久不见，大哥哥有没有想我呀'
+
+  // 最近一次操作的结论（面板上要能看到"成功/失败"，不能只有转圈）
+  const ttsLast = {
+    action: '', at: 0, ok: null, msg: '',
+    testAt: 0, testOk: null, testMsg: '',
+  }
+
+  const sleepMs = (ms) => new Promise((r) => setTimeout(r, ms))
+
+  /** 异步跑一条命令，拿 stdout（不阻塞事件循环）*/
+  function runAsync(cmd, opts = {}) {
+    return new Promise((resolve) => {
+      try {
+        execCb(cmd, { windowsHide: true, timeout: 20000, ...opts }, (err, stdout) => {
+          resolve({ ok: !err, stdout: String(stdout || ''), error: err ? String(err.message || err) : '' })
+        })
+      } catch (e) { resolve({ ok: false, stdout: '', error: String(e?.message || e) }) }
+    })
+  }
+
+  /**
+   * 找出所有跑 api_v2.py 的 python 进程（异步）。
+   * wmic 在新版 Windows 已被移除 → 拿不到就用 PowerShell 兜底，否则状态会永远显示"未运行"。
+   */
+  async function ttsPids() {
+    const byWmic = await runAsync('wmic process where "name=\'python.exe\' and commandline like \'%api_v2%\'" get processid /format:list')
+    const ids = (byWmic.stdout.match(/ProcessId=(\d+)/g) || []).map((x) => Number(x.split('=')[1])).filter(Boolean)
+    if (ids.length || /api_v2/i.test(byWmic.stdout)) return ids
+    const ps = await runAsync(
+      'powershell -NoProfile -NonInteractive -WindowStyle Hidden -Command '
+      + '"Get-CimInstance Win32_Process -Filter \\"Name=\'python.exe\'\\" | Where-Object { $_.CommandLine -like \'*api_v2*\' } | ForEach-Object { $_.ProcessId }"')
+    return (ps.stdout.match(/\d+/g) || []).map(Number).filter((n) => n > 100)
+  }
+
+  /** 端口是否有 TCP 应答（比 fetch 快、且不受 HTTP 状态影响）*/
+  function tcpProbe(port, timeoutMs = 1200) {
+    return new Promise((resolve) => {
+      let done = false
+      const sock = new net.Socket()
+      const finish = (v) => { if (done) return; done = true; try { sock.destroy() } catch { /* ignore */ } resolve(v) }
+      sock.setTimeout(timeoutMs)
+      sock.once('connect', () => finish(true))
+      sock.once('timeout', () => finish(false))
+      sock.once('error', () => finish(false))
+      try { sock.connect(port, '127.0.0.1') } catch { finish(false) }
+    })
+  }
+
+  async function ttsStatus() {
+    const [pids, portAlive] = await Promise.all([ttsPids(), tcpProbe(TTS_PORT())])
+    const running = pids.length > 0
+    // 语义化状态，面板直接显示这一句就够
+    let state = 'stopped'
+    if (running && portAlive) state = 'ready'          // 进程在 + 端口通 = 可用
+    else if (running) state = 'loading'                // 进程在但端口没起（加载中/加载失败）
+    else if (portAlive) state = 'stray'                // 端口通但没找到进程（别的进程占着/名字不匹配）
+    return {
+      ok: true,
+      state,
+      running, pids, port: TTS_PORT(), portAlive,
+      configOn: config.voiceModelOn !== false,
+      api: TTS_API(),
+      last: { ...ttsLast },
+    }
+  }
+
+  /** 真的合成一句（短），把服务端原文错误带回来 —— "坏没坏"的唯一可靠判据 */
+  async function ttsTest(text) {
+    const body = {
+      text: String(text || '测试').slice(0, 20),
+      text_lang: 'zh',
+      ref_audio_path: TTS_REF(),
+      prompt_lang: 'zh',
+      prompt_text: TTS_PROMPT(),
+      text_split_method: 'cut5',
+      batch_size: 1,
+      media_type: 'wav',
+    }
+    const t0 = Date.now()
+    try {
+      const r = await fetch(TTS_API(), {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+        signal: AbortSignal.timeout(90_000),
+      })
+      const ms = Date.now() - t0
+      if (!r.ok) {
+        let detail = ''
+        try { detail = (await r.text()).slice(0, 300) } catch { /* ignore */ }
+        ttsLast.testAt = Date.now(); ttsLast.testOk = false; ttsLast.testMsg = 'HTTP ' + r.status + ' ' + (detail || '')
+        return { ok: false, http: r.status, ms, error: detail || ('HTTP ' + r.status) }
+      }
+      const buf = Buffer.from(await r.arrayBuffer())
+      const isWav = buf.length > 4 && buf.slice(0, 4).toString('latin1') === 'RIFF'
+      ttsLast.testAt = Date.now(); ttsLast.testOk = isWav
+      ttsLast.testMsg = isWav ? (buf.length + ' 字节 / ' + ms + 'ms') : '返回的不是 WAV'
+      return { ok: isWav, ms, bytes: buf.length, error: isWav ? '' : '返回的不是 WAV（前 4 字节不匹配）' }
+    } catch (e) {
+      ttsLast.testAt = Date.now(); ttsLast.testOk = false
+      ttsLast.testMsg = String(e?.message || e).slice(0, 200)
+      return { ok: false, ms: Date.now() - t0, error: String(e?.message || e).slice(0, 200) }
+    }
+  }
+
+  /**
+   * 启动（立即返回，不等待模型加载）。
+   * ★ 把服务端 stdout/stderr 落到 data\logs\tts-api.log —— 上次"进程活着但合成全 400"
+   *   就是因为 stdio 丢掉，看不到 traceback，只能靠猜。
+   */
+  function ttsSpawn() {
+    const logDir = join(dirname(memoryDir), 'logs')
+    try { mkdirSync(logDir, { recursive: true }) } catch { /* ignore */ }
+    const outLog = join(logDir, 'tts-api.log')
+    const errLog = join(logDir, 'tts-api.log.err')
+    try {
+      const out = openSync(outLog, 'a')
+      const err = openSync(errLog, 'a')
+      const child = spawnCb(
+        'D:\\Python311\\python.exe',
+        ['D:\\微信deepseek\\data\\GPT-SoVITS\\api_v2.py'],
+        {
+          cwd: 'D:\\微信deepseek\\data\\GPT-SoVITS',
+          detached: true,
+          windowsHide: true,
+          stdio: ['ignore', out, err],
+        },
+      )
+      child.on('exit', (code) => { try { closeSync(out); closeSync(err) } catch { /* ignore */ } ; log('TTs api_v2 退出，code=' + code + '（看 data\\logs\\tts-api.log.err）') })
+      child.unref()
+      log('TTS api_v2 已启动（日志 → ' + outLog + '）')
+      return { ok: true, log: outLog }
+    } catch (e) { return { ok: false, error: String(e?.message || e).slice(0, 160) } }
+  }
+
+  /** 停：杀进程并等它真的消失（异步，最多 8 秒）*/
+  async function ttsKillAll() {
+    const pids = await ttsPids()
+    if (!pids.length) return { killed: 0 }
+    await Promise.all(pids.map((pid) => runAsync('taskkill /PID ' + pid + ' /F')))
+    const until = Date.now() + 8000
+    while (Date.now() < until) {
+      if (!(await ttsPids()).length) break
+      await sleepMs(400)
+    }
+    return { killed: pids.length, left: (await ttsPids()).length }
+  }
+
+  /**
+   * 控制入口。start/restart **立即返回**（不吊着 HTTP 请求），
+   * 面板用 ttsStatus 轮询看进度 —— 这样点完按钮马上有反馈，DSH 也不会卡。
+   */
+  async function ttsControl(action) {
+    const act = String(action || 'status')
+    if (!['status', 'start', 'stop', 'restart'].includes(act)) {
+      return { ok: false, error: 'action 只能是 status / start / stop / restart' }
+    }
+    if (act === 'status') return await ttsStatus()
+
+    const notes = []
+    if (act === 'stop' || act === 'restart') {
+      const k = await ttsKillAll()
+      notes.push(k.killed ? ('已停止 ' + k.killed + ' 个进程' + (k.left ? '（仍有 ' + k.left + ' 个未退出）' : '')) : '本来就没在跑')
+    }
+    if (act === 'start' || act === 'restart') {
+      const r = ttsSpawn()
+      notes.push(r.ok ? '已发出启动命令（模型加载 10~40 秒）' : ('启动失败：' + r.error))
+    }
+    // 记录"用户意图"，下次开机按这个恢复
+    try {
+      config.voiceModelOn = (act !== 'stop')
+      persistConfig()
+    } catch { /* ignore */ }
+
+    ttsLast.action = act
+    ttsLast.at = Date.now()
+    ttsLast.ok = null                       // 结果未知：交给面板轮询状态判断
+    ttsLast.msg = notes.join('；')
+    return { ok: true, action: act, notes, pending: (act !== 'stop'), state: 'pending' }
+  }
+
   /** 语音模型启停（voiceModelOn）：true=启动 api_v2（常驻），false=杀 api_v2（省 GPU） */
   function applyModelSwitch(on) {
-    // ★ 2026-10-26：这里原来是 `const { execSync } = require('node:child_process')`，
-    //   但本插件是 ESM（package.json type:module），ESM 里没有 require →
-    //   一进函数就 ReferenceError，被调用点的 `catch { /* ignore */ }` 吞掉，
-    //   结果就是**面板开关完全失灵：voiceModelOn=true 但 api_v2 从没被启动过**。
-    //   改用顶部 import 的 execSync（已补进 import）。
-    const listCmd = 'wmic process where "name=\'python.exe\' and commandline like \'%api_v2%\'" get processid /format:list'
-    let pids = []
-    try {
-      const out = execSync(listCmd, { encoding: 'utf8', windowsHide: true })
-      pids = (out.match(/ProcessId=(\d+)/g) || []).map((s) => Number(s.split('=')[1]))
-    } catch { /* ignore */ }
-    if (on) {
-      if (pids.length) { log('语音模型：api_v2 已在跑'); return }
+    // ★ 2026-10-27：改成全异步（原来 execSync 会阻塞 DSH 主线程，点一下整机卡住）。
+    //   这里 fire-and-forget，结果看面板的 TTS 状态卡片。
+    void (async () => {
       try {
-        execSync('start "" /B "D:\\Python311\\python.exe" "D:\\微信deepseek\\data\\GPT-SoVITS\\api_v2.py"', {
-          cwd: 'D:\\微信deepseek\\data\\GPT-SoVITS', windowsHide: true, shell: 'cmd.exe',
-        })
-        log('语音模型：api_v2 已启动（常驻）')
-      } catch (e) { log('语音模型：启动失败 ' + String(e?.message || e).slice(0, 100)) }
-    } else {
-      for (const pid of pids) { try { execSync('taskkill /PID ' + pid + ' /F', { stdio: 'ignore', windowsHide: true }) } catch { /* ignore */ } }
-      if (pids.length) log('语音模型：已关闭 api_v2（释放 GPU）')
-    }
+        if (on) {
+          if ((await ttsPids()).length) { log('语音模型：api_v2 已在跑'); return }
+          const r = ttsSpawn()
+          log(r.ok ? '语音模型：api_v2 已启动（常驻）' : ('语音模型：启动失败 ' + r.error))
+        } else {
+          const k = await ttsKillAll()
+          if (k.killed) log('语音模型：已关闭 api_v2（释放 GPU，停了 ' + k.killed + ' 个）')
+        }
+      } catch (e) { log('语音模型启停异常：' + String(e?.message || e).slice(0, 160)) }
+    })()
   }
 
   /** 批量应用配置：要么全部通过校验再写，要么一条都不改。 */
@@ -618,7 +809,14 @@ const BUILD_VER = '2026-10-23.4'   // 抬版本：让新实例压过热重载残
     //  ★ 原来这里是 `catch { /* ignore */ }`，把 ReferenceError 全吞了，
     //    导致「开关开着但模型没起」这种问题被隐藏了几个月。现在记日志。
     if (next.voiceModelOn !== undefined) {
-      try { applyModelSwitch(next.voiceModelOn) } catch (e) { log('语音模型启停失败：' + String(e?.message || e).slice(0, 160)) }
+      // ★ 2026-10-27：voiceModelOn 现在只表示"开机自启"这个意图。
+      //   勾上 → 顺手把服务拉起来（方便）；取消勾选 → **不杀**正在跑的服务
+      //   （要停就点面板的「停止」，避免"我只是不想自启，结果服务被杀了"）。
+      if (next.voiceModelOn) {
+        void (async () => { try { if (!(await ttsPids()).length) ttsSpawn() } catch { /* ignore */ } })()
+      } else {
+        log('语音模型：已取消"开机自启"（当前进程不动，要停请点面板「停止」）')
+      }
     }
 
     // 朋友圈参数一变就重新排期 —— 否则用户把间隔调短了，还要等旧的 nextAt 到点才生效
@@ -3152,6 +3350,10 @@ let res = await callLlm(route, sys, usr, undefined)
     r.lastRepliedSender = trigger.sender
     r.lastRepliedAt = Date.now()
     lastDeliveredRoom = roomId
+    // ★ 2026-10-27：本轮是否已经发过语音 —— 用来避免"语音和图片/表情包连着发"。
+    //   用户实测：语音 + 发图一起来，客户端会偶发崩溃（媒体发送对象所有权问题尚未定位），
+    //   同一轮里同时触发两条媒体发送会显著提高撞车概率。这里做互斥兜底。
+    let sentVoiceThisReply = false
     if (reply.text) {
       // 防重复③：这句回复最近说过一模一样的话 → 不重复发（复读最不像人）
       const nReply = normText(reply.text)
@@ -3162,7 +3364,20 @@ let res = await callLlm(route, sys, usr, undefined)
         if (!reply.wantSticker && !reply.stickerOnly) return
         reply = { ...reply, text: '' }
       }
-      const parts = toMessageParts(reply.text).map(stripStickerDirective).filter(Boolean)  // 兜底：正文里绝不留指令
+      // ★ 2026-10-27：模型有时把占位符当正文发出来（实测群里出现一条纯 "[语音]" 的文本消息，
+      //   因为语音合成失败、模型又在上下文里看到 [语音] 这个占位符）。占位符永远不是"要发的话"。
+      const PLACEHOLDER_ONLY = /^[\[【(（]?(语音|图片|表情|表情包|视频|文件|链接|拍一拍)[\]】)）]?$/i
+      const rawParts = toMessageParts(reply.text).map(stripStickerDirective).filter(Boolean)
+      const parts = rawParts.filter((x) => {
+        const t = String(x).trim()
+        if (!PLACEHOLDER_ONLY.test(t)) return true
+        log(`丢掉占位符正文：${JSON.stringify(t)}（这不是要发的话）`)
+        return false
+      })
+      if (!parts.length && rawParts.length) {
+        // 整条都是占位符 → 这条回复没有实际内容，直接放弃（但允许仍发图）
+        if (!reply.wantSticker && !reply.stickerOnly) { log('这条回复只剩占位符 → 不发'); return }
+      }
       if (!parts.length && !reply.wantSticker && !reply.stickerOnly) return
 
       // ── ★ 语音气泡：把这条回复改成**真·微信语音**（type 34）────────────────
@@ -3200,6 +3415,7 @@ let res = await callLlm(route, sys, usr, undefined)
             }, 150_000)
           } catch (e) { vs = { ok: false, error: String(e?.message || e) } }
           if (vs?.ok) {
+            sentVoiceThisReply = true
             log(`发语音气泡成功：${vs.bytes} 字节 / ${vs.durationMs}ms（main）`)
             stats.sentVoice = (stats.sentVoice || 0) + 1
             ;(r.sentTexts ||= []).push({ text: voiceText, at: Date.now() })
@@ -3265,7 +3481,12 @@ let res = await callLlm(route, sys, usr, undefined)
 
     // 表情包：模型给了指令 → 一定发；否则按概率补一张
     // 用户要求：**回复不等图** —— 文字立刻回，图生成好了再单独补发（生成很慢，别卡着对话）
-    const wantSticker = reply.wantSticker || reply.stickerOnly || Math.random() < config.stickerChance
+    let wantSticker = reply.wantSticker || reply.stickerOnly || Math.random() < config.stickerChance
+    // 互斥：本轮刚发过语音就不再发图（默认开，可用 voiceImageExclusive=false 关掉）
+    if (wantSticker && sentVoiceThisReply && config.voiceImageExclusive !== false) {
+      log('本轮已发语音 → 跳过表情包/图片（避免语音+图片连着发；config.voiceImageExclusive=false 可关）')
+      wantSticker = false
+    }
     if (wantSticker) {
       try {
         let stickerId = ''
@@ -5856,6 +6077,17 @@ let res = await callLlm(route, sys, usr, undefined)
       case 'voiceSwitch':
         return await client.call('voiceSwitch', a.on === undefined ? {} : { on: !!a.on }, 8000)
 
+      // ── TTS 服务（GPT-SoVITS api_v2）真正的控制面 ──
+      case 'ttsStatus':
+        return await ttsStatus()
+      case 'ttsControl': {
+        const r = await ttsControl(a.action)
+        log('[ttsControl] ' + String(a.action || 'status') + ' → ' + JSON.stringify(r).slice(0, 200))
+        return r
+      }
+      case 'ttsTest':
+        return await ttsTest(a.text)
+
       case 'stickers':
         return await client.call('stickers', { limit: Number(a.limit) || 30 }, 10_000)
       case 'genEmotions':
@@ -6375,6 +6607,18 @@ let res = await callLlm(route, sys, usr, undefined)
       log('面板初始化失败（不影响机器人）：' + String(e?.stack || e?.message || e))
     }
   })()
+
+  // TTS 服务：按"开机自启"意图自动拉起（以前只有开关、没有启动时执行 → 配置说开实际没跑）
+  track(setTimeout(() => {
+    void (async () => {
+      try {
+        if (config.voiceModelOn === false) { log('TTS：voiceModelOn=关，跳过自动启动'); return }
+        if ((await ttsPids()).length) { log('TTS：api_v2 已在运行'); return }
+        const r = ttsSpawn()
+        log('TTS 自动启动：' + (r.ok ? '已发出启动命令' : ('失败 ' + r.error)))
+      } catch (e) { log('TTS 自动启动异常：' + String(e?.message || e).slice(0, 140)) }
+    })()
+  }, 8000))
 
   loadNames()      // 载入群成员名字映射
   // 群名缓存：等 hook/微信稍就绪再拉一次（失败也不影响启动，面板请求时会重试）
