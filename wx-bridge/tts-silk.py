@@ -193,13 +193,35 @@ def _edge_hint(err):
     return s
 
 
+LAST_VOICE = {}
+
+
+def _with_voice(r):
+    """输出前把'这次用的参考音'塞进结果 —— 换音色会在日志里立刻暴露（踩过：被换成御姐没人发现）"""
+    try:
+        if LAST_VOICE and isinstance(r, dict) and r.get('ok'):
+            r.setdefault('voiceRef', dict(LAST_VOICE))
+    except Exception:
+        pass
+    return r
+
 def synth_mp3(text, voice, rate, pitch, out_mp3, timeout=SYNTH_TIMEOUT):
     """GPT-SoVITS 合成（替换 edge-tts）。输出 wav（ffmpeg 可处理）"""
     import urllib.request
     import json as _json
     api = os.environ.get('GPT_SOVITS_API', 'http://127.0.0.1:9880/tts')
-    ref = os.environ.get('GPT_SOVITS_REF', r'D:\微信deepseek\data\sexy-loli-cn\separated\htdemucs\【中文音声】许久未见的雌小鬼，向你表达爱意\cn-a.wav')
-    prompt = os.environ.get('GPT_SOVITS_PROMPT', '就像是一根被流酸泡过的麻辣秋衣一样这么久不见，大哥哥有没有想我呀')
+    # ★ 2026-10-27 还原：此前被改成"御姐"参考音（data\voice\yujie-ref.wav + 威廉…句子），
+    #   大肥鱼的声音变成别人了。这里改回"雌小鬼"原始参考音。
+    #   要换音色请改这两个默认值（或设环境变量 GPT_SOVITS_REF / GPT_SOVITS_PROMPT），
+    #   别再直接改 api_v2 的模型配置 —— 那会连样本外音色一起变。
+    ref = os.environ.get('GPT_SOVITS_REF',
+        r'D:\微信deepseek\data\sexy-loli-cn\separated\htdemucs\【中文音声】许久未见的雌小鬼，向你表达爱意\cn-a.wav')
+    prompt = os.environ.get('GPT_SOVITS_PROMPT',
+        '就像是一根被流酸泡过的麻辣秋衣一样这么久不见，大哥哥有没有想我呀')
+    # 记下来给 JSON 输出用：音色改没改，一眼可见（实测踩过：被别人把参考音换成"御姐"，没人发现）
+    global LAST_VOICE
+    LAST_VOICE = {'ref': ref, 'refName': os.path.basename(ref), 'prompt': prompt[:24],
+                  'refFrom': ('env' if os.environ.get('GPT_SOVITS_REF') else 'default')}
     body = {
         'text': text,
         'text_lang': 'zh',
@@ -339,6 +361,9 @@ def synthesize(text, out_path, voice=DEFAULT_VOICE, rate=DEFAULT_RATE, pitch=DEF
     text = (text or '').strip()
     if not text:
         raise StageError('input', '文本为空')
+    # 单字语气词后面紧跟标点会被 cut5 切成独立段，GPT-SoVITS 对"哼"/"啊"这种超短段
+    # 会合成出近静音（实测 0.42s、rms 2e-4）。去掉词尾标点让它并入下一句。
+    text = re.sub(r'([哈呵嘿嗨哼嗯啊哦哎唉喂呀诶欸])\s*[，,。.!！？?、]\s*', r'\1', text)
     if len(text) > MAX_TEXT_CHARS:
         raise StageError('input', '文本太长（%d 字 > 上限 %d 字）——语音太长很怪，请先裁短'
                          % (len(text), MAX_TEXT_CHARS))
@@ -505,7 +530,8 @@ def do_selftest():
             ok = ok and good
         print('   中间文件已清理: %s' % ('✓' if not [f for f in os.listdir(tmp)
                                                     if f.endswith(('.mp3', '.pcm'))] else '✗'))
-        print('JSON: %s' % json.dumps(r, ensure_ascii=False))
+        # 把"这次用的参考音"一并输出：换音色会立刻在日志里暴露
+        print('JSON: %s' % json.dumps(_with_voice(r), ensure_ascii=False))
         print('结果: %s' % ('全部通过（%d 项）' % len(checks) if ok else '有失败项'))
     except StageError as e:
         print('失败: [%s] %s' % (e.stage, e.msg))
@@ -568,7 +594,7 @@ def main():
         print('失败: %s' % e)
         print('JSON: %s' % json.dumps({'ok': False, 'error': str(e), 'stage': 'unknown'}, ensure_ascii=False))
         return 1
-    print('JSON: %s' % json.dumps(r, ensure_ascii=False))
+    print('JSON: %s' % json.dumps(_with_voice(r), ensure_ascii=False))
     return 0
 
 
