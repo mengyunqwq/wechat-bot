@@ -1671,7 +1671,7 @@ async function renderMomentExtra() {
       const s2 = r.state || {};
       st.textContent = r.hookOk
         ? ('微信就绪' + (r.hasEditor ? '（编辑器里还有一份草稿）' : ''))
-        : '⚠️ hook 未连接';
+        : '⚠️ 微信主窗口被收起（托盘）——点开主窗口才能发朋友圈';
       const nextIn = s2.nextAt ? Math.max(0, s2.nextAt - Date.now()) : 0;
       const rows = [
         ['定时发布', r.auto ? '✅ 已开启' : '⏸ 已关闭'],

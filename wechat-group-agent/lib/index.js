@@ -42,7 +42,7 @@ try {
 } catch { /* ignore */ }
 
 export const name = '@dsh-external/dsh-wechat-bot'
-export const version = '1.4.6'
+export const version = '1.4.7'
 // Cordis 4.0.4 的 inject 只认**数组**或"服务名→配置"映射；
 // 写成 { required, optional } 会让依赖解析失败、fiber 永远 pending（踩过：改了代码却一直跑旧实例）。
 // 这里只声明必然存在的两个服务；attachments（视觉识别用）改为**惰性获取**，
@@ -3512,6 +3512,17 @@ let res = await callLlm(route, sys, usr, undefined)
     log,
   })
 
+  /** 朋友圈前置检查：微信主窗口在不在（被收进托盘时微信会销毁主窗口，此时发不出去） */
+  async function momentHookReady() {
+    try {
+      const res = await fetch(`${HOOK_API_BASE}/Moment/Ready`, { signal: AbortSignal.timeout(6000) })
+      const j = await res.json()
+      return { ok: j?.ok === true, main: Number(j?.main || 0), editor: Number(j?.editor || 0) }
+    } catch (e) {
+      return { ok: false, error: String(e?.message || e).slice(0, 120) }
+    }
+  }
+
   async function postMomentNow(text, images = []) {
     const ac = new AbortController()
     const timer = setTimeout(() => ac.abort(new Error('发朋友圈超时')), 150_000)
@@ -3560,6 +3571,14 @@ let res = await callLlm(route, sys, usr, undefined)
         else log(`朋友圈：配图失败（${g.error}），这条改发纯文字`)
       }
 
+      const ready = await momentHookReady()
+      if (!ready.ok) {
+        log('朋友圈：微信主窗口不在（可能收进了托盘）→ 本次跳过，不消耗额度。点开微信主窗口后会自动恢复')
+        momentState.lastError = '微信主窗口不在（托盘）'
+        planNextMoment(Date.now())
+        saveMomentState()
+        return { ok: false, error: '微信主窗口不在（托盘里），点开主窗口再试' }
+      }
       const r = await postMomentNow(text, images)
       // /Moment/PostSilent 的 ret=0 表示编辑器已关闭（即已发表成功）
       const verified = r.ok ? 1 : 0
