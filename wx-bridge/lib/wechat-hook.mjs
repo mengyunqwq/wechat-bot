@@ -1636,6 +1636,9 @@ export class WeChatHookBridge {
       errors: Number(p.stats?.errors || 0),
       pauses: Number(p.stats?.pauses || 0),
       tables,
+      // 当前在用的消息库分片（message_0/1/…）。微信会轮换分片，
+      // 自检文案里如果写死 message_0.db 会把人带偏（2026-10-27 实测已轮换到 message_1.db）。
+      shard: String(p._shard || ''),
       lastError: String(p._lastReadErr || ''),
     }
   }

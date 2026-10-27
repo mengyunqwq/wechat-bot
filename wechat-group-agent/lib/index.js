@@ -42,7 +42,7 @@ try {
 } catch { /* ignore */ }
 
 export const name = '@dsh-external/dsh-wechat-bot'
-export const version = '1.4.7'
+export const version = '1.4.8'
 // Cordis 4.0.4 的 inject 只认**数组**或"服务名→配置"映射；
 // 写成 { required, optional } 会让依赖解析失败、fiber 永远 pending（踩过：改了代码却一直跑旧实例）。
 // 这里只声明必然存在的两个服务；attachments（视觉识别用）改为**惰性获取**，
@@ -4129,6 +4129,10 @@ let res = await callLlm(route, sys, usr, undefined)
     let pollText = idleMin == null
       ? `还没收到过消息（${pollInfo}）`
       : `最近一条消息 ${idleMin} 分钟前（${pollInfo}）`
+    // 当前实际在用的消息库分片（微信会轮换 message_0 → message_1 …），文案里别写死
+    const shardName = String(poll.shard || '').trim() || '消息库'
+    // 唤醒后是否已恢复：唤醒之后只要还收到过消息，就说明自愈成功
+    const wokeAfter = (lastWakeAt && lastMsgAt) ? (lastMsgAt > lastWakeAt) : false
     let pollAdvice = ''
     if (poll.hardStopped) {
       pollLevel = 'bad'
@@ -4141,11 +4145,19 @@ let res = await callLlm(route, sys, usr, undefined)
     } else if (poll.paused) {
       pollLevel = 'warn'
       pollText += `｜轮询暂停中（剩 ${poll.pauseLeftSec || 0} 秒，连续失败 ${poll.consecFail || 0} 次）`
-      pollAdvice = '桥会自动重试；持续出现说明 message_0.db 打不开'
+      pollAdvice = `桥会自动重试；持续出现说明 ${shardName} 打不开`
     } else if (!dbOk && cs.connected && probeRoom) {
       pollLevel = 'bad'; pollText += '｜数据库读不到，轮询必然停了'; pollAdvice = '先修 hook/数据库（见上）'
+    } else if (wakeMin != null && wakeMin <= 15 && wokeAfter) {
+      // ★ 2026-10-27：唤醒之后又收到过消息 = 已自愈。
+      //   以前这里无条件判 bad（只看"15 分钟内喊过"），于是重启客户端触发的正常唤醒，
+      //   会被连续报 3 次 ❌ 并触发「失联告警」——明明轮询在跑（用户实测踩到）。
+      pollText += `｜${wakeMin} 分钟前唤醒过一次（之后已收到消息，已恢复）`
     } else if (wakeMin != null && wakeMin <= 15) {
-      pollLevel = 'bad'; pollText += `｜${wakeMin} 分钟前桥喊过"数据库打不开"`; pollAdvice = '桥会自己重试；持续出现说明 message_0.db 打不开'
+      // 喊过但之后一条都没收到 → 还没恢复，但桥在自动重试，先判 warn（不触发失联告警）
+      pollLevel = 'warn'
+      pollText += `｜${wakeMin} 分钟前唤醒过，之后还没收到消息`
+      pollAdvice = `桥会自动重试；持续超过 5 分钟说明 ${shardName} 打不开（可能是客户端句柄没挂上）`
     } else if (idleMin != null && idleMin > 180) {
       pollLevel = 'warn'; pollText += '（超过 3 小时没消息）'; pollAdvice = '如果群里明明有人在说话，说明轮询断了'
     } else if (idleMin == null && !poll.exists) {
