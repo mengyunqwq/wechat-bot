@@ -1072,22 +1072,39 @@ function pickFieldHtml(k, m) {
 function renderModelExtra() {
   const box = $('#model-extra'); if (!box) return;
   const C = App.catalog || {};
-  const R = (App.S && App.S.route) || null;
+  const R = (App.S && App.S.route) || null;   // 上一次实际发生的请求，不是配置！
   const cur = C.current || {};
   const dsh = C.dshSelection;
   const models = C.models || [];
+
+  // 以「配置」为准：provider 留空 = 跟随 DSH
+  const effProvider = cur.provider || (dsh ? dsh.provider : '');
+  const effModel = cur.model || ((!cur.provider && dsh) ? dsh.model : '');
+  const followDsh = !cur.provider;
+
+  // 「上次实际调用」和配置算不算同一条路由（adapter 会给模型加 -1017 这类快照后缀，宽松比较）
+  const sameStr = (a, b) => {
+    if (!a || !b) return true;
+    if (a === b) return true;
+    return a.startsWith(b) || b.startsWith(a);
+  };
+  const mismatch = !!R && (R.provider !== effProvider || !sameStr(R.model, effModel));
+
   const miss = cur.model && models.length && !models.some(m => m.id === cur.model);
+  const off = (C.providers || []).filter(p => p.enabled === false).length;
   box.innerHTML = `<div class="section"><div class="hd">🎯 当前生效</div>
     <div class="row">
-      <span class="pill">回复用 <b>${esc((R?.provider || cur.provider || '—') + ' / ' + (R?.model || cur.model || '—'))}</b></span>
+      <span class="pill">配置 <b>${esc((effProvider || '—') + ' / ' + (effModel || '—'))}</b>${followDsh ? '（跟随 DSH）' : ''}</span>
+      ${R ? `<span class="pill">上次实际调用 <b>${esc(R.provider + ' / ' + R.model)}</b></span>` : ''}
       ${dsh ? `<span class="pill">DSH 当前 <b>${esc(dsh.provider + ' / ' + dsh.model)}</b></span>` : ''}
       <button class="btn" id="btn-model-refresh">重新读取清单</button>
     </div>
     <div class="small muted" style="margin-top:8px">
       清单来自 DSH 已注册的 provider；<b>provider 留空 = 跟随 DSH 当前选择</b>。
-      ${(() => { const off = (C.providers || []).filter(p => p.enabled === false).length; return off ? ('另有 ' + off + ' 个 provider 未启用（需先在 DSH 里配 key）。') : ''; })()}
-      ${C.error ? '<br>⚠️ ' + esc(C.error) : ''}
+      ${mismatch ? '<br>⚠️ 配置和「上次实际调用」不同：刚改完的话，下一次回复就会一致（这一栏记的是上一次请求，不是配置）。' : ''}
       ${miss ? '<br>⚠️ 当前模型 <b>' + esc(cur.model) + '</b> 不在 <b>' + esc(C.modelsFor || '') + '</b> 的清单里，可能已下线，建议重选。' : ''}
+      ${off ? '<br>另有 ' + off + ' 个 provider 未启用（需先在 DSH 里配 key）。' : ''}
+      ${C.error ? '<br>⚠️ ' + esc(C.error) : ''}
     </div></div>`;
   const b = $('#btn-model-refresh'); if (b) b.onclick = () => renderModelPage();
 }
@@ -1204,6 +1221,9 @@ function bindFields() {
       if (k === 'provider') {
         // 换了 provider → 模型清单要跟着换，重拉并重绘
         await renderModelPage();
+      } else {
+        // 只换模型：也要让「当前生效」跟着变（重取 /state，别显示旧快照）
+        await refresh({ lite: true });
       }
     };
     if (box) box.onchange = async () => {
@@ -1211,6 +1231,7 @@ function bindFields() {
       if (!val) return;
       await saveField(k, val);
       if (k === 'provider') await renderModelPage();
+      else await refresh({ lite: true });
     };
   });
   // 其余控件
