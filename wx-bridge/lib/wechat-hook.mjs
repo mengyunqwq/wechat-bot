@@ -684,7 +684,20 @@ export class WeChatHookBridge {
     if (!this.poller) {
       this.poller = new DbPoller({
         api: (p, b, m, to) => this.api(p, b, m, to),
-        emit: (msg) => this.emit('msg', msg),
+        // ── 2026-10-27：轮询来的新群也要登记 ─────────────────────────────
+        // 回调路径有「记住新群」，轮询路径原来没有 → 群缓存永远缺新群（面板选不到）。
+        // 这里补上：第一次见到该群就把 roomId 落盘（名字留给 refreshRoomNames 补）。
+        emit: (msg) => {
+          try {
+            if (msg && msg.isGroup && msg.roomId && !this._roomCache.has(msg.roomId)) {
+              const nm = (msg.roomName && msg.roomName !== msg.roomId) ? msg.roomName : msg.roomId
+              this._roomCache.set(msg.roomId, nm)
+              this.saveRooms()
+              this.log('记住新群（轮询）: ' + msg.roomId)
+            }
+          } catch { /* 登记失败不影响消息分发 */ }
+          this.emit('msg', msg)
+        },
         log: (s) => this.log(s),
         intervalMs: Number(process.env.DB_POLL_MS || 2500),
         // 读库失败 = hook/DB 探测失败 → 桥侧进入 30 秒禁止发送窗口（fail-closed）
@@ -1571,6 +1584,26 @@ export class WeChatHookBridge {
         for (const rid of it.rooms || []) if (rid && !this._roomCache.has(rid)) this._roomCache.set(rid, rid)
       }
     }
+    // ── 2026-10-27：把轮询器已发现的会话表并进群列表 ────────────────────
+    // 背景：现在唯一在用的消息来源是【数据库轮询】，而它不登记群（不像回调路径）。
+    //   → 被拉进新群后 /api/rooms 永远没有它：面板「记忆/群与人/白名单」都选不到，
+    //     点「读取」直接报「找不到群：xxx@chatroom」（用户实测踩到）。
+    // 轮询器的 tables 里就有 roomId，并进来即可（名字先用 roomId，之后 refreshRoomNames 会补）。
+    let addedFromPoller = 0
+    try {
+      for (const [, info] of (this.poller?.tables || [])) {
+        const rid = info && info.roomId
+        if (!rid || !String(rid).endsWith('@chatroom')) continue
+        if (this._roomCache.has(rid)) continue
+        this._roomCache.set(rid, rid)
+        addedFromPoller++
+      }
+      if (addedFromPoller) {
+        this.saveRooms()
+        this.log('群列表：从轮询会话表补进 ' + addedFromPoller + ' 个新群')
+      }
+    } catch { /* 拿不到 tables 就算了，别影响群列表返回 */ }
+
     const out = []
     for (const [roomId, name] of this._roomCache) {
       if (roomId === 'mock-room-1') continue        // mock 模拟群不该出现在真实群列表里
