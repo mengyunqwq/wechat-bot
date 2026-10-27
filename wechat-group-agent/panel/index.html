@@ -1609,6 +1609,8 @@ async function renderVoiceExtra() {
     if (ttsConfigEl) {
       const L = r.last || {};
       let t = '配置：' + (r.configOn ? '开机自启（voiceModelOn=开）' : '不自动启动（voiceModelOn=关）');
+      // 音色模型（真正决定声音的东西）—— 之前被换掉却看不出来，现在直接显示
+      if (r.vits && r.vits.name) t += '｜音色模型：' + r.vits.name;
       if (L.testAt) t += '｜上次试合成：' + (L.testOk ? '✅ ' + L.testMsg : '❌ ' + L.testMsg);
       ttsConfigEl.textContent = t;
     }

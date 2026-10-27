@@ -632,6 +632,23 @@ const BUILD_VER = '2026-10-23.4'   // 抬版本：让新实例压过热重载残
     })
   }
 
+  /** 从 api_v2 的启动日志里读"当前加载的 VITS 权重" —— 音色是它决定的，必须可见 */
+  function ttsVitsFromLog() {
+    try {
+      const f = join(dirname(memoryDir), 'logs', 'tts-api.log')
+      if (!existsSync(f)) return null
+      const txt = readFileSync(f, 'utf8')
+      const lines = txt.split('\n').filter((l) => /Loading VITS weights from/i.test(l))
+      const last = lines[lines.length - 1]
+      if (!last) return null
+      const m = last.match(/Loading VITS weights from\s+(.+?)\.\s*(?:<|$)/i)
+      const full = (m ? m[1] : '').trim()
+      if (!full) return null
+      const name = full.split(/[\\/]/).pop() || full
+      return { path: full, name }
+    } catch { return null }
+  }
+
   async function ttsStatus() {
     const [pids, portAlive] = await Promise.all([ttsPids(), tcpProbe(TTS_PORT())])
     const running = pids.length > 0
@@ -646,6 +663,7 @@ const BUILD_VER = '2026-10-23.4'   // 抬版本：让新实例压过热重载残
       running, pids, port: TTS_PORT(), portAlive,
       configOn: config.voiceModelOn !== false,
       api: TTS_API(),
+      vits: ttsVitsFromLog(),      // 当前音色模型（名字+路径）；换音色一眼可见
       last: { ...ttsLast },
     }
   }
