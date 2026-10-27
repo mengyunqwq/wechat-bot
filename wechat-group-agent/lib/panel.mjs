@@ -328,6 +328,12 @@ export function setupPanel(ctx, api) {
           const state = await api.providersState?.()
           return json(res, 200, { ok: true, ...state, config: { provider: api.config.provider, model: api.config.model, visionProvider: api.config.visionProvider, visionModel: api.config.visionModel } })
         }
+        if (sub === '/models') {
+          // 「人设模型」页的下拉框数据（provider 列表 + 指定 provider 的模型清单）
+          const u = new URL(req.url, 'http://x')
+          const provider = String(u.searchParams.get('provider') || '')
+          return json(res, 200, await api.modelCatalog?.(provider) || { ok: false, error: '未实现' })
+        }
         if (sub === '/providers/models') {
           const u = new URL(req.url, 'http://x')
           const provider = String(u.searchParams.get('provider') || '')

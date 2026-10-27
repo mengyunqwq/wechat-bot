@@ -295,7 +295,7 @@ const NAV = [
   {id:'memory', title:'记忆', icon:'🧠', groups:['memory'], special:'memory'},
   {id:'identity', title:'群与人', icon:'👥', groups:['identity'], special:'members'},
   {id:'moment', title:'朋友圈', icon:'📸', groups:['moment'], special:'moment'},
-  {id:'model', title:'人设模型', icon:'🐟', groups:['model']},
+  {id:'model', title:'人设模型', icon:'🐟', groups:['model'], special:'model'},
   {id:'diag', title:'诊断', icon:'🔬', special:'diag'},
   {id:'update', title:'更新', icon:'📦', special:'update'},
   {id:'ops', title:'运维日志', icon:'🩺', groups:['health','selfheal','advanced'], special:'ops'},
@@ -314,6 +314,7 @@ const App = {
   logsTimer: null,
   pending: new Set(),
   providers: null,
+  catalog: null,        // 模型目录（provider 列表 + models），「人设模型」页用
   image: null,
 };
 
@@ -465,6 +466,8 @@ function renderActive(opts) {
   if (nav.id === 'diag') return renderDiag();
   if (nav.id === 'update') return renderUpdate();
   if (nav.groups) {
+    // 模型页要先把 DSH 的模型清单拉回来，下拉框才能填上
+    if (nav.special === 'model') { void renderModelPage(); return; }
     renderParams(nav);
     if (nav.special === 'stickers') renderStickerExtra();
     if (nav.special === 'memory') renderMemoryExtra();
@@ -991,12 +994,114 @@ function guardRisk(risk, title) {
 }
 
 /* ── 参数表单 ─────────────────────────────────────────── */
+/* ── 模型目录（「人设模型」页的下拉框）─────────────────────
+   数据来自 DSH 的 llm 服务（GET /models）：
+     providers = 已注册的 provider（另含"声明了但没启用"的，标「未启用」）
+     models    = 指定 provider 的模型清单（按需拉，切换 provider 时重拉）
+   拿不到清单就退化成普通文本框 —— 绝不因为清单读不到而让人填不了字段。 */
+async function loadCatalog(provider) {
+  const q = provider ? ('?provider=' + encodeURIComponent(provider)) : '';
+  try {
+    App.catalog = await api('/models' + q);
+  } catch (e) {
+    App.catalog = { ok: false, providers: [], models: [], error: e.message };
+  }
+  return App.catalog;
+}
+
+async function renderModelPage() {
+  view.innerHTML = '<div class="skel">读取 DSH 模型清单…</div>';
+  await loadCatalog();
+  const nav = NAV.find(n => n.id === 'model');
+  if (nav) { renderParams(nav); renderModelExtra(); }
+}
+
+function pickOptions(k) {
+  const C = App.catalog;
+  if (!C) return null;
+  if (k === 'provider' || k === 'visionProvider') {
+    // 只列"已注册/已启用"的 provider —— 没配 key 的列出来也用不了，反而误导
+    return (C.providers || []).filter(p => p.enabled !== false).map(p => ({
+      v: p.id,
+      label: (p.name && p.name !== p.id) ? (p.name + '　·　' + p.id) : p.id,
+      off: false,
+    }));
+  }
+  let models = C.models || [];
+  // 视觉模型优先只列「能读图」的（DSH 里挑视觉模型也是这个逻辑）
+  if (k === 'visionModel') {
+    const onlyImg = models.filter(m => (m.inputModalities || []).includes('image'));
+    if (onlyImg.length) models = onlyImg;
+  }
+  return models.map(m => ({
+    v: m.id,
+    label: (m.name && m.name !== m.id) ? (m.name + '　·　' + m.id) : m.id,
+    off: false,
+  }));
+}
+
+function pickFieldHtml(k, m) {
+  const v = App.S.config[k];
+  const label = esc(m.label || k);
+  const help = m.help ? `<div class="help">${esc(m.help)}</div>` : '';
+  const opts = pickOptions(k);
+  if (!opts || !opts.length) {
+    // 清单读不到 → 退回文本框（保证任何情况下都能填）
+    return `<div class="field" data-field="${k}"><div class="lab">${label}</div>
+      <div class="ctl"><input type="text" style="flex:1;min-width:220px" data-k="${k}" data-t="text" value="${esc(v == null ? '' : v)}" placeholder="手填 id（DSH 模型清单没读到）"></div>${help}</div>`;
+  }
+  const cur = v == null ? '' : String(v);
+  const has = opts.some(o => o.v === cur);
+  const emptyLabel = ({
+    provider: '（跟随 DSH 当前选择／最近使用）',
+    model: '（不指定，用该 provider 的默认模型）',
+    visionProvider: '（不单独指定，用主模型）',
+    visionModel: '（不单独指定，用主模型）',
+  })[k] || '（留空）';
+  // 空选项始终保留：设置过之后还能选回"跟随 DSH"
+  const head = `<option value="" ${cur === '' ? 'selected' : ''}>${emptyLabel}</option>`;
+  const missing = (cur && !has)
+    ? `<option value="${esc(cur)}" selected>${esc(cur)}　（当前值，不在清单里）</option>`
+    : '';
+  return `<div class="field" data-field="${k}"><div class="lab">${label}</div>
+    <div class="ctl"><select data-k="${k}" data-t="pick" style="min-width:280px">${head}${missing}${opts.map(o => `<option value="${esc(o.v)}" ${o.v === cur ? 'selected' : ''}>${esc(o.label)}${o.off ? '　（未启用）' : ''}</option>`).join('')}<option value="__custom__">✏️ 自定义（手填）…</option></select>
+      <input type="text" data-picktext="${k}" style="display:none;flex:1;min-width:200px" placeholder="手填 id">
+    </div>${help}</div>`;
+}
+
+function renderModelExtra() {
+  const box = $('#model-extra'); if (!box) return;
+  const C = App.catalog || {};
+  const R = (App.S && App.S.route) || null;
+  const cur = C.current || {};
+  const dsh = C.dshSelection;
+  const models = C.models || [];
+  const miss = cur.model && models.length && !models.some(m => m.id === cur.model);
+  box.innerHTML = `<div class="section"><div class="hd">🎯 当前生效</div>
+    <div class="row">
+      <span class="pill">回复用 <b>${esc((R?.provider || cur.provider || '—') + ' / ' + (R?.model || cur.model || '—'))}</b></span>
+      ${dsh ? `<span class="pill">DSH 当前 <b>${esc(dsh.provider + ' / ' + dsh.model)}</b></span>` : ''}
+      <button class="btn" id="btn-model-refresh">重新读取清单</button>
+    </div>
+    <div class="small muted" style="margin-top:8px">
+      清单来自 DSH 已注册的 provider；<b>provider 留空 = 跟随 DSH 当前选择</b>。
+      ${(() => { const off = (C.providers || []).filter(p => p.enabled === false).length; return off ? ('另有 ' + off + ' 个 provider 未启用（需先在 DSH 里配 key）。') : ''; })()}
+      ${C.error ? '<br>⚠️ ' + esc(C.error) : ''}
+      ${miss ? '<br>⚠️ 当前模型 <b>' + esc(cur.model) + '</b> 不在 <b>' + esc(C.modelsFor || '') + '</b> 的清单里，可能已下线，建议重选。' : ''}
+    </div></div>`;
+  const b = $('#btn-model-refresh'); if (b) b.onclick = () => renderModelPage();
+}
+
 function fieldHtml(k, m) {
   const S = App.S, v = S.config[k];
   const label = esc(m.label || k);
   const help = m.help ? `<div class="help">${esc(m.help)}</div>` : '';
   if (m.readonly) {
     return `<div class="field" data-field="${k}"><div class="lab">${label}</div><div class="ctl mono small" style="word-break:break-all">${esc(v == null ? '' : v)}</div>${help}</div>`;
+  }
+  // provider / model 走"可选可填"的下拉（数据来自 DSH 的模型清单）
+  if (k === 'provider' || k === 'model' || k === 'visionProvider' || k === 'visionModel') {
+    return pickFieldHtml(k, m);
   }
   if (m.type === 'bool') {
     return `<div class="field" data-field="${k}"><div class="lab">${label}</div>
@@ -1059,6 +1164,7 @@ function renderParams(nav) {
   if (nav.special === 'memory') html += '<div id="memory-extra"></div>';
   if (nav.special === 'members') html += '<div id="members-extra"></div>';
   if (nav.special === 'moment') html += '<div id="moment-extra"></div>';
+  if (nav.special === 'model') html += '<div id="model-extra"></div>';
   view.innerHTML = html;
   bindFields();
 }
@@ -1083,12 +1189,37 @@ function bindFields() {
       scheduleSave(k, n.value);
     };
   });
+  // 模型下拉（provider / model / visionProvider / visionModel）
+  $$('select[data-t="pick"]').forEach(sel => {
+    const k = sel.dataset.k;
+    const box = view.querySelector('input[data-picktext="' + k + '"]');
+    sel.onchange = async () => {
+      if (sel.value === '__custom__') {
+        // 切到自定义：露出输入框，不改配置
+        if (box) { box.style.display = ''; box.focus(); }
+        return;
+      }
+      if (box) box.style.display = 'none';
+      await saveField(k, sel.value);
+      if (k === 'provider') {
+        // 换了 provider → 模型清单要跟着换，重拉并重绘
+        await renderModelPage();
+      }
+    };
+    if (box) box.onchange = async () => {
+      const val = box.value.trim();
+      if (!val) return;
+      await saveField(k, val);
+      if (k === 'provider') await renderModelPage();
+    };
+  });
   // 其余控件
   $$('[data-k]').forEach(el => {
     const k = el.dataset.k, t = el.dataset.t;
     if (t === 'number') return;
     if (t === 'bool') { el.onchange = () => saveField(k, !!el.checked); return; }
     if (t === 'enum') { el.onchange = () => saveField(k, el.value); return; }
+    if (t === 'pick') return;   // 模型下拉自己绑过了，别覆盖
     if (t === 'csv') { el.onchange = () => saveField(k, el.value.split(/[,，]/).map(s => s.trim()).filter(Boolean)); return; }
     el.onchange = () => saveField(k, el.value);
   });

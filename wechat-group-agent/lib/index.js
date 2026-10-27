@@ -42,7 +42,7 @@ try {
 } catch { /* ignore */ }
 
 export const name = '@dsh-external/dsh-wechat-bot'
-export const version = '1.4.12'
+export const version = '1.4.13'
 // Cordis 4.0.4 的 inject 只认**数组**或"服务名→配置"映射；
 // 写成 { required, optional } 会让依赖解析失败、fiber 永远 pending（踩过：改了代码却一直跑旧实例）。
 // 这里只声明必然存在的两个服务；attachments（视觉识别用）改为**惰性获取**，
@@ -4608,6 +4608,87 @@ let res = await callLlm(route, sys, usr, undefined)
     return { ok: true, provider, model, text: String(text).trim().slice(0, 300), ms: Date.now() - t0 }
   }
 
+  /**
+   * 模型目录（面板「人设模型」页的下拉框用）。
+   *
+   * 为什么要有这个：原来 provider / model 是纯文本框，用户得自己记住
+   * 「deepseek-account / deepseek-flash」这种 id，写错就静默回退到别的路由。
+   * DSH 本体是「provider 下拉 → model 下拉」，这里复刻同样的体验。
+   *
+   * 数据来源全部走 DSH 的 llm 服务，不自己维护清单：
+   *   llm.listProviders()        → 已注册（真正能用）的 provider
+   *   llm.listConfigurableProviders() → 声明了但可能没启用/没配 key 的
+   *   llm.listModels(provider)   → 该 provider 的模型清单（异步，未注册会抛）
+   *
+   * @param {string} [provider] 要给哪个 provider 取模型清单；缺省用当前配置或 DSH 当前选择
+   */
+  async function panelModelCatalog(provider) {
+    const out = {
+      ok: true,
+      providers: [],       // [{id,name,enabled,models?}]
+      models: [],          // 当前 provider 的模型 [{id,name,inputModalities}]
+      modelsFor: '',       // 上面这份 models 属于哪个 provider
+      current: { provider: '', model: '', visionProvider: '', visionModel: '' },
+      dshSelection: null,  // DSH 自己的当前选择（给面板显示「跟随 DSH」用）
+      error: '',
+    }
+    const llm = getSvc('llm')
+    try {
+      if (llm && typeof llm.listProviders === 'function') {
+        out.providers = llm.listProviders()
+          .map((x) => ({ id: String(x.id || ''), name: String(x.name || x.id || ''), enabled: true }))
+          .filter((x) => x.id)
+      }
+      // 声明了但没注册成功的，也列出来（标 enabled:false，并标原因由前端提示）
+      if (llm && typeof llm.listConfigurableProviders === 'function') {
+        const seen = new Set(out.providers.map((x) => x.id))
+        for (const c of llm.listConfigurableProviders() || []) {
+          const id = String(c.provider || '')
+          if (!id || seen.has(id)) continue
+          out.providers.push({ id, name: String(c.displayName || id), enabled: false })
+          seen.add(id)
+        }
+      }
+      try {
+        // 这个服务要用 ctx.get 拿；直接 ctx.agentDefaultModel 在插件里通常是 undefined
+        const adm = getSvc('agentDefaultModel') || ctx.agentDefaultModel
+        const sel = adm?.currentSelection?.()
+        if (sel?.provider && sel?.model) out.dshSelection = { provider: sel.provider, model: sel.model }
+        else if (adm && typeof adm.currentSelection === 'function') {
+          // 服务在但没配置：把"DSH 没设默认模型"这个事实带出去，面板就不用瞎猜
+          out.dshSelection = null
+        }
+      } catch (e) { out.dshSelectionError = String(e?.message || e).slice(0, 120) }
+    } catch (e) {
+      out.error = String(e?.message || e)
+    }
+
+    out.current = {
+      provider: String(config.provider || ''),
+      model: String(config.model || ''),
+      visionProvider: String(config.visionProvider || ''),
+      visionModel: String(config.visionModel || ''),
+    }
+
+    // 取哪一份模型清单：显式传入 > 当前配置 > DSH 当前选择
+    const want = String(provider || out.current.provider || out.dshSelection?.provider || '')
+    out.modelsFor = want
+    if (want && llm && typeof llm.listModels === 'function') {
+      try {
+        const list = await llm.listModels(want)
+        out.models = (list || []).map((m) => ({
+          id: String(m.id || ''),
+          name: String(m.name || m.id || ''),
+          inputModalities: Array.isArray(m.inputModalities) ? [...m.inputModalities] : [],
+        })).filter((m) => m.id)
+      } catch (e) {
+        // 未注册 / adapter 报错都只是"这一项拿不到"，不要让整个面板报错
+        out.error = out.error || ('取 ' + want + ' 的模型清单失败：' + String(e?.message || e))
+      }
+    }
+    return out
+  }
+
   async function panelProviderModels(provider) {
     const llm = getSvc('llm')
     if (!llm || typeof llm.listModels !== 'function') return []
@@ -6266,6 +6347,7 @@ let res = await callLlm(route, sys, usr, undefined)
     providerRemove: panelProviderRemove,
     providerTest: panelProviderTest,
     providerModels: panelProviderModels,
+    modelCatalog: panelModelCatalog,
     imageConfig: readImageConfig,
     imageSave: panelImageSave,
     configFile: CONFIG_FILE,

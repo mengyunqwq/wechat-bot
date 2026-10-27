@@ -252,9 +252,11 @@ export const CONFIG_META = {
   },
   visionProvider: {
     group: 'vision', label: '视觉模型 provider', type: 'text', advanced: true,
+    help: '识图/识视频用。留空 = 与上面的主模型相同。',
   },
   visionModel: {
     group: 'vision', label: '视觉模型 id', type: 'text', advanced: true,
+    help: '下拉只列「能读图」的模型（inputModalities 含 image）。留空 = 用主模型。',
   },
   visionCacheMax: {
     group: 'vision', label: '识图缓存条数', type: 'number', min: 0, max: 5000, step: 10, unit: '条', advanced: true,
@@ -444,11 +446,11 @@ export const CONFIG_META = {
   },
   provider: {
     group: 'model', label: '模型 provider', type: 'text',
-    help: '留空 = 用 DSH 当前默认模型。',
+    help: '下拉里只列 DSH 已注册（配好 key）的 provider；留空 = 跟随 DSH 当前选择。',
   },
   model: {
     group: 'model', label: '模型 id', type: 'text',
-    help: '留空 = 用 DSH 当前默认模型。',
+    help: '下拉会跟着上面的 provider 变；留空 = 用该 provider 的默认模型。选「自定义」可手填清单里没有的 id。',
   },
   temperature: {
     group: 'model', label: 'temperature', type: 'number', min: 0, max: 2, step: 0.05,
