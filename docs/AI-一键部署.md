@@ -1,6 +1,7 @@
 # AI 一键部署（把本文档喂给 AI，让它替你装好）
 
 > 面向对象：**AI agent**（豆包电脑版 / Claude Desktop / Cursor / Cline / DSH / 任何能读写本机文件、能跑命令的 AI）。
+> 配套版本：**v1.4.12**（`version.json` 与插件 `export const version` 必须一致；本文的事实全部按 v1.4.12 核对）。
 > 人类读者请直接看 [第 7 节「装好之后怎么用」](#7-装好之后怎么用给人类看的)。
 ---
 ## 1. 这份文档怎么用
@@ -199,7 +200,11 @@ AI 拿到这段指令后会自己：查环境 → 装依赖 → 复制独立微�
       proactive, proactiveQuietMs, proactiveMinGapMs, proactiveChance, proactiveMaxStreak,
       proactiveCheckMs, proactiveHours,
       contextMessages, historyLookup, historyLimit, historyScan, backfillLimit,
-      memoryDir, logFile, dryRun
+      memoryDir, logFile, dryRun,
+      // 朋友圈（1.4.x）
+      momentAuto, momentFromChat, momentHours, momentMinGapMs, momentDailyMax,
+      momentAutoImage, momentImageSource, momentImageStyle, momentImageRatio,
+      momentChatMinScore, momentChatLookback, momentChatDebounceMs, momentChatCooldownMs
     工具描述里【列出的】只是其中一部分（enabled/dryRun/persona/replyProbability/minReplyGapMs/
     maxRepliesPer10Min/quietHours/stickerChance/splitChance/botName/rooms/temperature/
     voiceOnVoice/voiceSay/voiceSayProbability/voiceSayOnVoiceProbability/voiceSayMaxChars/
@@ -255,9 +260,10 @@ AI 拿到这段指令后会自己：查环境 → 装依赖 → 复制独立微�
     c. 保持 hosted.enabled = false（config.json 与 data/bridge-config.json 两处都别开）。
     d. 验证：调工具 wechat_bot_selfcheck，期望"桥连接 ✅ / 微信登录 ✅ / hook 存活 ✅ /
        数据库可读 ✅ / 消息轮询 ✅"。
-    ⚠️ 注意：本仓库的 wechat-group-agent 目录【缺少】README 里写的 scripts/build.sh，
-       也缺少 package.json 里 test 脚本引用的 lib/test-policy.mjs。
-       但它是纯 ESM 插件、lib/ 即产物、无需编译，所以直接注入即可，不必构建。
+    ⚠️ 注意（v1.4.12 核对）：scripts/build.sh 与 lib/test-policy.mjs **都在仓库里**，
+       但它是纯 ESM 插件、lib/ 即产物、**无需编译**，所以直接注入即可，不必跑 build.sh。
+    ⚠️ 改了插件代码后：面板「热重载插件」**只做预检**（插件无法安全替换自身，见 R17），
+       必须**重启 DSH** 才生效。旧版本（1.4.10/1.4.11）点它会面板 404，别用。
 ── 方式 2：托管模式（桥替 agent 管节流，外部 agent 只负责"说什么"）──
   适合：你想用自己的 agent / 自己的程序当大脑。
     a. 打开托管模式（指向你的 webhook）：
@@ -287,9 +293,11 @@ AI 拿到这段指令后会自己：查环境 → 装依赖 → 复制独立微�
   ⚠️ MCP 工具是【直发】的，不走拟人节流；而且能让 AI 以你的微信身份发言 —— 用完随手关掉连接器。
 ═══ 阶段 7：失败处理（常见 5 种现象）═══
 现象 1：node server.mjs 立刻退出，报 ERR_MODULE_NOT_FOUND
-  原因：仓库缺 wx-bridge/lib/wcf.mjs 与 lib/wxhelper.mjs（见 5.1）。
-  检查：node -e "import('./wx-bridge/lib/wcf.mjs').catch(e=>console.log(e.code))"
-  处理：按 5.1 建两个占位模块。
+  原因（v1.4.12 实测）：这两个文件【仓库里是有的】（wx-bridge/lib/wcf.mjs、lib/wxhelper.mjs，均被 git 跟踪）。
+        报错通常是因为：① 没在 wx-bridge 目录里执行；② 没 npm install；③ clone 不完整。
+  检查：node -e "import('./wx-bridge/lib/wcf.mjs').then(()=>console.log('ok')).catch(e=>console.log(e.code))"
+        cd wx-bridge && npm ls --depth=0
+  处理：补齐 npm install / 重新 clone；【不需要】再手写占位模块。
 现象 2：/api/status 里 loggedIn = false
   原因：微信没登录完 / 没扫码 / hook 没起来。
   检查：tasklist | findstr /I Weixin
@@ -321,6 +329,8 @@ AI 拿到这段指令后会自己：查环境 → 装依赖 → 复制独立微�
   ② curl http://127.0.0.1:17300/api/status           → loggedIn 为 true
   ③ 日志里出现"数据库轮询就绪"，且在测试群发一条消息后
      curl http://127.0.0.1:17300/api/rooms           → 能列出该群
+  （可选，配了朋友圈才需要）
+  ④ curl http://127.0.0.1:30001/Moment/Ready        → ok:true
 最后请把以下内容报告给人类：
   - 每个阶段的执行结果（成功/失败 + 关键输出）
   - 实际改动了哪些配置（不要回显任何 key / wxid 明文）
@@ -454,7 +464,10 @@ maxPartsLimit, splitHardMax, longBubbleMax, laterMaxMinutes,
 proactive, proactiveQuietMs, proactiveMinGapMs, proactiveChance, proactiveMaxStreak,
 proactiveCheckMs, proactiveHours,
 contextMessages, historyLookup, historyLimit, historyScan, backfillLimit,
-memoryDir, logFile, dryRun
+memoryDir, logFile, dryRun,
+momentAuto, momentFromChat, momentHours, momentMinGapMs, momentDailyMax,
+momentAutoImage, momentImageSource, momentImageStyle, momentImageRatio,
+momentChatMinScore, momentChatLookback, momentChatDebounceMs, momentChatCooldownMs
 **新手最容易卡住的 3 个默认值：**
 | 键 | 默认值 | 为什么要动它 |
 |---|---|---|
@@ -493,6 +506,8 @@ memoryDir, logFile, dryRun
 | 22 | 状态工具 | 在 DSH 里调 `wechat_bot_status` | 显示 bridge 连接、微信登录、模型路由、各群节流 |
 | 23 | MCP 通路（可选） | 在 MCP 客户端里说"用 wechat MCP 列出当前有哪些群" | 能列出群名 |
 | 24 | 自检脚本（可选） | `cd wx-bridge; npm run selftest` | mock 模式下 WS 往返断言通过（不连微信） |
+| 25 | **朋友圈就绪** | `curl http://127.0.0.1:30001/Moment/Ready` | `ok:true`（`ok:false` = 微信主窗口被收进托盘，点开主窗口即可） |
+| 26 | 消息库分片 | 桥日志 `findstr /C:"当前消息库分片" <仓库>\data\logsridge-hook.out.log` | 形如 `当前消息库分片：message_1.db` —— **分片会轮换**，不要写死 message_0.db |
 ## 7. 装好之后怎么用（给人类看的）
 ### 7.1 在群里怎么用
 | 你想干什么 | 怎么做 |
@@ -505,6 +520,7 @@ memoryDir, logFile, dryRun
 | **发视频** | 直接发视频。**先在客户端里点开一次**，它才能拿到全部内容（抽 6 帧拼联系表 + 抽音轨转写）；没点开只能看明文封面 |
 | **让它发语音** | 说"发个语音"/"用语音说句话"。⚠️ 需要先开两处开关：hook 侧 `<客户端目录>\hook-voice-send.on` + 插件侧 `voiceSay=true` |
 | **让它发表情包** | 聊到合适语境它自己会发。也可以直接说"来个摸鱼的表情包" |
+| **让它发朋友圈** | 面板「朋友圈」页 → 开 `momentAuto`（定时）或 `momentFromChat`（群里遇到好玩的事才发）→ 可点「立即发一条」。⚠️ **微信主窗口必须在**（收进托盘时微信会销毁主窗口，发不出去；调度器会自动跳过、不消耗额度） |
 | **让它闭嘴/睡觉** | `wechat_bot_config(key="enabled", value="false")`，或改 `quietHours` |
 ### 7.2 三个控制入口（各一句话 + 一个例子）
 | 入口 | 一句话 | 例子 |
@@ -597,7 +613,7 @@ Get-Process Weixin | Where-Object { $_.Path -eq 'D:\wxhook\wx4110\Weixin.exe' } 
 ## 8. 常见问题
 | # | 现象 | 原因 | 命令 / 处理 |
 |---|---|---|---|
-| 1 | `node server.mjs` 立刻退出，报 `ERR_MODULE_NOT_FOUND`（找不到 `./lib/wcf.mjs` 或 `./lib/wxhelper.mjs`） | **本仓库缺这两个文件**，但 `server.mjs` 顶部静态 import 了它们（Node 静态 import 在求值前就解析，所以哪怕只用 wechat-hook 链路也会挂） | `node -e "import('./wx-bridge/lib/wcf.mjs').catch(e=>console.log(e.code))"` → 建两个最小占位模块：`node -e "const fs=require('fs');fs.writeFileSync('wx-bridge/lib/wcf.mjs','export class WcfBridge {}\n');fs.writeFileSync('wx-bridge/lib/wxhelper.mjs','export class WxhelperBridge {}\n')"` |
+| 1 | `node server.mjs` 立刻退出，报 `ERR_MODULE_NOT_FOUND` | v1.4.12 核对：`lib/wcf.mjs` 与 `lib/wxhelper.mjs` **都在仓库里且被 git 跟踪** —— 报错通常是没在 `wx-bridge` 目录执行、没 `npm install`、或 clone 不完整 | `cd wx-bridge && npm ls --depth=0`；确认在 `wx-bridge` 目录执行 `node server.mjs` → 补 `npm install` 或重新 clone（**不需要写占位模块**） |
 | 2 | `/api/status` 里 `loggedIn: false` | 微信没登录完 / 没扫码；或 hook 还没就绪（首次扫内存找句柄要 30~60 秒） | `tasklist \| findstr /I Weixin`；`curl http://127.0.0.1:30001/QueryDB/debug`；`findstr /C:"未就绪" <仓库>\data\logs\bridge-hook.out.log` → 扫码登录，等 30~60 秒 |
 | 3 | `GetAllDBName` 返回 `[]`，收不到消息 | Hook 没加载成功（被系统 `version.dll` 抢了），或 `message_0.db` 还没被打开（**懒加载**） | `curl http://127.0.0.1:30001/QueryDB/debug`（404 = 不是补丁版）；`dir "D:\wxhook\wx4110\version.dll"` → 停客户端 → 确认 DLL 就位 → 重启 → 在群里发一条消息触发懒加载。桥内置自愈：连续 3 次探测失败会自动重启客户端 |
 | 4 | `/api/rooms` 返回空数组 `[]` | **不是故障**：群列表是从"见过的消息回调 + 表情包库记录 + 数据目录里的 `rooms.json`"攒出来的，全新安装还没收到过群消息时就是空的 | `curl http://127.0.0.1:17300/api/rooms` → 先在测试群发一条消息，再 curl 一次 |
@@ -627,20 +643,24 @@ Get-Process Weixin | Where-Object { $_.Path -eq 'D:\wxhook\wx4110\Weixin.exe' } 
 6. **注意隐私。** 机器人会读取群消息、解密群图片、把内容发给大模型。
    不要在包含敏感信息的群里使用，也不要让不认识的人进那个群。
 7. **本项目不含任何微信账号、密钥、聊天数据。** 所有配置都需要你自己填写。
-## 10. 已知的文档 / 代码不一致（部署前必读）
-部署过程中你**一定会遇到**下面这些坑，它们是"文档写了但代码里没有（或反过来）"造成的：
+## 10. 已知的文档 / 代码不一致（部署前必读，v1.4.12 已逐条核对）
+
+> 上一版这里列了「仓库缺 `wcf.mjs` / `wxhelper.mjs`」「缺 `scripts/build.sh` / `lib/test-policy.mjs`」
+> —— **这几条已经不成立了**：文件都在仓库里且被 git 跟踪。下表只保留现在仍然成立的。
+
 | # | 不一致 | 事实 | 影响 |
 |---|---|---|---|
-| 1 | `wx-bridge/server.mjs` 静态 import 了 `./lib/wcf.mjs` 与 `./lib/wxhelper.mjs`，**但这两个文件不在仓库里**（已核实 `git ls-files wx-bridge/lib` 无此二者） | 直接 `npm start` 会 `ERR_MODULE_NOT_FOUND` 退出 | **致命**：必须按第 2 节阶段 5.1 建两个占位模块才能起桥 |
-| 2 | README「快速开始」写 `cd wx-bridge; npm start` | `npm start` 等于 `node server.mjs`，默认 `TRANSPORT = 'wxhelper'`，那是**另一套已废弃的 DLL 链路** | 即使补上缺失模块，也**必须加 `--transport=wechat-hook`** |
-| 3 | DEPLOY.md 第 4 节验证清单写"`curl /api/rooms` 应列出群" | 群列表来自"见过的消息回调 + 表情包库 + 数据目录里的 `rooms.json`"，**全新安装未收过群消息时是 `[]`** | 会误判为部署失败 |
-| 4 | `config.example.json` 有 `wechatAttachDir` 字段；DEPLOY.md 说"可用环境变量 `WECHAT_ATTACH_DIR`" | `wechatAttachDir` **没有任何代码读取**；`WECHAT_ATTACH_DIR` 只被 `decode-wechat-image.py` 读取；桥侧读的是 `WECHAT_DATA_ROOT` | 按文档填了不生效，白折腾 |
-| 5 | DEPLOY.md 说"`config.json` 填 `wechatExe`"，README 快速开始也说"填配置" | **`wx-bridge` 根本不读 `config.json`**；`wechatExe` 走 `--wechat=` 或环境变量 `WECHAT_EXE` | 只改 `config.json` 不生效 |
-| 6 | `install.ps1` 与 DEPLOY.md 都要求 `pip install zstandard` | **没有任何 `.py` 文件 `import zstandard`**；Node 侧解压用的是 npm 包 `fzstd` | 装了无害，但属于多余依赖 |
-| 7 | `wechat-group-agent/README.md` 写"`bash scripts/build.sh` 构建"；`package.json` 的 `test` 指向 `lib/test-policy.mjs` | 仓库里**既没有 `wechat-group-agent/scripts/`，也没有 `lib/test-policy.mjs`** | 别去构建：这是**纯 ESM 插件，`lib/` 即产物、无需编译**，直接注入即可 |
-| 8 | DEPLOY.md 第 2 节手动编译示例没提"锁定上游提交" | `scripts/build-hook.ps1` 里明确锁定了 `Commit = 5c92aab`，并注释"不锁的话上游一更新，`git apply` 必失败（实测过）" | 手动编译时不 `git checkout 5c92aab` 就会补丁失败 |
-| 9 | `wechat_bot_config` 工具描述只列了 25 个键 | 实现上 `DEFAULT_CONFIG` 里**所有键都能改**（见第 5.4 节完整清单） | 会以为某些参数改不了 |
-| 10 | `config.example.json` 的 `hosted` 块只有 8 个字段 | 运行时真实默认值还有 `timeoutMs / secret / rooms / splitChance / maxLines / stickerChance / maxReplyChars`（在 `hosted.mjs` 里） | 想改这些字段得改 `<数据目录>\bridge-config.json` 或走 `POST /api/hosted` |
+| 1 | README 早期版本写 `cd wx-bridge; npm start` | `server.mjs` 的 `TRANSPORT` 默认是 **`wxhelper`**（另一套已废弃的 DLL 链路） | **必须显式加 `--transport=wechat-hook`**，否则起的是废弃链路 |
+| 2 | `config.json` 里填 `wechatExe` / `dataDir` / `wechatAttachDir` | **wx-bridge 不读 `config.json`**；`wechatExe` 走 `--wechat=` 或 `WECHAT_EXE`，`dataDir` 走 `--data-dir=` 或 `WECHAT_BOT_DATA`，`wechatAttachDir` 没有任何代码读（真正生效的是 `WECHAT_ATTACH_DIR`，且只被 `decode-wechat-image.py` 读） | 只改 `config.json` 不生效 |
+| 3 | 「`/api/rooms` 应该列出群」 | 群列表来自"见过的群 + 表情包库 + `rooms.json` + **轮询器已发现的会话表**（1.4.6 起）"；全新安装还没收到任何群消息时是 `[]` | 会误判为部署失败 |
+| 4 | `install.ps1` / 旧文档要求 `pip install zstandard` | **没有任何 `.py` 文件 `import zstandard`**；Node 侧解压用 npm 包 `fzstd` | 装了无害，属于多余依赖 |
+| 5 | `wechat_bot_config` 工具描述只列 25 个键 | 实现上 `DEFAULT_CONFIG` 里**所有键都能改**（见 5.4 完整清单） | 会以为某些参数改不了 |
+| 6 | `config.example.json` 的 `hosted` 块只有 8 个字段 | 运行时还有 `timeoutMs / secret / rooms / splitChance / maxLines / stickerChance / maxReplyChars`（在 `hosted.mjs`） | 想改这些得改 `bridge-config.json` 或 `POST /api/hosted` |
+| 7 | 旧文档讲「下载 `大肥鱼的眼睛.zip` → 拖进面板安装」 | **眼睛已内置进成品 hook**；面板「眼睛」页与 7 个 op（eyesUpload/eyesInstall/eyesInfo/eyesSetDir/eyesToggle/eyesClean/eyesCheck）在 **1.4.9 已删除** | 别去找那个页面了；用 `GET /Debug/VuProbe` 验证即可 |
+| 8 | 面板上的「热重载插件」看起来能热替换代码 | **1.4.12 起它只做预检**，不会替换运行中的实例（见 README「R17」）。旧版本（1.4.10/1.4.11）点了会导致**面板整站 404**，且之后每次 reload 卡死 | 改完代码请**重启 DSH**；已经 404 就重启一次 |
+| 9 | 「朋友圈点发没反应」 | 微信把主窗口收进托盘时会**销毁**主窗口，静默发布没有窗口可用 | 先 `curl http://127.0.0.1:30001/Moment/Ready` 确认 `ok:true`，否则点开微信主窗口 |
+| 10 | 文档/日志里写死 `message_0.db` | 微信会**轮换分片**（实测已到 `message_1.db`） | 排查一律看桥日志 `当前消息库分片：message_N.db` |
+
 ## 11. 相关文档
 - [DEPLOY.md](../DEPLOY.md) —— 完整部署指南（含排错、常驻运行）
 - [README.md](../README.md) —— 项目能力总览、架构、语音/视频/语音气泡的实现说明
