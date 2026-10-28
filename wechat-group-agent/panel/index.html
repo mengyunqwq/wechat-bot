@@ -1217,10 +1217,28 @@ async function renderMemoryExtra() {
       <button class="btn danger" id="btn-mem-clear">清空</button></div>
     <div class="row" style="margin-top:8px"><input id="mem-add" type="text" placeholder="手动加一条长期记忆" style="flex:1;min-width:220px">
       <button class="btn" id="btn-mem-add">记住</button></div>
+    <div class="row" style="margin-top:8px">
+      <label class="hswitch">看已归档 <span class="sw"><input type="checkbox" id="mem-show-archived"><i></i></span></label>
+      <button class="btn" id="btn-mem-sweep" title="按遗忘曲线巡检一遍：归档该忘的、清理到期归档、容量超限按权重淘汰">跑一次遗忘巡检</button>
+      <span class="muted small" id="mem-sweep-st"></span>
+    </div>
+    <div id="mem-stats" class="small muted" style="margin-top:8px"></div>
     <div id="mem-list" class="muted small" style="margin-top:10px">选一个群，点「读取」。</div></div>`;
   fillRoomSelect($('#mem-room'), false);
   ensureBridgeRooms().then(() => fillRoomSelect($('#mem-room'), false));
   $('#btn-mem-load').onclick = loadMemory;
+  $('#mem-show-archived').onchange = () => loadMemory();
+  $('#btn-mem-sweep').onclick = async () => {
+    const st = $('#mem-sweep-st');
+    st.textContent = '巡检中…';
+    try {
+      const j = await api('/action', { method: 'POST', body: JSON.stringify({ op: 'memory.sweep' }) });
+      const r = j.result || {};
+      st.textContent = `巡检完成：${r.rooms || 0} 个群｜归档 ${r.archived || 0}｜清理 ${r.purged || 0}｜淘汰 ${r.evicted || 0}`;
+      toast('遗忘巡检完成', 'ok');
+      loadMemory();
+    } catch (e) { st.textContent = '失败：' + e.message; toast('巡检失败：' + e.message, 'err') }
+  };
   $('#btn-mem-add').onclick = async () => {
     const room = roomFrom($('#mem-room')); const add = $('#mem-add').value.trim();
     if (!add) return toast('先写点内容', 'err');
@@ -1250,16 +1268,86 @@ async function renderMemoryExtra() {
   };
 }
 
+/** 记忆保持率 → 颜色（绿/黄/红），一眼看出"快忘了" */
+function memRColor(R) {
+  if (R >= 0.6) return 'var(--ok)';
+  if (R >= 0.3) return 'var(--warn)';
+  return 'var(--bad)';
+}
+
 async function loadMemory() {
   const list = $('#mem-list'); if (!list) return;
+  const statsBox = $('#mem-stats');
   const room = roomFrom($('#mem-room'));
+  const showArchived = !!(document.getElementById('mem-show-archived') || {}).checked;
   list.textContent = '读取中…';
   try {
-    const j = await api('/action', { method:'POST', body: JSON.stringify({ op:'memory.list', args:{ room } }) });
+    const j = await api('/action', { method: 'POST', body: JSON.stringify({ op: 'memory.list', args: { room, archived: showArchived } }) });
     const r = j.result || {};
-    list.innerHTML = `<div><b>${esc(r.roomName || room)}</b> · 长期 ${r.facts ? r.facts.length : 0} 条 · 短期 ${r.msgs || 0} 条 ${r.pendingQuestion ? '· 待答：' + esc(r.pendingQuestion) : ''}</div>
-      <div style="margin-top:8px">${(r.facts||[]).slice(-30).reverse().map(f => `<div style="padding:4px 0;border-bottom:1px dashed var(--line)">
-        <span class="mono small muted">[${esc(f.kind)}] ${esc(fmtTime(f.at))}</span> ${esc(f.text)}</div>`).join('') || '<div class="empty">还没有长期记忆。</div>'}</div>`;
+    const st = r.stats || {};
+    const facts = r.facts || [];
+    if (statsBox) {
+      statsBox.innerHTML = r.v2 === false
+        ? '<span style="color:var(--warn)">记忆 v2 已关闭（按时间取最后 18 条，无遗忘）</span>'
+        : `<b>${esc(r.roomName || room)}</b> · 生效 <b>${st.active || 0}</b> 条｜归档 ${st.archived || 0}｜固定 ${st.pinned || 0}`
+          + `｜平均保持率 <b style="color:${memRColor(st.avgRetention || 0)}">${((st.avgRetention || 0) * 100).toFixed(0)}%</b>`
+          + `｜平均重要度 ${((st.avgImportance || 0) * 100).toFixed(0)}%`
+          + `｜⚠️ 未来 7 天预计遗忘 <b>${st.willForgetIn7d || 0}</b> 条`
+          + (st.emotionBuckets && Object.keys(st.emotionBuckets).length
+            ? '｜情绪：' + Object.entries(st.emotionBuckets).map(([k, v]) => esc(k) + ' ' + v).join('、')
+            : '');
+    }
+    if (!facts.length) {
+      list.innerHTML = '<div class="empty">' + (showArchived ? '没有已归档的记忆。' : '还没有长期记忆。') + '</div>';
+      return;
+    }
+    list.innerHTML = `<table class="table"><thead><tr>
+        <th style="width:44%">记忆</th><th>类型</th><th>情绪</th><th style="width:130px">保持率</th><th>重要度</th><th>用过</th><th style="width:190px">操作</th>
+      </tr></thead><tbody>` + facts.slice().reverse().map((f) => {
+        const R = typeof f.retention === 'number' ? f.retention : 0;
+        const emo = (f.emotion && f.emotion.label) || '未知';
+        const intens = (f.emotion && f.emotion.intensity) || 0;
+        const pin = f.pinned ? '📌' : '';
+        return `<tr>
+          <td>${pin}${esc(f.text)}</td>
+          <td class="mono small">${esc(f.kind || '')}</td>
+          <td class="small">${esc(emo)}${intens >= 0.6 ? ' ★' : ''}</td>
+          <td><div style="background:var(--line-2);border-radius:6px;height:8px;position:relative" title="保持率 ${(R * 100).toFixed(0)}%（强度 ${(f.strength || 0).toFixed(1)} 天）">
+            <div style="width:${Math.max(2, R * 100).toFixed(0)}%;background:${memRColor(R)};height:8px;border-radius:6px"></div></div>
+            <span class="small muted">${(R * 100).toFixed(0)}% · S=${(f.strength || 0).toFixed(1)}d</span></td>
+          <td class="small">${(((f.importance || 0) * 100) | 0)}%</td>
+          <td class="small">${f.recallCount || 0}${f.lastRecallAt ? '<br><span class="muted">' + esc(ago(f.lastRecallAt)) + '</span>' : ''}</td>
+          <td>
+            <button class="btn" data-mem-pin="${esc(f.id)}">${f.pinned ? '取消固定' : '固定'}</button>
+            <button class="btn" data-mem-review="${esc(f.id)}" title="手动复习：提高强度">复习</button>
+            <button class="btn" data-mem-arch="${esc(f.id)}">${f.archived ? '恢复' : '归档'}</button>
+          </td></tr>`;
+      }).join('') + '</tbody></table>';
+
+    $$('[data-mem-pin]').forEach(b => b.onclick = async () => {
+      try {
+        const x = await api('/action', { method: 'POST', body: JSON.stringify({ op: 'memory.pin', args: { room, id: b.dataset.memPin } }) });
+        if (x.result && x.result.ok) { toast(x.result.pinned ? '已固定（永不遗忘）' : '已取消固定', 'ok'); loadMemory(); }
+        else toast('失败：' + ((x.result && x.result.error) || '未知'), 'err');
+      } catch (e) { toast(e.message, 'err') }
+    });
+    $$('[data-mem-review]').forEach(b => b.onclick = async () => {
+      try {
+        const x = await api('/action', { method: 'POST', body: JSON.stringify({ op: 'memory.review', args: { room, id: b.dataset.memReview } }) });
+        const rr = x.result || {};
+        if (rr.ok) { toast('复习完成：强度 ' + rr.strengthBefore + 'd → ' + rr.strengthAfter + 'd', 'ok'); loadMemory(); }
+        else toast('失败：' + (rr.error || '未知'), 'err');
+      } catch (e) { toast(e.message, 'err') }
+    });
+    $$('[data-mem-arch]').forEach(b => b.onclick = async () => {
+      const isArch = !!(facts.find(f => f.id === b.dataset.memArch) || {}).archived;
+      try {
+        const x = await api('/action', { method: 'POST', body: JSON.stringify({ op: 'memory.archive', args: { room, id: b.dataset.memArch, archived: !isArch } }) });
+        const rr = x.result || {};
+        if (rr.ok) { toast(rr.archived ? '已归档（30 天内可恢复）' : '已恢复', 'ok'); loadMemory(); }
+        else toast('失败：' + (rr.error || '未知'), 'err');
+      } catch (e) { toast(e.message, 'err') }
+    });
   } catch (e) { list.textContent = '读取失败：' + e.message; }
 }
 

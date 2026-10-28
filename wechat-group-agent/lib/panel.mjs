@@ -34,7 +34,8 @@ const ALLOWED_OPS = new Set([
   'postMoment', 'momentStatus', 'momentNow',
   'momentEvalTest',   // 试评估：拿群聊让 AI 判一次，不发布（调门槛用）
   'selfReload', 'pollStatus', 'pollResume',   // ★ 2026-10-26：诊断页的「热重载插件」「恢复轮询」按钮，原来没进白名单，点了必报「不允许的操作」
-  'ttsStatus', 'ttsControl', 'ttsTest',      // ★ 2026-10-27：TTS 服务（GPT-SoVITS）状态/启停/重启/试合成
+  'ttsStatus', 'ttsControl', 'ttsTest',
+  'memory.pin', 'memory.archive', 'memory.review', 'memory.sweep',   // ★ 2026-10-28 记忆 v2（遗忘曲线）      // ★ 2026-10-27：TTS 服务（GPT-SoVITS）状态/启停/重启/试合成
 ])
 
 /**

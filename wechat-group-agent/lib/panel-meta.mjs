@@ -409,6 +409,54 @@ export const CONFIG_META = {
     group: 'memory', label: '定期提炼长期记忆', type: 'bool',
     help: '从群聊里提炼事实，本地保存，每次对话都带上。',
   },
+  memoryV2: {
+    group: 'memory', label: '记忆 v2（遗忘曲线）', type: 'bool',
+    help: '开=按艾宾浩斯遗忘曲线管理：越用越牢、情绪强的记得久、低权重自动归档。关=退回旧的"取最后 18 条"。',
+  },
+  memoryBaseDays: {
+    group: 'memory', label: '基准半衰天数', type: 'number', min: 0.5, max: 90, step: 0.5, unit: '天',
+    help: '初始强度基准。越大越不容易忘（7 天 ≈ 第 7 天记起概率 37%，第 14 天 13%）。',
+  },
+  memoryForgetWeight: {
+    group: 'memory', label: '遗忘权重阈值', type: 'number', min: 0.005, max: 0.3, step: 0.005,
+    help: '判据是「保持率 R × 重要度」：低于这个值就归档（真正的"忘掉权重低的"）。默认 0.06。',
+  },
+  memoryKeepImportance: {
+    group: 'memory', label: '铁律记忆阈值', type: 'number', min: 0.5, max: 1, step: 0.05,
+    help: '重要度达到这个值 = 铁律记忆（身份/约定/承诺），永不自动归档、也不被容量淘汰。默认 0.85。',
+  },
+  memoryMinAgeDays: {
+    group: 'memory', label: '最短保留天数', type: 'number', min: 0.5, max: 30, step: 0.5, unit: '天',
+    help: '不到这个天数的记忆不会被归档（防止"刚记下还没用过就被判死刑"）。',
+  },
+  memoryArchiveGraceDays: {
+    group: 'memory', label: '归档保留天数', type: 'number', min: 1, max: 365, step: 1, unit: '天',
+    help: '归档后多久才真正删除（期间可恢复）。',
+  },
+  memoryMaxActive: {
+    group: 'memory', label: '每群生效上限', type: 'number', min: 20, max: 500, step: 10, unit: '条',
+    help: '超过后按 保持率×重要度 淘汰最低的进归档（不再按时间硬截）。',
+  },
+  memoryInjectCount: {
+    group: 'memory', label: '每次注入条数', type: 'number', min: 3, max: 30, step: 1, unit: '条',
+    help: '每次对话按相关度/重要度/情绪检索出这么多条带进提示词。',
+  },
+  memoryEmotionBoost: {
+    group: 'memory', label: '情绪加成', type: 'number', min: 0, max: 3, step: 0.1,
+    help: '情绪强度对初始记忆强度的放大上限（越高，情绪强烈的记忆越难忘）。',
+  },
+  memoryRecallGamma: {
+    group: 'memory', label: '复习增益 γ', type: 'number', min: 0, max: 3, step: 0.1,
+    help: '被用到一次时强度增长系数。快忘时复习收益更大（间隔效应）。',
+  },
+  memoryPinnedMax: {
+    group: 'memory', label: '固定记忆必带条数', type: 'number', min: 0, max: 10, step: 1, unit: '条',
+    help: '手动固定的记忆每次必带（上限，防止固定太多把预算吃满）。',
+  },
+  memoryConsolidate: {
+    group: 'memory', label: '遗忘巡检频率', type: 'enum', options: ['off', 'daily', 'hourly'],
+    help: 'daily=每 6 小时分散跑一次；hourly=每小时；off=不自动跑（面板仍可手动巡检）。',
+  },
   historyLookup: {
     group: 'memory', label: '提起往事时查微信历史', type: 'bool',
     help: '本地查询，0 token。',

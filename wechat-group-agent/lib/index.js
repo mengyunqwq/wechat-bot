@@ -16,6 +16,7 @@
  */
 import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, unlinkSync, writeFileSync, copyFileSync, rmSync, openSync, closeSync } from 'node:fs'
 import { execFileSync, execSync, exec as execCb, spawn as spawnCb } from 'node:child_process'
+import * as MV2 from './memory-v2.mjs'   // 艾宾浩斯遗忘曲线 + 情绪加权（纯函数，可单测）
 import net from 'node:net'
 import { request as httpsRequest } from 'node:https'
 import { join, dirname } from 'node:path'
@@ -43,7 +44,7 @@ try {
 } catch { /* ignore */ }
 
 export const name = '@dsh-external/dsh-wechat-bot'
-export const version = '1.4.16'
+export const version = '1.5.0'
 // Cordis 4.0.4 的 inject 只认**数组**或"服务名→配置"映射；
 // 写成 { required, optional } 会让依赖解析失败、fiber 永远 pending（踩过：改了代码却一直跑旧实例）。
 // 这里只声明必然存在的两个服务；attachments（视觉识别用）改为**惰性获取**，
@@ -403,6 +404,19 @@ const DEFAULT_CONFIG = {
   replyProbability: 0.8,          // 闲聊插话概率（用户要求：80%，很爱插话）
   useDbMembers: true,             // 用数据库里的真实群成员昵称（我们修好了 hook 的 QueryDB）
   memoryExtract: true,            // 定期从群聊里提炼长期记忆（本地保存，每次对话都带上）
+  // ── 记忆系统 v2（艾宾浩斯遗忘曲线 + 情绪加权）──────────────────
+  memoryV2: true,                 // 总开关；false = 退回旧逻辑（slice(-18) 注入、不遗忘）
+  memoryBaseDays: 7,              // S0 基准天数（越大越不容易忘）
+  memoryForgetWeight: 0.06,       // 遗忘判据：R × 重要度 低于此值 → 归档
+  memoryMinAgeDays: 2,            // 不到这个天数的记忆不归档（给新记忆机会）
+  memoryKeepImportance: 0.85,     // 重要度 ≥ 此值 = 铁律记忆，永不自动归档
+  memoryArchiveGraceDays: 30,     // 归档后保留多少天才真删
+  memoryMaxActive: 120,           // 每群生效记忆上限（超了按 R×重要度 淘汰）
+  memoryInjectCount: 12,          // 每次带进上下文的记忆条数
+  memoryEmotionBoost: 0.8,        // 情绪强度对初始强度的加成上限
+  memoryRecallGamma: 1.2,         // 被用到一次 → 强度增益系数
+  memoryPinnedMax: 3,             // 固定记忆必带条数上限
+  memoryConsolidate: 'daily',     // 遗忘巡检频率：off | hourly | daily
   // 问过的问题等多久算"还没人接"（这期间不再主动追问同一件事）
   pendingQuestionWaitMs: 45 * 60_000,
   minReplyGapMs: 6_000,          // 同群两次回复最小间隔（对话延续时只要求 2s）
@@ -1559,10 +1573,40 @@ const namesFile = join(dirname(memoryDir), 'members.json')
   const factsDir = join(dirname(memoryDir), 'facts')
   const factsFile = (roomId) => join(factsDir, String(roomId).replace(/[^\w@.-]/g, '_') + '.json')
 
+  /** 记忆 v2 的参数（每次现算，面板改了立即生效） */
+  function memCfg() {
+    return {
+      baseDays: Number(config.memoryBaseDays) || 7,
+      forgetWeight: config.memoryForgetWeight === undefined ? 0.06 : Number(config.memoryForgetWeight),
+      minAgeDays: config.memoryMinAgeDays === undefined ? 2 : Number(config.memoryMinAgeDays),
+      keepImportance: config.memoryKeepImportance === undefined ? 0.85 : Number(config.memoryKeepImportance),
+      archiveGraceDays: Number(config.memoryArchiveGraceDays) || 30,
+      maxActive: Number(config.memoryMaxActive) || 120,
+      injectCount: Number(config.memoryInjectCount) || 12,
+      emotionBoost: config.memoryEmotionBoost === undefined ? 0.8 : Number(config.memoryEmotionBoost),
+      recallGamma: Number(config.memoryRecallGamma) || 1.2,
+      pinnedMax: Number(config.memoryPinnedMax) || 3,
+    }
+  }
+
   function loadFacts(r) {
     try {
       const saved = JSON.parse(readFileSync(factsFile(r.roomId), 'utf8'))
-      r.facts = Array.isArray(saved) ? saved : []
+      let arr = Array.isArray(saved) ? saved : []
+      // v2：旧数据（{text,kind,at}）自动补 强度/情绪/重要度/id
+      if (config.memoryV2 !== false) {
+        const needRebase = arr.some((x) => x && x.migratedFrom === 'v1')   // 旧条目需按新基准重算强度
+        const mig = MV2.migrateList(arr, Date.now(), memCfg())
+        const withIds = MV2.ensureIds(mig.items, Date.now())
+        arr = withIds.items
+        r.facts = arr
+        if (mig.changed || withIds.changed || needRebase) {
+          log(`记忆迁移 v1→v2：${r.roomName || r.roomId} ${mig.changed} 条补字段、${withIds.changed} 条补 id（已落盘）`)
+          saveFacts(r)
+        }
+      } else {
+        r.facts = arr
+      }
     } catch { r.facts = [] }
     return r.facts
   }
@@ -1570,7 +1614,16 @@ const namesFile = join(dirname(memoryDir), 'members.json')
   function saveFacts(r) {
     try {
       mkdirSync(factsDir, { recursive: true })
-      writeFileSync(factsFile(r.roomId), JSON.stringify((r.facts || []).slice(-80), null, 2))
+      const all = (r.facts || []).filter(Boolean)
+      // ★ v2：不再 slice(-80) 按时间硬截（那会把早期重要记忆直接扔掉）。
+      //   现在：active 受 memoryMaxActive 约束（超出由 sweep 按 R×重要度淘汰进归档），
+      //   归档条目也一起留盘上（有 geometry 上限，30 天后 sweep 会清）。
+      const active = all.filter((x) => !x.archived)
+      const archived = all.filter((x) => x.archived).slice(-200)
+      const cap = Math.max(20, Number(config.memoryMaxActive) || 120) + 40   // 留一点余量给 sweep 前
+      const kept = active.slice(-cap).concat(archived)
+      writeFileSync(factsFile(r.roomId), JSON.stringify(kept, null, 2))
+      r.facts = kept
     } catch { /* ignore */ }
   }
 
@@ -1681,10 +1734,42 @@ const namesFile = join(dirname(memoryDir), 'members.json')
     const n = normFact(t)
     // 去重从「完全相等」升级为「讲的是同一件事」（换说法也算重复）
     if (r.facts.some((f) => factSimilar(normFact(f.text), n))) return false
-    r.facts.push({ text: t, kind, at: Date.now() })
-    if (r.facts.length > 80) r.facts = r.facts.slice(-80)
+    // v2：顺手算 强度S0/情绪/重要度；v1 路径保持原样
+    if (config.memoryV2 !== false) {
+      const meta = arguments.length > 3 ? arguments[3] : null   // { emotion, importance, selfRelevant, difficulty, sources, pinned }
+      const emotion = MV2.normalizeEmotion(meta && meta.emotion)
+      const importance = MV2.computeImportance({
+        modelImportance: meta && meta.importance,
+        emotion,
+        selfRelevant: !!(meta && meta.selfRelevant),
+      })
+      const item = {
+        schema: MV2.SCHEMA,
+        text: t,
+        kind,
+        createdAt: Date.now(),
+        at: Date.now(),
+        emotion,
+        importance,
+        strength: MV2.initialStrength({ importance, emotion, cfg: memCfg() }),
+        difficulty: meta && meta.difficulty !== undefined ? Number(meta.difficulty) : 0.3,
+        recallCount: 0,
+        hitCount: 0,
+        lastRecallAt: null,
+        pinned: !!(meta && meta.pinned) || /记住这个|别忘了|一定要记得/.test(t),
+        archived: false,
+        sources: (meta && Array.isArray(meta.sources) ? meta.sources : []).slice(0, 3),
+      }
+      const withIds = MV2.ensureIds([item], Date.now())
+      r.facts.push(withIds.items[0])
+      log(`长期记忆 +1（${kind}｜重要度 ${importance.toFixed(2)}｜情绪 ${emotion.label}${emotion.intensity >= 0.6 ? '★' : ''}）`)
+    } else {
+      r.facts.push({ text: t, kind, at: Date.now() })
+    }
+    const capSoft = Math.max(80, Number(config.memoryMaxActive) || 120)
+    if (r.facts.length > capSoft + 200) r.facts = r.facts.slice(-(capSoft + 200))
     saveFacts(r)
-    log(`长期记忆 +1（${kind}）：${JSON.stringify(t.slice(0, 50))}`)
+    if (config.memoryV2 === false) log(`长期记忆 +1（${kind}）：${JSON.stringify(t.slice(0, 50))}`)
     return true
   }
 
@@ -1716,13 +1801,18 @@ const namesFile = join(dirname(memoryDir), 'members.json')
     try {
       const route = resolveRoute()
       stats.llmCalls++
-      const sys = '你是一个记忆整理器。只输出事实条目，每行一条，不要编号、不要解释。'
+      const sys = '你是一个记忆整理器。按行输出 JSON，每行一个对象，不要数组、不要解释、不要代码块围栏。'
       // 把已有记忆喂给模型，从源头减少重复（之前的重复主要来自「模型不知道已经记过什么」）
       const existing = (r.facts || []).slice(-24).map((f) => '- ' + String(f.text).slice(0, 120)).join('\n')
       const usr = '从下面的群聊记录里提炼 1~4 条**值得长期记住**的事实，例如：\n'
         + '谁是谁（昵称/身份）、某人的喜好或习惯、群里的约定或梗、重要事件、我答应过别人的事。\n'
         + '**每条写完整一点**（建议 30~100 字）：带上是谁、什么场合、什么细节，别只写半句。\n'
         + '只记长期有用的；日常闲聊不要记。没有值得记的就只输出：无\n'
+        + '\n输出格式（每行一个 JSON 对象，字段都要有）：\n'
+        + '{"text":"记忆内容","kind":"fact|pref|event|relation","emotion":"开心|生气|难过|害羞|惊喜|无语|温柔|平静","emotionIntensity":0.0~1.0,"importance":0.0~1.0,"selfRelevant":true|false}\n'
+        + '· emotion：这条记忆**发生时的情绪**（从语气判断；判断不了就填"平静"、强度 0.2）\n'
+        + '· importance：以后还有多重要（0=一次性琐事，1=必须永远记住，比如身份/约定/承诺）\n'
+        + '· selfRelevant：是否关系到"我"或"主人"（是就 true）\n'
         + (existing ? '\n【已经记过下面这些，不要重复提炼同一件事（换个说法也算重复）】\n' + existing + '\n' : '')
         + '\n群聊记录：\n' + recent
 let res = await callLlm(route, sys, usr, undefined)
@@ -1736,8 +1826,28 @@ let res = await callLlm(route, sys, usr, undefined)
       let n = 0
       for (const l of lines) {
         if (/^无$/.test(l)) continue
-        const t = l.replace(/^[-•\d.、\s]+/, '').trim()
-        if (t && addFact(r, t, 'extract')) n++
+        // 优先按 JSON 行解析（v2）；模型不听话时退回纯文本（v1 行为）
+        let meta = null
+        let text = ''
+        const jsonTry = l.replace(/^```(?:json)?\s*|```$/g, '').trim()
+        if (jsonTry.startsWith('{')) {
+          try {
+            const o = JSON.parse(jsonTry)
+            text = String(o.text || o.memory || '').trim()
+            meta = {
+              emotion: { label: o.emotion, intensity: o.emotionIntensity !== undefined ? o.emotionIntensity : o.intensity },
+              importance: o.importance,
+              selfRelevant: !!o.selfRelevant,
+              difficulty: o.difficulty,
+            }
+            if (o.kind) meta.kind = String(o.kind)
+          } catch { text = '' }
+        }
+        if (!text) {
+          text = l.replace(/^[-•\d.、\s]+/, '').trim()
+          meta = null
+        }
+        if (text && addFact(r, text, (meta && meta.kind) || 'extract', meta)) n++
       }
       if (n) log(`「${r.roomName}」长期记忆提炼：新增 ${n} 条（共 ${r.facts.length} 条）`)
       return n
@@ -1745,6 +1855,31 @@ let res = await callLlm(route, sys, usr, undefined)
       log('长期记忆提炼失败：' + String(e?.message || e))
       return 0
     }
+  }
+
+  /**
+   * 记忆巡检：按遗忘曲线归档该忘的、清掉归档到期的、容量超限按权重淘汰。
+   * 每群独立跑；只在有变化时才落盘（避免无意义的写）。
+   */
+  function memorySweepAll(now = Date.now()) {
+    const cfg = memCfg()
+    const out = { rooms: 0, archived: 0, purged: 0, evicted: 0, total: 0 }
+    for (const r of rooms.values()) {
+      const facts = r.facts || []
+      if (!facts.length) continue
+      out.rooms++
+      const res = MV2.sweep(facts, now, cfg)
+      out.total += res.items.length
+      if (res.archived || res.purged || res.evicted) {
+        r.facts = res.items
+        saveFacts(r)
+        out.archived += res.archived
+        out.purged += res.purged
+        out.evicted += res.evicted
+        log(`记忆巡检「${r.roomName || r.roomId}」：归档 ${res.archived}｜清理 ${res.purged}｜容量淘汰 ${res.evicted}（剩 ${res.items.filter((x) => !x.archived).length} 条生效）`)
+      }
+    }
+    return out
   }
 
   // ── 群成员名字（wxid → 昵称）────────────────────────────────
@@ -2062,9 +2197,37 @@ let res = await callLlm(route, sys, usr, undefined)
       // 长期记忆：每次都带上（用户要求"每次都通过记忆系统"）
       //  从 12 条提到 18 条 —— 单条上限同时放宽到 200 字，记忆能带更多细节；
       //  18×200 字约 3.6K 字符，仍在预算内。
-      (r.facts || []).length
-        ? '\n【长期记忆（关于这个群和这些人，别忘）】\n' + r.facts.slice(-18).map((f) => '- ' + f.text).join('\n')
-        : '',
+      (() => {
+        // ★ 记忆 v2：不再按时间取最后 18 条，而是按 R(保持率)×相关性×重要度×情绪 检索。
+        //   被选中的会涨强度（间隔重复），并在下次更可能被想起。
+        const facts = r.facts || []
+        if (!facts.length) return ''
+        if (config.memoryV2 === false) {
+          return '\n【长期记忆（关于这个群和这些人，别忘）】\n' + facts.slice(-18).map((f) => '- ' + f.text).join('\n')
+        }
+        try {
+          // 查询词 = 当前这条消息 + 最近 3 条（都在 evaluate 作用域里）
+          const qText = [String(trigger && trigger.text || ''), (r.msgs || []).slice(-3).map((m) => m.text).join(' ')].join(' ').trim()
+          const sel = MV2.selectMemories(facts, {
+            now: Date.now(),
+            query: qText,
+            // 当前情绪（本地词表粗判，不花 token）—— 只用于"同情绪更容易想起"
+            emotion: MV2.guessEmotion(qText),
+            cfg: memCfg(),
+          })
+          if (!sel.picked.length) return ''
+          // 记一笔"被用过"（涨强度/计数）—— 只改内存，saveFacts 时机照旧由调用方决定
+          const newList = MV2.reinforceList(facts, sel.picked.map((x) => x.id), Date.now(), memCfg())
+          r.facts = newList
+          r.factsLastRecall = { at: Date.now(), ids: sel.picked.map((x) => x.id), stats: sel.stats }
+          log(`记忆检索：命中 ${sel.picked.length}/${sel.stats.total} 条（平均保持率 ${sel.stats.avgRetention}）`)
+          return '\n【长期记忆（检索自长期记忆库，按相关度与重要度挑选；越重要的越牢）】\n'
+            + sel.picked.map((f) => '- ' + f.text).join('\n')
+        } catch (e) {
+          log('记忆检索失败，退回旧切片：' + String(e?.message || e).slice(0, 120))
+          return '\n【长期记忆】\n' + facts.slice(-18).map((f) => '- ' + f.text).join('\n')
+        }
+      })(),
       // 我刚问过、还没人回答的问题：不许再问第二遍
       r.pendingQuestion
         ? `\n【注意】你刚问过：「${r.pendingQuestion.text}」，还没人回答。**不要再问同一件事**，聊别的或先安静。`
@@ -3671,6 +3834,16 @@ let res = await callLlm(route, sys, usr, undefined)
   // 避免频繁打 hook；连续 2 次异常（≈10 分钟）才告警，恢复也告警。
   ctx.effect(() => {
     const iv = setInterval(() => { void healthTick() }, Number(config.healthCheckMs) || 300_000)
+    // 记忆巡检：默认每天一次（memoryConsolidate=hourly 则每小时；off 不跑）
+    const memEvery = config.memoryConsolidate === 'hourly' ? 3_600_000
+      : (config.memoryConsolidate === 'off' ? 0 : 6 * 3_600_000)   // daily 但分散到 6h 一次，避免整点一起跑
+    if (memEvery && config.memoryV2 !== false) {
+      const memIv = setInterval(() => {
+        try { memorySweepAll() } catch (e) { log('记忆巡检失败：' + String(e?.message || e).slice(0, 140)) }
+      }, memEvery)
+      track(memIv)
+      log(`记忆巡检已启动：每 ${Math.round(memEvery / 3600000)} 小时一次（memoryConsolidate=${config.memoryConsolidate}）`)
+    }
     return () => clearInterval(iv)
   }, SHORT + ': health heartbeat')
 
@@ -4658,7 +4831,15 @@ let res = await callLlm(route, sys, usr, undefined)
     } catch { /* 没有短期记忆 */ }
     try {
       const saved = JSON.parse(readFileSync(factsFile(room.roomId), 'utf8'))
-      if (Array.isArray(saved)) r.facts = saved
+      let arr = Array.isArray(saved) ? saved : []
+      // ★ 面板/工具读取路径也要做同样的 v2 归一化，否则这里显示的是"没有强度/情绪的旧数据"，
+      //   而机器人内部用的是归一化后的（两边不一致，排查时会被误导）。
+      //   只读不写：写完的值由面板的写操作（固定/归档/复习/提炼）负责落盘。
+      if (config.memoryV2 !== false) {
+        const mig = MV2.migrateList(arr, Date.now(), memCfg())
+        arr = MV2.ensureIds(mig.items, Date.now()).items
+      }
+      r.facts = arr
     } catch { /* 没有长期记忆 */ }
     return r
   }
@@ -6138,12 +6319,63 @@ let res = await callLlm(route, sys, usr, undefined)
       case 'memory.list': {
         const room = await resolveRoom(a.room)
         const r = panelRoomView(room)
+        const now = Date.now()
+        const cfg = memCfg()
+        const all = (r.facts || []).filter(Boolean)
+        const showArchived = !!a.archived
+        const list = all.filter((f) => (showArchived ? f.archived : !f.archived))
         return {
           roomId: r.roomId, roomName: r.roomName,
-          facts: (r.facts || []).slice(-50).map((f) => ({ ...f, text: prettyNames(f.text) })),
+          facts: list.slice(showArchived ? -100 : -200).map((f) => ({
+            ...f,
+            text: prettyNames(f.text),
+            retention: +MV2.retention(f, now).toFixed(3),          // 当前保持率，面板画进度条
+          })),
+          stats: MV2.stats(all, now, cfg),
+          v2: config.memoryV2 !== false,
+          cfg,
           msgs: (r.msgs || []).length,
           pendingQuestion: '',
         }
+      }
+      // ── 记忆 v2 单项操作（面板用）──────────────────────────
+      case 'memory.pin': {
+        const room = await resolveRoom(a.room)
+        const r = panelRoomView(room)
+        const hit = (r.facts || []).find((f) => f && f.id === a.id)
+        if (!hit) return { ok: false, error: '找不到这条记忆（id 可能已变）' }
+        hit.pinned = a.pinned === undefined ? !hit.pinned : !!a.pinned
+        if (hit.pinned) hit.archived = false
+        saveFacts(r)
+        return { ok: true, pinned: hit.pinned }
+      }
+      case 'memory.archive': {
+        const room = await resolveRoom(a.room)
+        const r = panelRoomView(room)
+        const hit = (r.facts || []).find((f) => f && f.id === a.id)
+        if (!hit) return { ok: false, error: '找不到这条记忆' }
+        hit.archived = a.archived === undefined ? true : !!a.archived
+        if (hit.archived) { hit.archivedAt = Date.now(); hit.archivedReason = '面板手动归档' }
+        else { delete hit.archivedAt; delete hit.archivedReason }
+        saveFacts(r)
+        return { ok: true, archived: hit.archived }
+      }
+      case 'memory.review': {
+        // "复习"：手动把强度提上去（相当于又被想起来了）
+        const room = await resolveRoom(a.room)
+        const r = panelRoomView(room)
+        const hit = (r.facts || []).find((f) => f && f.id === a.id)
+        if (!hit) return { ok: false, error: '找不到这条记忆' }
+        const before = Number(hit.strength) || 1
+        hit.strength = MV2.reinforceStrength(hit, Date.now(), memCfg())
+        hit.recallCount = (Number(hit.recallCount) || 0) + 1
+        hit.lastRecallAt = Date.now()
+        saveFacts(r)
+        return { ok: true, strengthBefore: +before.toFixed(2), strengthAfter: +Number(hit.strength).toFixed(2) }
+      }
+      case 'memory.sweep': {
+        const res = memorySweepAll()
+        return { ok: true, ...res }
       }
       case 'memory.add': {
         const room = await resolveRoom(a.room)
