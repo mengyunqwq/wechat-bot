@@ -301,7 +301,6 @@ const NAV = [
   {id:'identity', title:'群与人', icon:'👥', groups:['identity'], special:'members'},
   {id:'moment', title:'朋友圈', icon:'📸', groups:['moment'], special:'moment'},
   {id:'model', title:'人设模型', icon:'🐟', groups:['model'], special:'model'},
-  {id:'providers', title:'模型接口', icon:'🔌'},   // ★ 2026-10-28：页面功能一直是完整的，只是漏了入口
   {id:'diag', title:'诊断', icon:'🔬', special:'diag'},
   {id:'update', title:'更新', icon:'📦', special:'update'},
   {id:'ops', title:'运维日志', icon:'🩺', groups:['health','selfheal','advanced'], special:'ops'},
@@ -338,8 +337,8 @@ async function api(path, opts) {
 }
 /**
  * 发送类操作的成败判定。
- * 为什么需要：不同 op 的返回字段不一样（sendText → rc；sayVoice → ok；sendSticker → rc+stickerId），
- * 以前页面不看结果一律 toast「已执行/已发送」，失败也报成功（2026-10-28 修）。
+ * 不同 op 的返回字段不一样（sendText → rc；sayVoice → ok；sendSticker → rc+stickerId），
+ * 以前页面不看结果一律 toast「已执行/已发送」，失败也报成功。
  */
 function sendVerdict(op, r) {
   if (!r || typeof r !== 'object') return { ok: false, why: '没有返回结果' };
@@ -465,7 +464,7 @@ function renderHeader() {
 }
 
 /* ── 导航 ─────────────────────────────────────────────── */
-/** 切页（导航 / 深链 / 页面内跳转都走它，避免各处自己改 App.tab） */
+/** 切页（导航 / 深链 / 页面内跳转都走它） */
 function goTab(id) {
   if (!NAV.some(n => n.id === id)) id = 'overview';
   App.tab = id;
@@ -501,7 +500,6 @@ function renderActive(opts) {
   if (nav.id === 'overview') return renderOverview();
   if (nav.id === 'features') return renderFeatures();
   if (nav.id === 'manual') return renderManual();
-  if (nav.id === 'providers') return renderProviders();   // 异步渲染，return 掉即可
   if (nav.id === 'diag') return renderDiag();
   if (nav.id === 'update') return renderUpdate();
   if (nav.groups) {
@@ -517,33 +515,8 @@ function renderActive(opts) {
   }
 }
 
-/* ── 模型接口 ─────────────────────────────────────────── */
-const PROVIDER_PRESETS = [
-  { id: 'deepseek', name: 'DeepSeek', note: '对话 / 推理' },
-  { id: 'anthropic', name: 'Claude', note: 'Anthropic 官方' },
-  { id: 'openai', name: 'GPT', note: 'OpenAI 官方' },
-  { id: 'xai', name: 'Grok', note: 'xAI' },
-  { id: 'zai', name: 'GLM', note: '智谱' },
-  { id: 'zai-coding-cn', name: 'GLM（国内）', note: '智谱 coding' },
-  { id: 'qwen-token-plan', name: 'Qwen', note: '通义千问' },
-  { id: 'qwen-token-plan-cn', name: 'Qwen（国内）', note: '通义千问' },
-  { id: 'moonshotai', name: 'Kimi', note: '月之暗面' },
-  { id: 'moonshotai-cn', name: 'Kimi（国内）', note: '月之暗面' },
-  { id: 'xiaomi', name: 'MiMo', note: '小米' },
-  { id: 'google', name: 'Gemini', note: 'Google' },
-  { id: 'openrouter', name: 'OpenRouter', note: '聚合网关' },
-  { id: 'minimax', name: 'MiniMax', note: '海螺' },
-  { id: 'groq', name: 'Groq', note: '低延迟' },
-]
+/* ── 生图接口（表情包页用；原「模型接口」页已按用户要求移除）── */
 
-const KEY_REF_SUGGEST = {
-  openai: 'OPENAI_API_KEY', anthropic: 'ANTHROPIC_API_KEY', deepseek: 'DEEPSEEK_API_KEY',
-  xai: 'XAI_API_KEY', zai: 'ZHIPU_API_KEY', 'zai-coding-cn': 'ZHIPU_API_KEY',
-  'qwen-token-plan': 'DASHSCOPE_API_KEY', 'qwen-token-plan-cn': 'DASHSCOPE_API_KEY',
-  moonshotai: 'MOONSHOT_API_KEY', 'moonshotai-cn': 'MOONSHOT_API_KEY',
-  xiaomi: 'XIAOMI_API_KEY', google: 'GEMINI_API_KEY', openrouter: 'OPENROUTER_API_KEY',
-  minimax: 'MINIMAX_API_KEY', groq: 'GROQ_API_KEY',
-}
 
 const IMAGE_PRESETS = {
   agnes: { apiUrl: 'https://apihub.agnes-ai.com/v1/images/generations', model: 'agnes-image-2.1-flash', keyRef: 'AGNES_API_KEY', mode: 'i2i', style: 'agnes' },
@@ -552,31 +525,13 @@ const IMAGE_PRESETS = {
   glm: { apiUrl: 'https://open.bigmodel.cn/api/paas/v4/images/generations', model: 'cogview-3-flash', keyRef: 'ZHIPU_API_KEY', mode: 't2i', style: 'openai' },
 }
 
-function providerName(id) {
-  const p = (App.providers?.configurable || []).find(x => x.provider === id)
-  const preset = PROVIDER_PRESETS.find(x => x.id === id)
-  return preset?.name || p?.displayName || id
-}
 
-function piProfiles() {
-  const pi = (App.providers?.settings || []).find(s => s.ns === 'llm-pi-ai')
-  return pi?.value?.providers || {}
-}
 
-function isRegistered(id) {
-  return (App.providers?.registered || []).some(x => x.id === id)
-}
 
-async function loadProviderData() {
-  const p = await api('/providers')
-  App.providers = p
-  try { App.image = (await api('/image')).config } catch { App.image = null }
-}
 
 /**
  * 生图接口配置表单（单独抽出来，两处共用）：
- *   · DSH 模式：显示在「模型接口」页底部（和 provider 管理放一起）
- *   · 独立模式：「模型接口」页被隐藏，它显示在「表情包」页里
+ *   · 只在「表情包」页出现（原「模型接口」页已按用户要求移除）
  *     （用户自己接入生图 API：地址 / 模型 / key）
  */
 function imageConfigHTML(img) {
@@ -607,98 +562,6 @@ function imageConfigHTML(img) {
     </div>`
 }
 
-async function renderProviders() {
-  view.innerHTML = '<div class="skel">读取 DSH 模型服务…</div>'
-  try { await loadProviderData() } catch (e) {
-    view.innerHTML = `<div class="card">读取失败：${esc(e.message)}<br><br><button class="btn" onclick="renderProviders()">重试</button></div>`
-    return
-  }
-  const P = App.providers
-  if (!P || !P.ok) {
-    view.innerHTML = `<div class="card">读取失败：${esc(P?.error || '未知错误')}<br><br><button class="btn" onclick="renderProviders()">重试</button></div>`
-    return
-  }
-  const profiles = piProfiles()
-  const ids = Array.from(new Set([...PROVIDER_PRESETS.map(x => x.id), ...Object.keys(profiles)]))
-  const covered = new Set(ids)
-  const otherRoutes = (P.registered || []).map(x => x.id).filter(id => !covered.has(id))
-  const cards = ids.map(id => {
-    const profile = profiles[id]
-    const reg = isRegistered(id)
-    const cred = P.credentials?.[id]
-    const preset = PROVIDER_PRESETS.find(x => x.id === id)
-    const status = reg ? '已启用' : (profile ? '已配置未启用' : '未配置')
-    const keyState = profile?.apiKeyEnv
-      ? `<span class="mono small">${esc(profile.apiKeyEnv)}</span> ${cred?.configured ? '<span style="color:var(--ok)">✅ 已配 key</span>' : '<span style="color:var(--warn)">⚠️ 未配 key</span>'}`
-      : '<span class="muted small">未设置 key</span>'
-    return `<div class="card">
-      <div class="t">${esc(providerName(id))} <span class="chip">${status}</span></div>
-      <div class="d"><span class="mono">${esc(id)}</span>${preset?.note ? ' · ' + esc(preset.note) : ''}</div>
-      <div class="small" style="margin-top:6px">Key：${keyState}</div>
-      ${profile?.baseURL ? `<div class="small muted" style="word-break:break-all">URL：${esc(profile.baseURL)}</div>` : ''}
-      ${profile?.models?.length ? `<div class="small muted">模型：${esc(profile.models.map(m => m.id).join(', '))}</div>` : ''}
-      <div class="row" style="margin-top:9px">
-        ${reg ? `<button class="btn" data-provider-test="${esc(id)}">测试</button>` : ''}
-        ${reg ? `<button class="btn" data-provider-chat="${esc(id)}">设为聊天</button>` : ''}
-        ${reg ? `<button class="btn" data-provider-vision="${esc(id)}">设为视觉</button>` : ''}
-        <button class="btn" data-provider-edit="${esc(id)}">编辑</button>
-        ${profile ? `<button class="btn danger" data-provider-del="${esc(id)}">删除</button>` : ''}
-      </div>
-    </div>`
-  }).join('')
-
-  const order = Object.fromEntries(PROVIDER_PRESETS.map((x, i) => [x.id, i]))
-  const options = (P.configurable || [])
-    .slice()
-    .sort((a, b) => ((order[a.provider] ?? 99) - (order[b.provider] ?? 99)) || a.provider.localeCompare(b.provider))
-    .map(x => `<option value="${esc(x.provider)}">${esc(x.provider)}${x.displayName && x.displayName !== x.provider ? '（' + esc(x.displayName) + '）' : ''}</option>`)
-    .join('')
-
-  const route = App.S.config
-  const img = App.image || {}
-  view.innerHTML = `<h2>模型接口 <span class="muted small">聊天 / 视觉 / 图像生成</span></h2>
-    <div class="section"><div class="hd">📍 当前路由</div>
-      <div class="row small">
-        <span>聊天：<b class="mono">${esc(route.provider || '(DSH 默认)')} / ${esc(route.model || '自动')}</b></span>
-        <span>视觉：<b class="mono">${esc(route.visionProvider || route.provider || '(同聊天)')} / ${esc(route.visionModel || '未设置')}</b></span>
-        <span>图像：<b class="mono">${esc(img.model || '未配置')}</b></span>
-      </div>
-      <div class="small muted" style="margin-top:6px">服务商来自 DSH 的 pi-ai 目录：保存即注册，无需重启。带 ✅ 表示该 key 引用已在凭据库配好。</div>
-      ${(!route.provider || !route.model) ? `<div class="banner bad show" style="margin-top:8px">⚠️ 聊天路由未显式设置（provider / model 为空）。DSH 那边选不出来时会直接抛「无法确定 LLM 路由」，表现为<b>完全不回话</b>。请在下方「已配置服务商」里点一个设为聊天模型。</div>` : ``}
-    </div>
-
-    <h3>已配置 / 内置服务商</h3>
-    <div class="grid">${cards}</div>
-    ${otherRoutes.length ? `<div class="small muted" style="margin-top:8px">DSH 里还注册了（由别的插件/账号提供）：${otherRoutes.map(esc).join('、')}</div>` : ''}
-
-    <div class="section" id="provider-form" style="margin-top:16px"><div class="hd">➕ 添加 / 编辑服务商</div>
-      <div class="field"><div class="lab">服务商</div><div class="ctl"><select id="pf-provider" style="min-width:260px">${options}</select>
-        <span class="muted small">选一个 pi-ai 认识的 provider；保存后自动注册路由</span></div></div>
-      <div class="field"><div class="lab">显示名</div><div class="ctl"><input id="pf-display" type="text" placeholder="例如 Claude / 我的网关" style="flex:1;min-width:220px"></div></div>
-      <div class="field"><div class="lab">API Key</div><div class="ctl"><input id="pf-key" type="password" placeholder="只写不读；留空 = 不修改" style="flex:1;min-width:260px"></div>
-        <div class="help">写进 DSH 凭据库；界面和配置里都只保留引用名，不会回显明文。</div></div>
-      <div class="field"><div class="lab">凭据引用</div><div class="ctl"><input id="pf-keyref" type="text" placeholder="留空自动生成，如 OPENAI_API_KEY" style="flex:1;min-width:220px"></div></div>
-      <div class="field"><div class="lab">Base URL</div><div class="ctl"><input id="pf-base" type="text" placeholder="可空；内置目录有默认端点" style="flex:1;min-width:260px"></div></div>
-      <div class="field"><div class="lab">协议</div><div class="ctl"><select id="pf-api">
-        <option value="">（用目录默认）</option><option value="openai-completions">openai-completions</option>
-        <option value="anthropic-messages">anthropic-messages</option><option value="openai-responses">openai-responses</option>
-      </select></div></div>
-      <div class="field"><div class="lab">模型清单</div><div class="ctl"><input id="pf-models" type="text" placeholder="逗号分隔；留空 = 用内置目录" style="flex:1;min-width:260px"></div></div>
-      <div class="row"><button class="btn primary" id="pf-save">保存</button><span id="pf-msg" class="small"></span></div>
-    </div>
-
-    <div class="section"><div class="hd">🧪 连通性测试 <span class="muted">会真实发一次极小的请求，消耗几个 token</span></div>
-      <div class="row"><select id="test-provider" style="min-width:220px">${(P.registered || []).map(x => `<option value="${esc(x.id)}">${esc(providerName(x.id))}（${esc(x.id)}）</option>`).join('')}</select>
-        <input id="test-model" type="text" placeholder="模型 id（留空=第一个）" style="flex:1;min-width:200px">
-        <button class="btn primary" id="btn-provider-test">测试</button></div>
-      <pre id="test-out" class="small mono" style="margin-top:10px;white-space:pre-wrap"></pre>
-    </div>
-
-    <h3>图像生成接口</h3>
-    ${imageConfigHTML(img)}`
-
-  bindProviderEvents()
-}
 
 /**
  * 绑定生图接口表单的事件（预设 / 保存 / 测试）。
@@ -750,107 +613,9 @@ function bindImageEvents(afterSave) {
     finally { btn.disabled = false; btn.textContent = '生成一张测试图' }
 }
 
-function bindProviderEvents() {
-  $$('[data-provider-edit]').forEach(b => b.onclick = () => fillProviderForm(b.dataset.providerEdit))
-  $$('[data-provider-del]').forEach(b => b.onclick = async () => {
-    const id = b.dataset.providerDel
-    if (!confirm('删除服务商「' + providerName(id) + '」的配置？\n（凭据保留，可重新启用）')) return
-    try {
-      await api('/providers/remove', { method: 'POST', body: JSON.stringify({ provider: id }) })
-      toast('已删除 ' + id, 'ok'); renderProviders()
-    } catch (e) { toast('删除失败：' + e.message, 'err') }
-  })
-  $$('[data-provider-test]').forEach(b => b.onclick = () => {
-    $('#test-provider').value = b.dataset.providerTest
-    $('#test-model').focus()
-    $('#provider-form')?.scrollIntoView({ behavior: 'smooth' })
-  })
-  $$('[data-provider-chat]').forEach(b => b.onclick = () => useProvider(b.dataset.providerChat, 'chat'))
-  $$('[data-provider-vision]').forEach(b => b.onclick = () => useProvider(b.dataset.providerVision, 'vision'))
-
-  $('#pf-provider').onchange = () => {
-    const id = $('#pf-provider').value
-    const profile = piProfiles()[id] || {}
-    $('#pf-display').value = profile.displayName || providerName(id)
-    $('#pf-base').value = profile.baseURL || ''
-    $('#pf-api').value = profile.api || ''
-    $('#pf-models').value = (profile.models || []).map(m => m.id).join(', ')
-    $('#pf-keyref').value = profile.apiKeyEnv || KEY_REF_SUGGEST[id] || ''
-  }
-  $('#pf-save').onclick = async () => {
-    const body = {
-      provider: $('#pf-provider').value,
-      displayName: $('#pf-display').value.trim(),
-      keyRef: $('#pf-keyref').value.trim(),
-      baseURL: $('#pf-base').value.trim(),
-      api: $('#pf-api').value,
-      models: $('#pf-models').value.trim(),
-    }
-    const key = $('#pf-key').value.trim()
-    if (key) body.apiKey = key
-    const btn = $('#pf-save'); btn.disabled = true; btn.textContent = '保存中…'
-    try {
-      await api('/providers/save', { method: 'POST', body: JSON.stringify(body) })
-      toast('已保存 ' + body.provider + '（路由已注册）', 'ok')
-      $('#pf-key').value = ''
-      renderProviders()
-    } catch (e) { toast('保存失败：' + e.message, 'err'); $('#pf-msg').textContent = e.message }
-    finally { btn.disabled = false; btn.textContent = '保存' }
-  }
-
-  $('#btn-provider-test').onclick = async () => {
-    const provider = $('#test-provider').value
-    const model = $('#test-model').value.trim()
-    const btn = $('#btn-provider-test'); btn.disabled = true; btn.textContent = '测试中…'
-    $('#test-out').textContent = ''
-    try {
-      const j = await api('/providers/test', { method: 'POST', body: JSON.stringify({ provider, model }) })
-      $('#test-out').textContent = `✅ ${j.provider} / ${j.model} · ${j.ms}ms\n返回：${j.text || '（空）'}`
-      toast('连通正常（' + j.ms + 'ms）', 'ok')
-    } catch (e) {
-      $('#test-out').textContent = '❌ ' + e.message
-      toast('测试失败：' + e.message, 'err')
-    } finally { btn.disabled = false; btn.textContent = '测试' }
-  }
-
-  bindImageEvents(() => renderProviders())
-  }
 }
 
-function fillProviderForm(id) {
-  const profile = piProfiles()[id] || {}
-  $('#pf-provider').value = id
-  $('#pf-display').value = profile.displayName || providerName(id)
-  $('#pf-base').value = profile.baseURL || ''
-  $('#pf-api').value = profile.api || ''
-  $('#pf-models').value = (profile.models || []).map(m => m.id).join(', ')
-  $('#pf-keyref').value = profile.apiKeyEnv || KEY_REF_SUGGEST[id] || ''
-  $('#pf-key').value = ''
-  $('#provider-form').scrollIntoView({ behavior: 'smooth', block: 'start' })
-}
 
-async function useProvider(id, target) {
-  let model = prompt('模型 id（留空 = 自动选第一个）\n服务商：' + id, '')
-  if (model === null) return
-  model = model.trim()
-  if (!model) {
-    try {
-      const j = await api('/providers/models?provider=' + encodeURIComponent(id))
-      const list = Array.isArray(j.models) ? j.models : []
-      const pick = target === 'vision' ? (list.find(m => (m.modalities || []).includes('image')) || list[0]) : list[0]
-      if (!pick) return toast('这个服务商没有可自动挑选的模型，请手填', 'err')
-      model = pick.id
-    } catch (e) { return toast('取模型列表失败：' + e.message, 'err') }
-  }
-  const patch = target === 'vision' ? { visionProvider: id, visionModel: model } : { provider: id, model }
-  try {
-    await api('/config', { method: 'POST', body: JSON.stringify({ patch }) })
-    if (target === 'vision') { App.S.config.visionProvider = id; App.S.config.visionModel = model }
-    else { App.S.config.provider = id; App.S.config.model = model }
-    toast((target === 'vision' ? '视觉' : '聊天') + '路由已切到 ' + id + ' / ' + model, 'ok')
-    renderHeader()
-  } catch (e) { toast('切换失败：' + e.message, 'err') }
-}
 
 
 function renderOverview() {
@@ -909,7 +674,7 @@ function renderOverview() {
 
   $('#btn-refresh').onclick = () => refresh();
   $('#btn-check').onclick = runSelfcheck;
-  // ★ 2026-10-28：以前只改 location.hash，但没有 hashchange 监听 → 点了停在总览不动。
+  // 以前只改 hash 但没有 hashchange 监听 → 点了停在总览不动
   $('#btn-diag').onclick = () => goTab('diag');
 
   // 崩溃卡：diag 比较慢（要连 hook），先显示"检测中"，拿到再回填
@@ -937,8 +702,7 @@ function renderHealthItems(h) {
 }
 
 async function runSelfcheck() {
-  // ★ 2026-10-28：总览页用 #btn-check/#health-list，运维页用 #btn-check2/#health-list2。
-  //   以前只更新总览那一套 → 在运维页点「立即自检」，后台真的在跑，页面却一动不动。
+  // 总览页用 #btn-check/#health-list，运维页用 #btn-check2/#health-list2 —— 两套都要动
   const btns = ['#btn-check', '#btn-check2'].map(sel => $(sel)).filter(Boolean);
   btns.forEach(b => { b.disabled = true; b.textContent = '检查中…'; });
   try {
@@ -1522,7 +1286,6 @@ async function renderMembersExtra() {
       const j = await api('/action', { method: 'POST', body: JSON.stringify({ op: 'names.refresh' }) });
       const r = j.result || {};
       if (r.ok === false) { st.textContent = '刷新失败：' + (r.error || '未知'); toast('刷新失败：' + (r.error || ''), 'err'); return }
-      // 显示真实的缓存规模与本次新增（后端现在会真去读 contact_fts.db）
       st.textContent = `已重读：群名 ${r.rooms} 个 / 人名 ${r.people} 个` +
         ((r.addedRooms || r.addedPeople) ? `（新增 群 ${r.addedRooms} · 人 ${r.addedPeople}）` : '（无新增）');
       toast('名字缓存已重新读取', 'ok');
@@ -1596,8 +1359,8 @@ async function renderVoiceExtra() {
   const cfg = App.S.config || {};
   box.innerHTML = `
     <div class="section"><div class="hd">🎭 音色</div>
-    <div class="small muted">音色由 GPT-SoVITS 的 <b>vits 权重</b>决定（看下面 TTS 卡片的「音色模型」）。
-      以前这里的「音色预设」下拉<b>没有任何消费方</b>，选了也不会变声，已移除。
+    <div class="small muted">音色由 GPT-SoVITS 的 <b>vits 权重</b>决定（见下面 TTS 卡片的「音色模型」）。
+      原来的「音色预设」下拉没有任何消费方、选了也不会变声，已移除。
       换音色的正确做法见 <span class="mono">docs/音色与TTS.md</span>。</div></div>
 
     <div class="section"><div class="hd">🔈 TTS 服务（GPT-SoVITS）</div>
@@ -1644,7 +1407,7 @@ async function renderVoiceExtra() {
       ttsStateEl.textContent = '⚪ 已停止（模型未加载）';
       ttsStateEl.className = 'pill';
     }
-    // 启停会改 config.voiceModelOn → 勾选框必须跟着变，否则"意图"和界面对不上
+    // 启停会改 config.voiceModelOn → 勾选框必须跟着变
     const autoEl = $('#tts-autostart');
     if (autoEl && typeof r.configOn === 'boolean' && autoEl.checked !== r.configOn) autoEl.checked = r.configOn;
     if (ttsConfigEl) {
@@ -1949,9 +1712,8 @@ function renderUpdate() {
   $('#upd-check').onclick = async () => {
     const btn = $('#upd-check'); btn.disabled = true; btn.textContent = '检查中…';
     try {
-      // ★ 2026-10-28：/action 只把 body.args 交给后端，以前 force 写在顶层 → 后端永远读到 false，
-      //   点了还要吃 60 秒缓存。
-      const j = await api('/action', { method:'POST', body: JSON.stringify({ op: 'checkUpdate', args: { force: true } }) });
+      // /action 只把 body.args 交给后端，force 写在顶层等于没传
+      const j = await api('/action', { method: 'POST', body: JSON.stringify({ op: 'checkUpdate', args: { force: true } }) });
       App.upd = j.result || {};
       toast(App.upd.available ? '发现新版本' : '已是最新', 'ok');
       renderUpdate();
@@ -2108,7 +1870,6 @@ async function renderMomentExtra() {
     try {
       const r = await api('/action', { method: 'POST', body: JSON.stringify({ op: 'momentNow', args: { image: true } }) });
       if (r.ok) {
-        // 配图可能失败后降级成纯文字 —— 不能一律说"带图"
         toast(r.withImage
           ? ('已发布（带图）：' + String(r.text || '').slice(0, 24))
           : ('已发布（纯文字，配图失败）：' + String(r.text || '').slice(0, 20)), r.withImage ? 'ok' : 'err');
@@ -2126,11 +1887,8 @@ async function renderMomentExtra() {
     try {
       const r = await api('/action', { method: 'POST', body: JSON.stringify({ op: 'postMoment', args: { text, image: withImg } }) });
       if (r.ok) {
-        if (withImg && !r.withImage) {
-          toast('已发布，但配图没生成（已按纯文字发出）：' + (r.imageError || '配图失败'), 'err');
-        } else {
-          toast(r.withImage ? '已发布（带图）' : '已发布', 'ok');
-        }
+        if (withImg && !r.withImage) toast('已发布，但配图没生成（已按纯文字发出）：' + (r.imageError || '配图失败'), 'err');
+        else toast(r.withImage ? '已发布（带图）' : '已发布', 'ok');
         ta.value = ''; cnt.textContent = '0 字';
       } else toast('失败：' + (r.error || ('ret=' + r.ret)), 'err');
     } catch (e) { toast('失败：' + e.message, 'err') }
@@ -2222,7 +1980,7 @@ function renderDiag() {
         </tbody></table>`}
         <table class="table" style="margin-top:10px"><tbody>
           ${row('LLM 路由', (llm.provider || '(空)') + ' / ' + (llm.model || '(空)'), !llm.explicit)}
-          ${llm.explicit ? '' : '<tr><td colspan="2" style="color:var(--warn)">⚠ 「聊天 provider/model」为空 —— DSH 路由缺失时会直接抛「无法确定 LLM 路由」，表现为完全不回话。请到「模型接口」页的当前路由里选定服务商/模型。</td></tr>'}
+          ${llm.explicit ? '' : '<tr><td colspan="2" style="color:var(--warn)">⚠ 「聊天 provider/model」为空 —— DSH 路由缺失时会直接抛「无法确定 LLM 路由」，表现为完全不回话。去「人设模型」页选 provider / model（联动下拉）。</td></tr>'}
           ${row('视觉', (llm.visionProvider || '(同聊天)') + ' / ' + (llm.visionModel || '(未设)'))}
           ${row('上次实际路由', llm.lastRoute ? (llm.lastRoute.provider || '') + ' / ' + (llm.lastRoute.model || '') : '—')}
         </tbody></table>
@@ -2352,8 +2110,7 @@ function renderManual() {
 
   fillRoomSelect($('#op-room'), true);
   fillRoomSelect($('#q-room'), true);
-  // ★ 2026-10-28：默认 op 就是 sendText，但行只在 onchange 里切 → 初始一直是 hidden。
-  //   这里初始化时按当前 op 同步一次。
+  // 默认 op 就是 sendText，但行只在 onchange 里切 → 初始要同步一次
   syncOpRows();
   ensureBridgeRooms().then(() => { fillRoomSelect($('#op-room'), true); fillRoomSelect($('#q-room'), true); });
   const syncOpRows = () => {
