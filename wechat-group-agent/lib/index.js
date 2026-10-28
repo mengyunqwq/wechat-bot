@@ -1012,9 +1012,12 @@ const namesFile = join(dirname(memoryDir), 'members.json')
   let namesFailAt = 0
   let namesLogged = ''
 
-  async function refreshNameCaches() {
-    if ((roomNameCache.size || contactNameCache.size) && Date.now() - namesAt < 2 * 60_000) return roomNameCache
-    if (namesFailAt && Date.now() - namesFailAt < 60_000) return roomNameCache
+  async function refreshNameCaches(force = false) {
+    // force=true：跳过 2 分钟 / 60 秒的节流（面板「刷新名字缓存」用，用户点了就得真去查）
+    if (!force) {
+      if ((roomNameCache.size || contactNameCache.size) && Date.now() - namesAt < 2 * 60_000) return roomNameCache
+      if (namesFailAt && Date.now() - namesFailAt < 60_000) return roomNameCache
+    }
     try {
       const ac = new AbortController()
       const timer = setTimeout(() => ac.abort(new Error('名字查询超时')), 8000)
@@ -5861,6 +5864,7 @@ let res = await callLlm(route, sys, usr, undefined)
         // ★ 60 秒节流：面板刷新会触发检查，GitHub 匿名限额只有 60 次/小时，
         //   连刷几次就 403，之后只能读 CDN 缓存（会看到版本倒退）。点按钮时带 force 绕过。
         const now = Date.now()
+        if (a.force) log('[checkUpdate] force=true → 跳过 60 秒节流，真的去查 GitHub')
         if (!a.force && updateState.lastResult && now - updateState.checkedAt < 60_000) {
           return updateState.lastResult
         }
@@ -6192,8 +6196,27 @@ let res = await callLlm(route, sys, usr, undefined)
         if (added.length) saveNames()
         return { ok: true, added, total: atNames.length }
       }
-      case 'names.refresh':
-        return { memberNames: config.memberNames || {}, atNames: [...atNames] }
+      case 'names.refresh': {
+        // ★ 2026-10-28：以前只把配置里的旧值原样返回，看起来"刷新成功"其实什么也没做。
+        //   现在真的重读 contact_fts.db（跳过节流），并回报前后变化。
+        const before = { rooms: roomNameCache.size, people: contactNameCache.size }
+        let err = ''
+        try { await refreshNameCaches(true) } catch (e) { err = String(e?.message || e).slice(0, 160) }
+        const after = { rooms: roomNameCache.size, people: contactNameCache.size }
+        log(`[names.refresh] 群名 ${before.rooms}→${after.rooms}｜人名 ${before.people}→${after.people}`)
+        return {
+          ok: !err,
+          error: err,
+          memberNames: config.memberNames || {},
+          atNames: [...atNames],
+          // 页面直接显示这两个数字，一眼看出到底刷没刷
+          rooms: after.rooms,
+          people: after.people,
+          addedRooms: Math.max(0, after.rooms - before.rooms),
+          addedPeople: Math.max(0, after.people - before.people),
+          at: Date.now(),
+        }
+      }
       default:
         throw new Error('未知操作：' + op)
     }

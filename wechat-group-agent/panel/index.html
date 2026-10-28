@@ -301,6 +301,7 @@ const NAV = [
   {id:'identity', title:'群与人', icon:'👥', groups:['identity'], special:'members'},
   {id:'moment', title:'朋友圈', icon:'📸', groups:['moment'], special:'moment'},
   {id:'model', title:'人设模型', icon:'🐟', groups:['model'], special:'model'},
+  {id:'providers', title:'模型接口', icon:'🔌'},   // ★ 2026-10-28：页面功能一直是完整的，只是漏了入口
   {id:'diag', title:'诊断', icon:'🔬', special:'diag'},
   {id:'update', title:'更新', icon:'📦', special:'update'},
   {id:'ops', title:'运维日志', icon:'🩺', groups:['health','selfheal','advanced'], special:'ops'},
@@ -464,6 +465,22 @@ function renderHeader() {
 }
 
 /* ── 导航 ─────────────────────────────────────────────── */
+/** 切页（导航 / 深链 / 页面内跳转都走它，避免各处自己改 App.tab） */
+function goTab(id) {
+  if (!NAV.some(n => n.id === id)) id = 'overview';
+  App.tab = id;
+  localStorage.setItem('wb:tab', id);
+  if (location.hash !== '#' + id) {
+    try { history.replaceState(null, '', '#' + id) } catch { location.hash = '#' + id }
+  }
+  renderNav();
+  renderActive({});
+}
+window.addEventListener('hashchange', () => {
+  const id = String(location.hash || '').replace(/^#/, '');
+  if (id && id !== App.tab && NAV.some(n => n.id === id)) goTab(id);
+});
+
 function renderNav() {
   $('#nav').innerHTML = NAV.map(n =>
     '<a href="#' + n.id + '" data-tab="' + n.id + '" class="' + (App.tab === n.id ? 'on' : '') + '">' + n.icon + ' ' + esc(n.title) + '</a>'
@@ -484,6 +501,7 @@ function renderActive(opts) {
   if (nav.id === 'overview') return renderOverview();
   if (nav.id === 'features') return renderFeatures();
   if (nav.id === 'manual') return renderManual();
+  if (nav.id === 'providers') return renderProviders();   // 异步渲染，return 掉即可
   if (nav.id === 'diag') return renderDiag();
   if (nav.id === 'update') return renderUpdate();
   if (nav.groups) {
@@ -891,7 +909,8 @@ function renderOverview() {
 
   $('#btn-refresh').onclick = () => refresh();
   $('#btn-check').onclick = runSelfcheck;
-  $('#btn-diag').onclick = () => { location.hash = '#diag'; };
+  // ★ 2026-10-28：以前只改 location.hash，但没有 hashchange 监听 → 点了停在总览不动。
+  $('#btn-diag').onclick = () => goTab('diag');
 
   // 崩溃卡：diag 比较慢（要连 hook），先显示"检测中"，拿到再回填
   loadDiag().then(d => {
@@ -1502,10 +1521,11 @@ async function renderMembersExtra() {
     try {
       const j = await api('/action', { method: 'POST', body: JSON.stringify({ op: 'names.refresh' }) });
       const r = j.result || {};
-      const people = Object.keys(r.memberNames || {}).length;
-      const ats = (r.atNames || []).length;
-      st.textContent = `已刷新：${people} 个人名 / ${ats} 个可 @ 的名字`;
-      toast('名字缓存已刷新', 'ok');
+      if (r.ok === false) { st.textContent = '刷新失败：' + (r.error || '未知'); toast('刷新失败：' + (r.error || ''), 'err'); return }
+      // 显示真实的缓存规模与本次新增（后端现在会真去读 contact_fts.db）
+      st.textContent = `已重读：群名 ${r.rooms} 个 / 人名 ${r.people} 个` +
+        ((r.addedRooms || r.addedPeople) ? `（新增 群 ${r.addedRooms} · 人 ${r.addedPeople}）` : '（无新增）');
+      toast('名字缓存已重新读取', 'ok');
     } catch (e) { st.textContent = '失败：' + e.message; toast('刷新失败：' + e.message, 'err') }
   };
   $('#btn-name-add').onclick = async () => {
@@ -1574,13 +1594,11 @@ async function loadMembers() {
 async function renderVoiceExtra() {
   const box = $('#voice-extra'); if (!box) return;
   const cfg = App.S.config || {};
-  const modelOn = cfg.voiceModelOn !== false;
-  const preset = cfg.voicePreset || '雌小鬼·A（当前）';
-  const PRESETS = ['雌小鬼·A（当前）','雌小鬼·B','雌小鬼·C','雌小鬼·D','训练版（12轮）'];
   box.innerHTML = `
-    <div class="section"><div class="hd">🎭 音色预设</div>
-    <div class="row"><select id="voice-preset" style="padding:4px">${PRESETS.map(o => `<option ${o===preset?'selected':''}>${esc(o)}</option>`).join('')}</select>
-      <span class="muted small">切换后立即生效</span></div></div>
+    <div class="section"><div class="hd">🎭 音色</div>
+    <div class="small muted">音色由 GPT-SoVITS 的 <b>vits 权重</b>决定（看下面 TTS 卡片的「音色模型」）。
+      以前这里的「音色预设」下拉<b>没有任何消费方</b>，选了也不会变声，已移除。
+      换音色的正确做法见 <span class="mono">docs/音色与TTS.md</span>。</div></div>
 
     <div class="section"><div class="hd">🔈 TTS 服务（GPT-SoVITS）</div>
       <div class="row">
@@ -1600,13 +1618,6 @@ async function renderVoiceExtra() {
       <div id="tts-msg" class="small" style="margin-top:8px">语音发不出来时先点「试合成」——它会真的合成一句，把服务端的报错原文显示在这里。</div>
     </div>
 `;
-  $('#voice-preset').onchange = async (e) => {
-    const v = e.target.value;
-    try {
-      await api('/config', { method:'POST', body: JSON.stringify({ patch: { voicePreset: v } }) });
-      toast('音色已切换：' + v, 'ok');
-    } catch (err) { toast('失败：' + err.message, 'err'); }
-  };
   // ── TTS 服务控制（状态 / 启动 / 停止 / 重启 / 试合成）──
   //   设计要点（2026-10-27 修）：
   //   · 点按钮**立刻**给反馈，不等后端；
@@ -1938,7 +1949,9 @@ function renderUpdate() {
   $('#upd-check').onclick = async () => {
     const btn = $('#upd-check'); btn.disabled = true; btn.textContent = '检查中…';
     try {
-      const j = await api('/action', { method: 'POST', body: JSON.stringify({ op: 'checkUpdate', force: true }) });
+      // ★ 2026-10-28：/action 只把 body.args 交给后端，以前 force 写在顶层 → 后端永远读到 false，
+      //   点了还要吃 60 秒缓存。
+      const j = await api('/action', { method:'POST', body: JSON.stringify({ op: 'checkUpdate', args: { force: true } }) });
       App.upd = j.result || {};
       toast(App.upd.available ? '发现新版本' : '已是最新', 'ok');
       renderUpdate();
@@ -2339,12 +2352,16 @@ function renderManual() {
 
   fillRoomSelect($('#op-room'), true);
   fillRoomSelect($('#q-room'), true);
+  // ★ 2026-10-28：默认 op 就是 sendText，但行只在 onchange 里切 → 初始一直是 hidden。
+  //   这里初始化时按当前 op 同步一次。
+  syncOpRows();
   ensureBridgeRooms().then(() => { fillRoomSelect($('#op-room'), true); fillRoomSelect($('#q-room'), true); });
-  $('#op').onchange = () => {
+  const syncOpRows = () => {
     const op = $('#op').value;
     $('#row-emotion').style.display = op === 'sayVoice' ? '' : 'none';
     $('#row-sticker').style.display = op === 'sendText' ? '' : 'none';
   };
+  $('#op').onchange = syncOpRows;
   $('#btn-send').onclick = async () => {
     const op = $('#op').value;
     const room = $('#op-room-manual').value.trim() || $('#op-room').value;
