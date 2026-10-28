@@ -298,6 +298,7 @@ const NAV = [
   {id:'senses', title:'感知', icon:'🖼', groups:['vision','link','douyin']},
   {id:'voice', title:'语音', icon:'🎙', groups:['voiceIn','voiceOut'], special:'voice'},
   {id:'memory', title:'记忆', icon:'🧠', groups:['memory'], special:'memory'},
+  {id:'inner', title:'内心', icon:'💭', groups:['persona'], special:'inner'},   // ★ 性格：心情/好恶/目标/日记/自传
   {id:'identity', title:'群与人', icon:'👥', groups:['identity'], special:'members'},
   {id:'moment', title:'朋友圈', icon:'📸', groups:['moment'], special:'moment'},
   {id:'model', title:'人设模型', icon:'🐟', groups:['model'], special:'model'},
@@ -500,6 +501,7 @@ function renderActive(opts) {
   if (nav.id === 'overview') return renderOverview();
   if (nav.id === 'features') return renderFeatures();
   if (nav.id === 'manual') return renderManual();
+  if (nav.id === 'inner') return renderInner();
   if (nav.id === 'diag') return renderDiag();
   if (nav.id === 'update') return renderUpdate();
   if (nav.groups) {
@@ -904,13 +906,15 @@ function renderModelExtra() {
   box.innerHTML = `<div class="section"><div class="hd">🎯 当前生效</div>
     <div class="row">
       <span class="pill">配置 <b>${esc((effProvider || '—') + ' / ' + (effModel || '—'))}</b>${followDsh ? '（跟随 DSH）' : ''}</span>
-      ${R ? `<span class="pill">上次实际调用 <b>${esc(R.provider + ' / ' + R.model)}</b></span>` : ''}
+      ${R ? `<span class="pill">大肥鱼上次调用 <b>${esc(R.provider + ' / ' + R.model)}</b></span>` : ''}
       ${dsh ? `<span class="pill">DSH 当前 <b>${esc(dsh.provider + ' / ' + dsh.model)}</b></span>` : ''}
       <button class="btn" id="btn-model-refresh">重新读取清单</button>
     </div>
     <div class="small muted" style="margin-top:8px">
       清单来自 DSH 已注册的 provider；<b>provider 留空 = 跟随 DSH 当前选择</b>。
-      ${mismatch ? '<br>⚠️ 配置和「上次实际调用」不同：刚改完的话，下一次回复就会一致（这一栏记的是上一次请求，不是配置）。' : ''}
+      ${mismatch ? '<br>⚠️ 配置和「大肥鱼上次调用」不同：刚改完的话，下一次回复就会一致（这一栏记的是上一次请求，不是配置）。' : ''}
+      <br>说明：「大肥鱼上次调用」只统计<b>她自己</b>发出的请求（文字用聊天模型、看图用视觉模型），
+      不会被 DSH 主对话或其他插件的模型调用影响。
       ${miss ? '<br>⚠️ 当前模型 <b>' + esc(cur.model) + '</b> 不在 <b>' + esc(C.modelsFor || '') + '</b> 的清单里，可能已下线，建议重选。' : ''}
       ${off ? '<br>另有 ' + off + ' 个 provider 未启用（需先在 DSH 里配 key）。' : ''}
       ${C.error ? '<br>⚠️ ' + esc(C.error) : ''}
@@ -1208,11 +1212,272 @@ function roomFrom(sel) {
 }
 
 /* ── 记忆 ─────────────────────────────────────────────── */
+/* ── 内心（性格四件套：心情/精力/亲密度 + 好恶 + 私人目标 + 自我叙事）── */
+async function renderInner() {
+  view.innerHTML = `<h2>内心 <span class="muted small">她是一个人：心情 / 好恶 / 想要什么 / 自传 / 日记 —— 所有群通用</span></h2>
+    <div class="row">
+      <span class="pill">全局 · 不分群</span>
+      <button class="btn" id="inner-load">刷新</button>
+      <button class="btn primary" id="inner-diary" title="让她现在就写一篇日记（走一次 LLM）">写一篇日记</button>
+      <button class="btn" id="inner-reroll" title="换一批私人目标">换个目标</button>
+      <button class="btn primary" id="inner-narrative" title="让她根据经历重写「我是个什么样的人」（身份/底线仍锁定）">重写自传</button>
+      <button class="btn" id="inner-reset-traits" title="把所有行为维度恢复到基线、清空调整记录">复位性格漂移</button>
+      <button class="btn" id="inner-review" title="让她读自己最近的发言，找出「太像客服/太长/太黏/太凶」的地方">自我复盘</button>
+      <span class="muted small" id="inner-st"></span></div>
+    <div id="inner-body" style="margin-top:12px"><div class="empty">选一个群，点「读取」。</div></div>`;
+  $('#inner-load').onclick = loadInner;
+  void loadInner();   // 全局一个人 → 打开就自动加载，不用选群
+  $('#inner-diary').onclick = async () => {
+    const btn = $('#inner-diary');
+    btn.disabled = true; btn.textContent = '正在写…';
+    try {
+      const j = await api('/action', { method: 'POST', body: JSON.stringify({ op: 'persona.diaryWrite', args: { room } }) });
+      const r = j.result || {};
+      if (r.ok) { toast('写完了：《' + (r.diary && r.diary.title || '无题') + '》', 'ok'); loadInner(); }
+      else toast('没写成：' + (r.reason || '未知'), 'err');
+    } catch (e) { toast('失败：' + e.message, 'err') }
+    finally { btn.disabled = false; btn.textContent = '写一篇日记' }
+  };
+  $('#inner-review').onclick = async () => {
+    const btn = $('#inner-review');
+    btn.disabled = true; btn.textContent = '反省中…';
+    try {
+      const j = await api('/action', { method: 'POST', body: JSON.stringify({ op: 'persona.selfReview', args: {} }) });
+      const r = j.result || {};
+      if (r.ok) toast('复盘完成：' + (r.findings || []).join('；'), 'ok');
+      else toast('没做成：' + (r.reason || '未知'), 'err');
+      loadInner();
+    } catch (e) { toast('失败：' + e.message, 'err') }
+    finally { btn.disabled = false; btn.textContent = '自我复盘' }
+  };
+  $('#inner-reset-traits').onclick = async () => {
+    if (!confirm('把所有行为维度恢复到基线，并清空调整记录？\n（她之后还会继续慢慢长，但这次回到原点）')) return;
+    try {
+      await api('/action', { method: 'POST', body: JSON.stringify({ op: 'persona.traitsReset', args: { room } }) });
+      toast('已复位', 'ok'); loadInner();
+    } catch (e) { toast('失败：' + e.message, 'err') }
+  };
+  $('#inner-narrative').onclick = async () => {
+    const btn = $('#inner-narrative');
+    if (!confirm('让她根据最近的经历重写"我是个什么样的人"？\n\n' +
+      '· 身份与底线（你写的人设）不会被改\n· 变化过大或出现出戏词会自动拒绝并保留旧版\n· 旧版本都留着，可回滚')) return;
+    btn.disabled = true; btn.textContent = '正在写…';
+    try {
+      const j = await api('/action', { method: 'POST', body: JSON.stringify({ op: 'persona.narrativeWrite', args: { room } }) });
+      const r = j.result || {};
+      if (r.ok) { toast('自传已更新到 v' + r.version, 'ok'); loadInner(); }
+      else toast('没写成（已保留旧版）：' + (r.reason || '未知'), 'err');
+    } catch (e) { toast('失败：' + e.message, 'err') }
+    finally { btn.disabled = false; btn.textContent = '重写自传' }
+  };
+  $('#inner-reroll').onclick = async () => {
+    try {
+      await api('/action', { method: 'POST', body: JSON.stringify({ op: 'persona.goalReroll', args: {} }) });
+      toast('目标已更新', 'ok'); loadInner();
+    } catch (e) { toast('失败：' + e.message, 'err') }
+  };
+}
+
+function bar(v, color) {
+  const pct = Math.max(0, Math.min(100, Math.round((Number(v) || 0) * 100)));
+  return `<div style="background:var(--line-2);border-radius:6px;height:8px;flex:1;min-width:80px">
+    <div style="width:${pct}%;background:${color};height:8px;border-radius:6px"></div></div>`;
+}
+
+async function loadInner() {
+  const box = $('#inner-body'); if (!box) return;
+  box.innerHTML = '<div class="empty">读取中…</div>';
+  try {
+    const j = await api('/action', { method: 'POST', body: JSON.stringify({ op: 'persona.state', args: {} }) });
+    const st = j.result || {};
+    let ld = null;
+    try {
+      const jl = await api('/action', { method: 'POST', body: JSON.stringify({ op: 'persona.load', args: {} }) });
+      ld = jl.result || null;
+    } catch { ld = null; }
+    let tr = null;
+    try {
+      const jt = await api('/action', { method: 'POST', body: JSON.stringify({ op: 'persona.traits', args: {} }) });
+      tr = jt.result || null;
+    } catch { tr = null; }
+    if (st.enabled === false) { box.innerHTML = '<div class="card">性格功能已关闭（配置 personaEnabled=false）</div>'; return }
+    const hum = st.human || null;
+    const m = st.mood || {};
+    const v = Number(m.valence) || 0;
+    const a = Number(m.arousal) || 0;
+    const e = Number(st.energy) || 0;
+    const aff = st.affinity || [];
+    const tastes = st.tastes || { likes: [], dislikes: [] };
+    const goals = st.goals || [];
+    const diary = st.diary || [];
+    box.innerHTML = `
+      <div class="section"><div class="hd">🫀 现在</div>
+        <div class="row"><span class="muted small" style="min-width:64px">心情</span>
+          <span class="small" style="min-width:52px">${v > 0 ? '😊' : v < -0.15 ? '😒' : '😐'} ${Math.round(v * 100)}%</span>
+          ${bar((v + 1) / 2, v < -0.15 ? 'var(--bad)' : 'var(--ok)')}
+          <span class="muted small" style="min-width:64px">精力</span>
+          <span class="small" style="min-width:52px">${e < 0.3 ? '😴' : e < 0.5 ? '🥱' : '🙂'} ${Math.round(e * 100)}%</span>
+          ${bar(e, e < 0.3 ? 'var(--bad)' : 'var(--ok)')}</div>
+        <div class="small muted" style="margin-top:6px">${esc((m.text) || '')}｜高涨度 ${Math.round(a * 100)}%</div>
+        ${(hum && hum.moodCause) ? `<div class="small" style="margin-top:4px">💭 心情来由：${esc(hum.moodCause)}</div>` : ''}
+        ${(hum && hum.body && hum.body.note) ? `<div class="small muted" style="margin-top:2px">🫧 ${esc(hum.body.note)}</div>` : ''}
+        ${(hum && hum.nag >= 1) ? `<div class="small" style="margin-top:2px;color:var(--warn)">😤 ${hum.nag >= 2 ? '被问烦了（语气会冲一点）' : '有点被问烦了'}</div>` : ''}
+        ${ld ? `<div class="small muted" style="margin-top:4px">⚡ ${esc(ld.text || '')}</div>` : ''}
+        <div class="small muted" style="margin-top:4px">被夸 ${(st.stats && st.stats.praised) || 0}｜被伤 ${(st.stats && st.stats.hurt) || 0}｜收消息 ${(st.stats && st.stats.msgs) || 0}｜写过 ${(st.stats && st.stats.diaries) || 0} 篇日记</div>
+      </div>
+
+      <div class="section"><div class="hd">🪞 自传（她自己写的"我是个什么样的人"）</div>
+        ${(() => {
+          const n = st.narrative || {};
+          if (!n.text) return '<div class="empty">还没写过。点上面「重写自传」让她认识一下自己（攒够 3 篇日记后也会自动写）。</div>';
+          const hist = (n.history || []).filter(x => x && x.text);
+          return `<div class="row"><span class="pill ok">v${n.version || 1}</span>
+              <span class="small muted">${esc(fmtTime(n.at))}${n.restoredFrom ? '（回滚自 v' + n.restoredFrom + '）' : ''}</span></div>
+            <div style="margin-top:8px;line-height:1.7">${esc(n.text)}</div>
+            ${hist.length ? `<div class="row" style="margin-top:10px">
+              <span class="muted small">历史版本</span>
+              <select id="nar-ver">${hist.map(x => `<option value="${x.version}">v${x.version} · ${esc(fmtTime(x.at))} · ${esc(String(x.text).slice(0, 18))}…</option>`).join('')}</select>
+              <button class="btn" id="nar-restore">回滚到这一版</button></div>` : ''}`;
+        })()}
+      </div>
+
+      <div class="section"><div class="hd">💞 她在意谁 <span class="muted small">（态度分三档，说话方式会不一样）</span></div>
+        ${(() => {
+          const rel = (hum && hum.relations) || [];
+          if (!rel.length) return '<div class="empty">还没有对谁形成印象。</div>';
+          const tierName = { close: '很熟·可以怼/撒娇', familiar: '算熟·正常聊', stranger: '不熟·礼貌不热络' };
+          return rel.map(x => `<div class="row" style="margin:3px 0">
+            <span class="small" style="min-width:130px">${esc(x.name || x.who)}</span>
+            ${bar(x.value, x.tier === 'close' ? 'var(--ok)' : x.tier === 'stranger' ? 'var(--warn)' : 'var(--accent)')}
+            <span class="small muted" style="min-width:44px">${Math.round(x.value * 100)}%</span>
+            <span class="small muted">${tierName[x.tier] || ''}</span></div>`).join('');
+        })()}
+      </div>
+
+      <div class="section"><div class="hd">😻 好恶（会自己长）</div>
+        <div class="row"><span class="muted small">喜欢</span>
+          ${(tastes.likes || []).map(x => `<span class="chip">${esc(x.text)} <span class="muted">${Math.round((x.weight || 0) * 100)}%</span> <a href="#" data-taste-del="likes" data-taste-text="${esc(x.text)}" style="text-decoration:none">×</a></span>`).join('') || '<span class="muted small">还没有</span>'}</div>
+        <div class="row" style="margin-top:6px"><span class="muted small">讨厌</span>
+          ${(tastes.dislikes || []).map(x => `<span class="chip">${esc(x.text)} <span class="muted">${Math.round((x.weight || 0) * 100)}%</span> <a href="#" data-taste-del="dislikes" data-taste-text="${esc(x.text)}" style="text-decoration:none">×</a></span>`).join('') || '<span class="muted small">还没有</span>'}</div>
+        <div class="row" style="margin-top:8px">
+          <select id="taste-kind"><option value="likes">喜欢</option><option value="dislikes">讨厌</option></select>
+          <input id="taste-text" type="text" placeholder="加一条（比如：被叫奶奶鱼）" style="flex:1;min-width:200px">
+          <button class="btn" id="taste-add">添加</button></div>
+      </div>
+
+      <div class="section"><div class="hd">📈 性格漂移（她自己长的，来自真实反馈）
+          <label class="hswitch" style="margin-left:8px" title="开=按群里的真实反应慢慢调整她的说话倾向；关=冻结当前值不再变化">
+            <span class="sw"><input type="checkbox" id="tr-enabled" ${tr && tr.enabled ? 'checked' : ''}><i></i></span>
+            <span class="small">${tr && tr.enabled ? '已开启' : '已关闭'}</span>
+          </label></div>
+        ${(() => {
+          if (!tr || !tr.traits) return '<div class="empty">读取中…</div>';
+          const labels = { humor: '爱玩梗', warmth: '黏人/撒娇', bluntness: '直白', chattiness: '话多', curiosity: '爱追问', edginess: '冒犯/阴阳', emoji: '爱发表情' };
+          const rows = Object.keys(labels).map(k => {
+            const v = Number(tr.traits[k]) || 0;
+            const bv = Number((tr.baseline || {})[k]) || 0;
+            const diff = v - bv;
+            return `<div class="row" style="margin:3px 0">
+              <span class="small" style="min-width:100px">${labels[k]}</span>
+              ${bar(v, Math.abs(diff) < 0.03 ? 'var(--accent)' : (diff > 0 ? 'var(--ok)' : 'var(--warn)'))}
+              <span class="small mono" style="min-width:46px">${Math.round(v * 100)}%</span>
+              <span class="small muted" style="min-width:64px">基线 ${Math.round(bv * 100)}%</span>
+              <span class="small" style="min-width:52px;color:${Math.abs(diff) < 0.03 ? 'var(--muted)' : (diff > 0 ? 'var(--ok)' : 'var(--bad)')}">
+                ${Math.abs(diff) < 0.03 ? '—' : (diff > 0 ? '↑' : '↓') + Math.abs(Math.round(diff * 100))}</span>
+            </div>`;
+          }).join('');
+          const log = tr.log || [];
+          const logHtml = log.length ? `<div class="small muted" style="margin-top:8px">最近调整（${log.length} 条）</div>
+            <div class="small" style="max-height:180px;overflow:auto;margin-top:4px">${log.slice(0, 12).map(x => {
+              const ds = Object.entries(x.delta || {}).map(([k, v]) => `${labels[k] || k} ${v > 0 ? '+' : ''}${Number(v).toFixed(3)}`).join('、');
+              const oc = { praise: '被夸', engage: '被接话', ignored: '被无视', hurt: '被怼', kick: '被踢' }[x.outcome] || x.outcome;
+              return `<div style="padding:2px 0;border-bottom:1px dashed var(--line)"><span class="muted">${esc(fmtTime(x.at))}</span> · ${oc} · ${esc(ds || '（无变化）')}</div>`;
+            }).join('')}</div>` : '<div class="small muted" style="margin-top:8px">还没有调整记录。要开这个功能：配置里把 personaFeedback 设为 true（建议先开着看几天日志）。</div>';
+          return rows + logHtml + `<div class="small muted" style="margin-top:8px">
+            规则：每次只动一点点；被怼时「冒犯」维度掉得最狠；被无视只算 0.3 倍；每小时向基线回落 2%（防极化）。</div>`;
+        })()}
+      </div>
+
+      <div class="section"><div class="hd">🎯 她最近想要的</div>
+        ${goals.length ? goals.map(g => `<div class="row" style="margin:4px 0">
+          <span class="small" style="min-width:230px">${g.done ? '✅' : '⭕'} ${esc(g.text)}</span>
+          ${bar(Math.min(1, (g.progress || 0) / 3), g.done ? 'var(--ok)' : 'var(--accent)')}
+          <span class="small muted">${g.progress || 0}/3</span></div>`).join('') : '<div class="empty">暂时没有目标（点「换个目标」）。</div>'}
+      </div>
+
+      <div class="section"><div class="hd">🗣 她学的群梗</div>
+        ${(() => {
+          if (!hum) return '<div class="empty">—</div>';
+          const lr = hum.learnedTerms || [];
+          const un = hum.unlearnedTerms || [];
+          const a1 = lr.length ? '<div class="row"><span class="muted small">已经会用</span>' + lr.map(t => `<span class="chip">${esc(t)}</span>`).join('') + '</div>' : '';
+          const a2 = un.length ? '<div class="row" style="margin-top:6px"><span class="muted small">还不太懂（会问）</span>' + un.map(x => `<span class="chip">${esc(x.term)} <span class="muted">${x.count}次</span></span>`).join('') + '</div>' : '';
+          return (a1 || a2) || '<div class="small muted">还没学到新梗（群里反复出现的词她会先问、再学着用）。</div>';
+        })()}
+      </div>
+
+      <div class="section"><div class="hd">🪞 自我复盘 <span class="muted small">（每周一次，她会反省自己说话的样子）</span></div>
+        ${(() => {
+          const sr = (hum && hum.selfReview) || null;
+          if (!sr || !(sr.findings || []).length) return '<div class="small muted">还没复盘过。点上面「自我复盘」。</div>';
+          return `<div class="small muted">${esc(fmtTime(sr.at))} · 她发现自己：</div>
+            <ul class="small" style="margin:6px 0 0 18px">${sr.findings.map(f => `<li>${esc(f)}</li>`).join('')}</ul>`;
+        })()}
+      </div>
+
+      <div class="section"><div class="hd">📖 她自己写的日记（最近 ${diary.length} 篇）</div>
+        ${diary.length ? diary.map(d => `<div style="padding:8px 0;border-bottom:1px dashed var(--line)">
+          <div class="small muted">${esc(fmtTime(d.at))}${d.title ? '　《' + esc(d.title) + '》' : ''}${d.mood ? '　' + esc(d.mood) : ''}</div>
+          <div style="margin-top:3px">${esc(d.text)}</div></div>`).join('') : '<div class="empty">还没写过。点上面「写一篇日记」。</div>'}
+      </div>`;
+
+    $$('[data-taste-del]').forEach(a => a.onclick = async (ev) => {
+      ev.preventDefault();
+      try {
+        await api('/action', { method: 'POST', body: JSON.stringify({ op: 'persona.tasteRemove', args: { kind: a.dataset.tasteDel, text: a.dataset.tasteText } }) });
+        toast('已删除', 'ok'); loadInner();
+      } catch (e) { toast(e.message, 'err') }
+    });
+    const trSw = $('#tr-enabled');
+    if (trSw) trSw.onchange = async () => {
+      const on = trSw.checked;
+      try {
+        await api('/config', { method: 'POST', body: JSON.stringify({ patch: { personaFeedback: on } }) });
+        toast(on ? '性格漂移已开启（会按真实反应慢慢调整，改动很小）' : '性格漂移已关闭（当前值冻结）', 'ok');
+        loadInner();
+      } catch (e) { toast('失败：' + e.message, 'err'); trSw.checked = !on }
+    };
+    const narBtn = $('#nar-restore');
+    if (narBtn) narBtn.onclick = async () => {
+      const ver = Number($('#nar-ver').value);
+      if (!confirm('回滚到 v' + ver + '？（会作为新的一版写回，历史仍保留）')) return;
+      try {
+        const x = await api('/action', { method: 'POST', body: JSON.stringify({ op: 'persona.narrativeRestore', args: { version: ver } }) });
+        const r = x.result || {};
+        if (r.ok) { toast('已回滚，新版本 v' + (r.narrative && r.narrative.version), 'ok'); loadInner(); }
+        else toast('回滚失败：' + (r.error || '未知'), 'err');
+      } catch (e) { toast(e.message, 'err') }
+    };
+    const addBtn = $('#taste-add');
+    if (addBtn) addBtn.onclick = async () => {
+      const kind = $('#taste-kind').value;
+      const text = $('#taste-text').value.trim();
+      if (!text) return toast('先写一条', 'err');
+      try {
+        const x = await api('/action', { method: 'POST', body: JSON.stringify({ op: 'persona.tasteAdd', args: { kind, text } }) });
+        const r = x.result || {};
+        toast(r.added ? '已添加' : '已存在（权重提升）', 'ok');
+        $('#taste-text').value = ''; loadInner();
+      } catch (e) { toast(e.message, 'err') }
+    };
+  } catch (e) { box.innerHTML = '<div class="card">读取失败：' + esc(e.message) + '</div>'; }
+}
+
 async function renderMemoryExtra() {
   const box = $('#memory-extra'); if (!box) return;
-  box.innerHTML = `<div class="section"><div class="hd">🧠 每群长期记忆</div>
-    <div class="row"><select id="mem-room" style="min-width:220px"></select>
-      <button class="btn" id="btn-mem-load">读取</button>
+  box.innerHTML = `<div class="section"><div class="hd">🧠 长期记忆 <span class="muted small">全局共享——她在哪个群都记得</span></div>
+    <div class="row"><span class="pill">全局 · 所有群共用</span>
+      <button class="btn" id="btn-mem-load">刷新</button>
       <button class="btn" id="btn-mem-extract">立即提炼</button>
       <button class="btn danger" id="btn-mem-clear">清空</button></div>
     <div class="row" style="margin-top:8px"><input id="mem-add" type="text" placeholder="手动加一条长期记忆" style="flex:1;min-width:220px">
@@ -1220,14 +1485,31 @@ async function renderMemoryExtra() {
     <div class="row" style="margin-top:8px">
       <label class="hswitch">看已归档 <span class="sw"><input type="checkbox" id="mem-show-archived"><i></i></span></label>
       <button class="btn" id="btn-mem-sweep" title="按遗忘曲线巡检一遍：归档该忘的、清理到期归档、容量超限按权重淘汰">跑一次遗忘巡检</button>
+      <button class="btn" id="btn-mem-purge" title="先预览，再决定清掉哪些低权重记忆（软删，30 天内可恢复）">清理低权重…</button>
       <span class="muted small" id="mem-sweep-st"></span>
     </div>
     <div id="mem-stats" class="small muted" style="margin-top:8px"></div>
     <div id="mem-list" class="muted small" style="margin-top:10px">选一个群，点「读取」。</div></div>`;
-  fillRoomSelect($('#mem-room'), false);
-  ensureBridgeRooms().then(() => fillRoomSelect($('#mem-room'), false));
+  void loadMemory();   // 全局记忆 → 打开就加载
   $('#btn-mem-load').onclick = loadMemory;
   $('#mem-show-archived').onchange = () => loadMemory();
+  $('#btn-mem-purge').onclick = async () => {
+    try {
+      const j = await api('/action', { method: 'POST', body: JSON.stringify({ op: 'memory.purgePreview', args: { maxWeight: 0.15, neverUsed: true } }) });
+      const r = j.result || {};
+      if (!r.count) return toast('没有符合条件（权重 < 0.15 且从未被用过）的记忆', 'ok');
+      const preview = (r.items || []).slice(0, 8).map(x => `· [w=${x.w}] ${String(x.text).slice(0, 34)}`).join('\n');
+      const msg = `有 ${r.count} 条低权重记忆（共 ${r.total} 条生效记忆）。\n\n` +
+        preview + (r.count > 8 ? `\n…还有 ${r.count - 8} 条` : '') +
+        `\n\n条件：权重（保持率×重要度）< 0.15，且从未被检索用过。\n` +
+        `会被归档（软删），30 天内可在「看已归档」里恢复。\n\n确定清理吗？`;
+      if (!confirm(msg)) return;
+      const x = await api('/action', { method: 'POST', body: JSON.stringify({ op: 'memory.purge', args: { maxWeight: 0.15, neverUsed: true, confirm: true } }) });
+      const rr = x.result || {};
+      toast(rr.done ? `已归档 ${rr.archived} 条（可在「看已归档」恢复）` : '已取消', rr.done ? 'ok' : 'err');
+      loadMemory();
+    } catch (e) { toast('失败：' + e.message, 'err') }
+  };
   $('#btn-mem-sweep').onclick = async () => {
     const st = $('#mem-sweep-st');
     st.textContent = '巡检中…';
@@ -1240,17 +1522,16 @@ async function renderMemoryExtra() {
     } catch (e) { st.textContent = '失败：' + e.message; toast('巡检失败：' + e.message, 'err') }
   };
   $('#btn-mem-add').onclick = async () => {
-    const room = roomFrom($('#mem-room')); const add = $('#mem-add').value.trim();
+    const add = $('#mem-add').value.trim();
     if (!add) return toast('先写点内容', 'err');
     try {
-      await api('/action', { method:'POST', body: JSON.stringify({ op:'memory.add', args:{ room, add } }) });
+      await api('/action', { method:'POST', body: JSON.stringify({ op:'memory.add', args:{ add } }) });
       $('#mem-add').value = ''; toast('已记住', 'ok'); loadMemory();
     } catch (e) { toast(e.message, 'err'); }
   };
   $('#btn-mem-extract').onclick = async () => {
-    const room = roomFrom($('#mem-room'));
     try {
-      const j = await api('/action', { method:'POST', body: JSON.stringify({ op:'memory.extract', args:{ room } }) });
+      const j = await api('/action', { method:'POST', body: JSON.stringify({ op:'memory.extract', args:{} }) });
       const r = j.result || {};
       if (r.ok === false) toast('没有提炼：' + (r.reason || '原因未知'), 'err');
       else if ((r.added || 0) > 0) toast('提炼完成：新增 ' + r.added + ' 条', 'ok');
@@ -1259,10 +1540,9 @@ async function renderMemoryExtra() {
     } catch (e) { toast(e.message, 'err'); }
   };
   $('#btn-mem-clear').onclick = async () => {
-    const room = roomFrom($('#mem-room'));
     if (!confirm('确定清空这个群的长期记忆？不可恢复。')) return;
     try {
-      await api('/action', { method:'POST', body: JSON.stringify({ op:'memory.clear', args:{ room }, confirm:'memory.clear' }) });
+      await api('/action', { method:'POST', body: JSON.stringify({ op:'memory.clear', args:{}, confirm:'memory.clear' }) });
       toast('已清空', 'ok'); loadMemory();
     } catch (e) { toast(e.message, 'err'); }
   };
@@ -1278,18 +1558,17 @@ function memRColor(R) {
 async function loadMemory() {
   const list = $('#mem-list'); if (!list) return;
   const statsBox = $('#mem-stats');
-  const room = roomFrom($('#mem-room'));
   const showArchived = !!(document.getElementById('mem-show-archived') || {}).checked;
   list.textContent = '读取中…';
   try {
-    const j = await api('/action', { method: 'POST', body: JSON.stringify({ op: 'memory.list', args: { room, archived: showArchived } }) });
+    const j = await api('/action', { method: 'POST', body: JSON.stringify({ op: 'memory.list', args: { archived: showArchived } }) });
     const r = j.result || {};
     const st = r.stats || {};
     const facts = r.facts || [];
     if (statsBox) {
       statsBox.innerHTML = r.v2 === false
         ? '<span style="color:var(--warn)">记忆 v2 已关闭（按时间取最后 18 条，无遗忘）</span>'
-        : `<b>${esc(r.roomName || room)}</b> · 生效 <b>${st.active || 0}</b> 条｜归档 ${st.archived || 0}｜固定 ${st.pinned || 0}`
+        : `<b>长期记忆</b> · 生效 <b>${st.active || 0}</b> 条｜归档 ${st.archived || 0}｜固定 ${st.pinned || 0}`
           + `｜平均保持率 <b style="color:${memRColor(st.avgRetention || 0)}">${((st.avgRetention || 0) * 100).toFixed(0)}%</b>`
           + `｜平均重要度 ${((st.avgImportance || 0) * 100).toFixed(0)}%`
           + `｜⚠️ 未来 7 天预计遗忘 <b>${st.willForgetIn7d || 0}</b> 条`
@@ -1302,7 +1581,7 @@ async function loadMemory() {
       return;
     }
     list.innerHTML = `<table class="table"><thead><tr>
-        <th style="width:44%">记忆</th><th>类型</th><th>情绪</th><th style="width:130px">保持率</th><th>重要度</th><th>用过</th><th style="width:190px">操作</th>
+        <th style="width:40%">记忆</th><th>来源</th><th>类型</th><th>情绪</th><th style="width:130px">保持率</th><th>重要度</th><th>用过</th><th style="width:190px">操作</th>
       </tr></thead><tbody>` + facts.slice().reverse().map((f) => {
         const R = typeof f.retention === 'number' ? f.retention : 0;
         const emo = (f.emotion && f.emotion.label) || '未知';
@@ -1310,6 +1589,7 @@ async function loadMemory() {
         const pin = f.pinned ? '📌' : '';
         return `<tr>
           <td>${pin}${esc(f.text)}</td>
+          <td class="small muted">${esc(f.sourceRoomName || f.sourceRoom || '—')}</td>
           <td class="mono small">${esc(f.kind || '')}</td>
           <td class="small">${esc(emo)}${intens >= 0.6 ? ' ★' : ''}</td>
           <td><div style="background:var(--line-2);border-radius:6px;height:8px;position:relative" title="保持率 ${(R * 100).toFixed(0)}%（强度 ${(f.strength || 0).toFixed(1)} 天）">
@@ -1326,14 +1606,14 @@ async function loadMemory() {
 
     $$('[data-mem-pin]').forEach(b => b.onclick = async () => {
       try {
-        const x = await api('/action', { method: 'POST', body: JSON.stringify({ op: 'memory.pin', args: { room, id: b.dataset.memPin } }) });
+        const x = await api('/action', { method: 'POST', body: JSON.stringify({ op: 'memory.pin', args: { id: b.dataset.memPin } }) });
         if (x.result && x.result.ok) { toast(x.result.pinned ? '已固定（永不遗忘）' : '已取消固定', 'ok'); loadMemory(); }
         else toast('失败：' + ((x.result && x.result.error) || '未知'), 'err');
       } catch (e) { toast(e.message, 'err') }
     });
     $$('[data-mem-review]').forEach(b => b.onclick = async () => {
       try {
-        const x = await api('/action', { method: 'POST', body: JSON.stringify({ op: 'memory.review', args: { room, id: b.dataset.memReview } }) });
+        const x = await api('/action', { method: 'POST', body: JSON.stringify({ op: 'memory.review', args: { id: b.dataset.memReview } }) });
         const rr = x.result || {};
         if (rr.ok) { toast('复习完成：强度 ' + rr.strengthBefore + 'd → ' + rr.strengthAfter + 'd', 'ok'); loadMemory(); }
         else toast('失败：' + (rr.error || '未知'), 'err');
@@ -1342,7 +1622,7 @@ async function loadMemory() {
     $$('[data-mem-arch]').forEach(b => b.onclick = async () => {
       const isArch = !!(facts.find(f => f.id === b.dataset.memArch) || {}).archived;
       try {
-        const x = await api('/action', { method: 'POST', body: JSON.stringify({ op: 'memory.archive', args: { room, id: b.dataset.memArch, archived: !isArch } }) });
+        const x = await api('/action', { method: 'POST', body: JSON.stringify({ op: 'memory.archive', args: { id: b.dataset.memArch, archived: !isArch } }) });
         const rr = x.result || {};
         if (rr.ok) { toast(rr.archived ? '已归档（30 天内可恢复）' : '已恢复', 'ok'); loadMemory(); }
         else toast('失败：' + (rr.error || '未知'), 'err');

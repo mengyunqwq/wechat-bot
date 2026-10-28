@@ -212,18 +212,70 @@ export function textRelevance(itemText, queryText) {
 }
 
 /**
+ * 把一段文本切成检索用的"词元"（中文 2-gram / 英文数字按词）。
+ * 和 textRelevance 用同一套切法，但可以单独拿来做 IDF 统计。
+ */
+export function queryGrams(text) {
+  const t = String(text || '').replace(/[^\p{L}\p{N}]+/gu, ' ').trim()
+  const set = new Set()
+  for (const w of t.split(/\s+/)) {
+    if (!w) continue
+    if (/^[ -]+$/.test(w)) set.add(w.toLowerCase())
+    else for (let i = 0; i < w.length - 1; i++) set.add(w.slice(i, i + 2))
+  }
+  return set
+}
+
+/** 统计每个查询词元在候选集里出现几次（用于 IDF：越稀有越重要） */
+export function buildDf(items, qGrams) {
+  const df = new Map()
+  const grams = qGrams instanceof Set ? qGrams : queryGrams(qGrams)
+  for (const g of grams) df.set(g, 0)
+  for (const it of items || []) {
+    const text = String(it && it.text || '')
+    for (const g of grams) if (text.includes(g)) df.set(g, (df.get(g) || 0) + 1)
+  }
+  return { df, N: (items || []).length, grams }
+}
+
+/**
+ * IDF 加权的相关性（0~1）。
+ * 为什么需要：不分权重时"梦云""秋北"这种稀有名字命中，和"的/了"这种常见字命中一样只算 1 次，
+ * 结果相关性只有 0.1 左右，压不过"新鲜度"，检索就变成"不管问什么都返回最新几条"。
+ */
+export function relevanceIdf(itemText, corpus, { df, N, grams }) {
+  const text = String(itemText || '')
+  const q = grams || queryGrams(corpus)
+  let total = 0
+  let hit = 0
+  for (const g of q) {
+    const d = Math.max(1, (df && df.get(g)) || 1)
+    const w = Math.log(1 + N / d)            // 稀有词权重大
+    total += w
+    if (text.includes(g)) hit += w
+  }
+  if (!total) return 0
+  const cover = hit / total
+  // 压缩到 0~1 且放大中段（0.2 → 0.45 左右），让"真的相关"明显胜过"碰巧新鲜"
+  return clamp01(1 - Math.exp(-2.6 * cover))
+}
+
+/**
  * 检索打分。
- * score = 0.30·R + 0.35·relevance + 0.20·importance + 0.10·emotionMatch + 0.05·recency
+ * score = 0.25·R + 0.45·相关性 + 0.20·重要度 + 0.10·情绪匹配  (×1.15 若 24h 内新建)
+ * 相关性给最大权重：先"说得上话"，再"牢不牢"。
  */
 export function scoreItem(item, ctx = {}) {
   const now = ctx.now || Date.now()
   const R = retention(item, now)
-  const rel = textRelevance(item.text, ctx.query || '')
+  const rel = ctx.corpus
+    ? relevanceIdf(item.text, ctx.query || '', ctx.corpus)
+    : textRelevance(item.text, ctx.query || '')
   const imp = clamp01(item.importance)
   const emo = ctx.emotion ? emotionMatch(item.emotion, ctx.emotion) : 0.5
   const ageH = Math.max(0, (now - num(item.createdAt, now)) / 3_600_000)
   const rec = ageH <= 24 ? num(ctx.cfg && ctx.cfg.newTryBoost, DEFAULTS.newTryBoost) : 1
-  const base = 0.30 * R + 0.35 * rel + 0.20 * imp + 0.10 * emo
+  const base = 0.25 * R + 0.45 * rel + 0.20 * imp + 0.10 * emo
   return base * rec
 }
 
@@ -238,7 +290,12 @@ export function selectMemories(list, ctx = {}) {
   const all = (Array.isArray(list) ? list : []).filter((x) => x && !x.archived)
   const n = Math.max(1, num(cfg.injectCount, DEFAULTS.injectCount))
 
-  const scored = all.map((it) => ({ it, score: scoreItem(it, { ...ctx, now, cfg }) }))
+  // 建一次 IDF 语料（每个查询词元在全库里的稀有度）
+  const corpus = ctx.query ? buildDf(all, queryGrams(ctx.query)) : null
+  const scored = all.map((it) => {
+    const rel = corpus ? relevanceIdf(it.text, ctx.query || '', corpus) : 0
+    return { it, rel, score: scoreItem(it, { ...ctx, now, cfg, corpus }) }
+  })
   scored.sort((a, b) => b.score - a.score)
 
   const picked = []
@@ -251,7 +308,11 @@ export function selectMemories(list, ctx = {}) {
   // ① pinned 必带（最多 pinnedMax 条，按分数取）
   for (const { it } of scored.filter((x) => x.it.pinned).slice(0, Math.max(0, num(cfg.pinnedMax, DEFAULTS.pinnedMax)))) take(it)
   // ② 高情绪记忆保底 2 条（情绪是记忆的钩子）
-  for (const { it } of scored.filter((x) => normalizeEmotion(x.it.emotion).intensity >= 0.6).slice(0, 2)) take(it)
+  //   ★ 必须"说得上话"（rel > 0.05）才算保底 —— 否则群里一句无关的"我操我操"会因为情绪强
+  //     被强行塞进任何话题，反而让检索显得乱（实测踩过）。
+  for (const { it, rel } of scored
+    .filter((x) => x.rel > 0.05 && normalizeEmotion(x.it.emotion).intensity >= 0.6)
+    .slice(0, 2)) take(it)
   // ③ 剩余按分数补足
   for (const { it } of scored) {
     if (picked.length >= n) break
@@ -440,4 +501,68 @@ export function guessEmotion(text) {
     if (hits > best.hits) best = { label, intensity: Math.min(0.9, 0.35 + hits * 0.2), hits }
   }
   return { label: best.label, intensity: best.intensity }
+}
+
+// ══════════════════════════════════════════════════════════════════════
+//  情绪回填 + 可遗忘清单（治"一堆未知标签"和"想手动清低权重"）
+// ══════════════════════════════════════════════════════════════════════
+
+/**
+ * 把 emotion.label === '未知' 的记忆，用本地词表从正文反推情绪（0 token）。
+ * - v1 迁移来的条目全是没有情绪数据的，标签清一色"未知"，面板上很难看
+ * - 同时按新情绪重算一次重要度，让"确实没什么情绪、也不重要"的条目自然掉到低位，
+ *   这样遗忘曲线才能正常把它们淘汰（不会所有条目都卡在 0.45 附近）
+ * 幂等：已经推断过的会被标记 emotionSource='inferred'，不会反复改。
+ */
+export function backfillEmotion(items, now = Date.now(), cfg = DEFAULTS) {
+  let changed = 0
+  const out = (items || []).map((it) => {
+    if (!it || !it.text) return it
+    const cur = normalizeEmotion(it.emotion)
+    if (cur.label !== '未知') return it
+    const guess = guessEmotion(it.text)
+    const emotion = normalizeEmotion(guess)
+    // ★ 只补情绪标签，**不动重要度**。
+    //   曾经顺手重算重要度（0.45 → ~0.27），结果 117 条会在 7 天内被自动遗忘 ——
+    //   "清哪些"该由用户决定，不能由一次数据修补替她做决定。
+    changed++
+    return { ...it, emotion, emotionSource: 'inferred' }
+  })
+  return { items: out, changed }
+}
+
+/**
+ * 找出"可以清掉"的记忆（面板清理按钮用，不自动删）。
+ * @param {object} opts
+ *   maxWeight      权重上限（R × 重要度）
+ *   onlyUnknown    只看情绪仍为"未知"的
+ *   neverUsed      只看从没被检索用过的
+ *   olderThanDays  只看存在超过 N 天的
+ *   minImportance / maxImportance  重要度区间（可用来避开"铁律"）
+ */
+export function findForgettable(items, opts = {}, now = Date.now()) {
+  const o = {
+    maxWeight: 0.15, onlyUnknown: false, neverUsed: true, olderThanDays: 0,
+    maxImportance: 0.84, ...opts,
+  }
+  const out = []
+  for (const it of (items || [])) {
+    if (!it || it.archived) continue
+    if (it.pinned) continue
+    const imp = clamp01(it.importance)
+    if (imp > o.maxImportance) continue                       // 铁律记忆不列
+    if (o.onlyUnknown) {
+      const l = normalizeEmotion(it.emotion).label
+      if (l !== '未知') continue
+    }
+    if (o.neverUsed && num(it.recallCount, 0) > 0) continue
+    const ageDays = (now - num(it.createdAt ?? it.at, now)) / DAY
+    if (ageDays < num(o.olderThanDays, 0)) continue
+    const R = retention(it, now)
+    const w = R * Math.max(0.05, imp)
+    if (w > num(o.maxWeight, 0.15)) continue
+    out.push({ ...it, _retention: +R.toFixed(3), _weight: +w.toFixed(3), _ageDays: Math.round(ageDays) })
+  }
+  out.sort((a, b) => a._weight - b._weight)
+  return out
 }

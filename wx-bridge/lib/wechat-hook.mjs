@@ -699,7 +699,10 @@ export class WeChatHookBridge {
           this.emit('msg', msg)
         },
         log: (s) => this.log(s),
-        intervalMs: Number(process.env.DB_POLL_MS || 2500),
+        // ★ 2026-10-28：2.5s → 6s。execute 次数从 ~3.4 万/天降到 ~1.4 万/天（−58%），
+        //   句柄失效窗口撞上轮询的概率同比降低；新消息延迟 +1.75s，对回复无感（LLM 本身要 2~5s）。
+        //   要改回去：设环境变量 DB_POLL_MS=2500，或改这里的默认值。
+        intervalMs: Number(process.env.DB_POLL_MS || 6000),
         // 读库失败 = hook/DB 探测失败 → 桥侧进入 30 秒禁止发送窗口（fail-closed）
         onReadFail: (why) => this.noteProbeFailure('轮询读库失败：' + String(why || '')),
         // 能轮询到数据库 = 强证据（但发送守卫仍以 /QueryDB/status 为准）

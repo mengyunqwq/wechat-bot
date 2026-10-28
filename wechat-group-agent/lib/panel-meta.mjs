@@ -492,6 +492,44 @@ export const CONFIG_META = {
     group: 'identity', label: '用数据库里的真实群成员名', type: 'bool',
   },
 
+  // ── 性格（内心）──────────────────────────────────────────
+  personaEnabled: {
+    group: 'persona', label: '性格系统总开关', type: 'bool',
+    help: '关掉后只剩人设文案：没有心情/精力/好恶/目标/日记/自传，行为完全回到旧版。',
+  },
+  personaSelfNarrative: {
+    group: 'persona', label: '让她自己写自传', type: 'bool',
+    help: '开 = 她会根据经历重写「我是个什么样的人」。身份与底线（人设）永远锁死，她改不了。',
+  },
+  personaDiaryHours: {
+    group: 'persona', label: '日记节奏', type: 'number', min: 0, max: 168, step: 1, unit: '小时',
+    help: '多久写一篇自己的日记。默认 24（每天一篇）；0 = 不写。',
+  },
+  personaNarrativeHours: {
+    group: 'persona', label: '自传节奏', type: 'number', min: 0, max: 168, step: 1, unit: '小时',
+    help: '多久允许重写一次自传。默认 24（每天一篇）。',
+  },
+  personaNarrativeMinDiaries: {
+    group: 'persona', label: '重写自传所需新日记', type: 'number', min: 0, max: 10, step: 1, unit: '篇',
+    help: '至少攒够几篇新日记才重写。日记每天一篇时填 1。',
+  },
+  personaNarrativeMaxDrift: {
+    group: 'persona', label: '自传最大变化', type: 'number', min: 0, max: 1, step: 0.05,
+    help: '与上一版相似度低于此值就拒绝（防人格突变）。默认 0.30；被拒会自动按上一版重试一次。',
+  },
+  personaFeedback: {
+    group: 'persona', label: '反馈驱动漂移', type: 'bool',
+    help: '开 = 按真实反应（被夸/被接话/被怼/被无视）慢慢调整她的说话倾向。风险最高的一项，建议先开着看日志。',
+  },
+  personaEnergyBasePerMin: {
+    group: 'persona', label: '精力负荷基准', type: 'number', min: 1, max: 60, step: 1, unit: '条/分',
+    help: '单个群时，每分钟多少条算满负荷。群越多容量自动变大（见下一项）。',
+  },
+  personaEnergyRoomBonus: {
+    group: 'persona', label: '每多一个群容量加成', type: 'number', min: 0, max: 2, step: 0.1,
+    help: '默认 0.6 = 每多一个活跃群，每分钟可处理量 +60%（群多不等于更累）。',
+  },
+
   // ── 人设与模型 ──────────────────────────────────────────────
   persona: {
     group: 'model', label: '人设', type: 'textarea',

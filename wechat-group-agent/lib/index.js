@@ -16,7 +16,9 @@
  */
 import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, unlinkSync, writeFileSync, copyFileSync, rmSync, openSync, closeSync } from 'node:fs'
 import { execFileSync, execSync, exec as execCb, spawn as spawnCb } from 'node:child_process'
-import * as MV2 from './memory-v2.mjs'   // 艾宾浩斯遗忘曲线 + 情绪加权（纯函数，可单测）
+import * as MV2 from './memory-v2.mjs?v=vmvry562n'   // 艾宾浩斯遗忘曲线 + 情绪加权（?v= 用于打破 ESM 缓存）
+import * as H2 from './human2.mjs'   // 第二轮人性化：承诺/纠错/沉默/追话/联想/自己的事
+import * as PS from './persona.mjs?v=vmvry562n'      // 性格四件套 + 自传（?v= 打破 ESM 缓存）
 import net from 'node:net'
 import { request as httpsRequest } from 'node:https'
 import { join, dirname } from 'node:path'
@@ -44,7 +46,7 @@ try {
 } catch { /* ignore */ }
 
 export const name = '@dsh-external/dsh-wechat-bot'
-export const version = '1.5.0'
+export const version = '2.0.0'
 // Cordis 4.0.4 的 inject 只认**数组**或"服务名→配置"映射；
 // 写成 { required, optional } 会让依赖解析失败、fiber 永远 pending（踩过：改了代码却一直跑旧实例）。
 // 这里只声明必然存在的两个服务；attachments（视觉识别用）改为**惰性获取**，
@@ -348,6 +350,8 @@ const DEFAULT_CONFIG = {
   voiceSayProbability: 0.2,        // 普通回复改成语音的概率
   voiceSayOnVoiceProbability: 0.5, // 收到**语音**消息时用语音回的概率（对称，最像真人）
   voiceSayMaxChars: 60,            // 超过这么多字就发文字（语音太长很怪）
+  voiceMinGapSec: 90,              // ★ 两条语音最小间隔（秒）。连发语音会让微信退出（2026-10-28 事故）
+  voiceMaxPer10Min: 3,             // ★ 10 分钟内最多发几条语音（同上，防对象所有权撞车）
   visionCacheMax: 500,           // 识图结果缓存条数（同一张图只识别一次；超出丢最早的）
   visionProvider: 'opencodego-extra',
   visionModel: 'deepseek-v4-flash-vision-exp',
@@ -406,6 +410,8 @@ const DEFAULT_CONFIG = {
   memoryExtract: true,            // 定期从群聊里提炼长期记忆（本地保存，每次对话都带上）
   // ── 记忆系统 v2（艾宾浩斯遗忘曲线 + 情绪加权）──────────────────
   memoryV2: true,                 // 总开关；false = 退回旧逻辑（slice(-18) 注入、不遗忘）
+  memoryScope: 'global',          // global = 所有群共用一份记忆（她是一个人）；room = 每群独立
+  memoryGlobalMax: 400,           // 全局记忆上限（比单群大，因为有多个群的来源）
   memoryBaseDays: 7,              // S0 基准天数（越大越不容易忘）
   memoryForgetWeight: 0.06,       // 遗忘判据：R × 重要度 低于此值 → 归档
   memoryMinAgeDays: 2,            // 不到这个天数的记忆不归档（给新记忆机会）
@@ -417,6 +423,46 @@ const DEFAULT_CONFIG = {
   memoryRecallGamma: 1.2,         // 被用到一次 → 强度增益系数
   memoryPinnedMax: 3,             // 固定记忆必带条数上限
   memoryConsolidate: 'daily',     // 遗忘巡检频率：off | hourly | daily
+  // ── 性格（状态机 / 自我叙事 / 好恶 / 私人目标）──────────────────
+  personaEnabled: true,           // 总开关：关掉就只用 persona 文案，行为完全不变
+  personaDiaryHours: 24,          // 多久写一篇"自己的日记"（默认每天一篇；0=不写）
+  personaMaxGoals: 3,             // 同时保留几个私人目标
+  personaSeedLikes: 2,            // 初始随机喜欢几条（之后由她自己长）
+  personaSeedDislikes: 1,         // 初始随机讨厌几条
+  personaMoodFollow: 0.35,        // 情绪对心情的影响强度（越大越情绪化）
+  // ── 精力负荷（她一个人应付多个群）──────────────────────────
+  // ★ 2026-10-28 修：原来 6 条/分钟太低 —— 群里正常聊天就是 5~6 条/分钟，
+  //   负荷常年 99%，精力被压在 0.15 下限，她会一直"很困、句子短"。
+  //   24 条/分钟 = 需要相当密集的刷屏才算累。
+  personaEnergyBasePerMin: 24,    // 单个群时，每分钟多少条算"满负荷"
+  personaEnergyRoomBonus: 0.6,    // 每多一个活跃群，容量 +60%（群多不等于更累）
+  personaEnergyMaxRooms: 8,       // 活跃群数上限（再多也不线性加）
+  // ── 更像人的细节（B~I）────────────────────────────────────
+  humanImperfectRecall: true,     // B：记不清就说得含糊（按保持率 R 分级表达）
+  humanMoodCause: true,           // C：心情要有来由（能说出"为什么"）
+  humanRelationTiers: true,       // E：对熟人/生人态度不同
+  humanLearnTerms: true,          // F：遇到群里的新词会先问、再学着用
+  humanBodyState: true,           // H：只"困/饿"，且必须自洽（不编造生活）
+  humanPatience: true,            // I：被连续追问会不耐烦（但不拒答）
+  humanSelfReviewDays: 7,         // G：每几天做一次自我复盘（0=不做）
+  humanProactiveTopic: true,      // D：闲置时主动抛自己喜欢的话题
+  humanProactiveChance: 0.08,     //     每次检查时主动开话题的概率
+  humanProactiveIdleMin: 40,      //     群里安静多少分钟后才考虑
+  humanPromise: true,             // 2：答应的"等下帮你找"到点会回来兑现
+  humanCorrection: true,          // 3：被纠正后会改记忆（而不是嘴硬到底）
+  humanSilence: true,             // 4：知道什么时候不该说话（吵架/别人互聊/刚被冷场）
+  humanFollowUp: true,            // 6：说完一句，过一会儿可能自己补一句
+  humanActivity: true,            // 7：安静久了会做点自己的事（只用真实素材，不编事实）
+  humanAssociation: true,         // 9：被聊天里的词勾起的回忆（不是随机抽奖）
+  // ── 自传：人设的作者从"你"变成"她自己" ──────────────────────
+  personaSelfNarrative: true,     // 开=她会根据经历重写"我是个什么样的人"（identity/底线仍由 persona 锁定）
+  personaNarrativeHours: 24,      // 多久允许重写一次（默认每天）
+  personaNarrativeMinDiaries: 1,  // 至少攒够几篇新日记才重写（日记每天一篇 → 1 篇即可）
+  personaNarrativeMaxDrift: 0.30, // 与上一版的最低相似度（低于=人格突变，拒绝并保留旧版）
+  // ── 方案⑥ 反馈驱动的性格漂移 ──────────────────────────────
+  personaFeedback: false,         // 默认关！先观察日志再决定开（风险最高的一项）
+  personaFeedbackLr: 0.018,       // 学习率（每次调整幅度）
+  personaFeedbackSettleMin: 10,   // 发言后多少分钟结算反馈
   // 问过的问题等多久算"还没人接"（这期间不再主动追问同一件事）
   pendingQuestionWaitMs: 45 * 60_000,
   minReplyGapMs: 6_000,          // 同群两次回复最小间隔（对话延续时只要求 2s）
@@ -440,6 +486,9 @@ const DEFAULT_CONFIG = {
   debounceMs: 1200,              // 连发消息合并窗口（实测 2.2s 太拖，压到 1.2s）
   // 表情包：库里现成的 + 可用 Agnes 现场生成的情绪
   stickerChance: 0.22,           // 文字后补表情包的概率
+  // ★ 2026-10-28 修：面板「表情包」页有这个可编辑字段，但 DEFAULT_CONFIG 里没有 →
+  //   改它保存会报「未知参数：genEmotions」。补上真身。
+  genEmotions: ['开心', '生气', '难过', '害羞', '无语', '得意', '委屈', '震惊', '摸鱼', '吃饭', '睡觉', '打游戏'],
   voiceImageExclusive: true,     // 同一轮回复里不同时发语音和图片/表情包（避免客户端偶发崩溃）
   genActivities: ['吃饭', '睡觉', '摸鱼', '打游戏', '上班', '加班', '写代码', '喝奶茶', '做饭', '洗澡', '看书', '发呆', '健身', '追剧', '逛街', '起床', '下雨', '夏天', '冬天', '被夸', '被骂', '撒娇', '等消息'],
     genEmotions: ['大笑', '开心', '得意', '无语', '生气', '委屈', '震惊', '困', '馋', '害羞', '认真', '比心', '点赞', '疑惑', '晚安', '摸鱼'],
@@ -836,7 +885,16 @@ const BUILD_VER = '2026-10-23.4'   // 抬版本：让新实例压过热重载残
       applied.push({ key: k, value: v })
       if (k === 'quietHours' && quietNext) { quietWindows.length = 0; quietWindows.push(...quietNext) }
     }
-    for (const r of rooms.values()) r.policy.cfg = config
+    // ★ 2026-10-28 事故：这里原来是 `r.policy.cfg = config`，
+    //   而"全局内心/记忆"用了一个合成的 _global 房间（没有 policy 字段），
+    //   于是**任何一次面板保存配置都会在这里抛 TypeError**：
+    //     Cannot set properties of undefined (setting 'cfg')
+    //   → /config 返回 500、改动不落盘。加防御 + 用 try 包住，别让一行影响整体保存。
+    try {
+      for (const r of rooms.values()) {
+        if (r && r.policy && typeof r.policy === 'object') r.policy.cfg = config
+      }
+    } catch { /* 单个房间异常不能拖垮配置保存 */ }
     // voiceModelOn 变化 → 真正启停 api_v2
     //  ★ 原来这里是 `catch { /* ignore */ }`，把 ReferenceError 全吞了，
     //    导致「开关开着但模型没起」这种问题被隐藏了几个月。现在记日志。
@@ -947,6 +1005,10 @@ const namesFile = join(dirname(memoryDir), 'members.json')
   const rooms = new Map()
   const timers = new Set()
   let lastRoute = null
+  // ★ 2026-10-28 修：llm/stream 是 DSH 的全局事件，**DSH 主对话自己调模型也会触发**。
+  //   之前无条件记录，导致面板"上次调用"显示的是 DSH 主对话的模型（比如 opencodego-extra），
+  //   而不是大肥鱼实际用的模型。现在只在本插件发起调用时（callDepth > 0）才记录。
+  let pluginLlmDepth = 0
     // ★ 只记「非视觉模型」的那次调用 —— 识图/读视频帧会走 visionModel，
     //   不能让它污染文本路由（否则挑视频/写评论会拿到视觉模型，
     //   报 UNSUPPORTED_REASONING_EFFORT 直接空回复，实测 2026-10-20 13:06）。
@@ -1006,7 +1068,7 @@ const namesFile = join(dirname(memoryDir), 'members.json')
 
   // 观察主模型路由（waterfall 必须 next() 委托，否则会掐断主流程）
   ctx.on('llm/stream', (options, next) => {
-    if (options?.provider && options?.model) {
+    if (pluginLlmDepth > 0 && options?.provider && options?.model) {
         lastRoute = { provider: options.provider, model: options.model }
         if (!config.visionModel || options.model !== config.visionModel) {
           lastTextRoute = { provider: options.provider, model: options.model }
@@ -1226,6 +1288,8 @@ const namesFile = join(dirname(memoryDir), 'members.json')
     }
 
     r.msgs.push({ id: m.id || '', ts, isSelf: !!m.isSelf, sender: m.sender, senderName, text: m.text })
+    // 性格：每条消息都过一遍状态机（心情/精力/亲密度/目标进度）
+    try { personaOnMessage(r, m) } catch { /* 性格坏不影响对话 */ }
     if (r.msgs.length > 300) r.msgs = r.msgs.slice(-300)
     if (++r.dirty >= 20) saveMemory(r)
   }
@@ -1311,6 +1375,18 @@ const namesFile = join(dirname(memoryDir), 'members.json')
       case 'login': {
         log('微信登录成功 self=' + evt.self)
         if (evt.self) bridgeSelf = evt.self
+        // ★ 2026-10-28：客户端重启后桥会进"硬闸"（hardStopped）—— 那是为了防野指针崩微信，
+        //   但以前只能人工调 /api/pollResume。登录成功 = 新句柄已就绪，此时放闸是安全的。
+        void (async () => {
+          try {
+            const ps = await client.call('pollStatus', {}, 6000)
+            if (ps && (ps.hardStopped || ps.paused)) {
+              log(`检测到桥在${ps.hardStopped ? '硬闸' : '暂停'}中，但微信已登录 → 自动放闸恢复轮询`)
+              await client.call('pollResume', {}, 15000)
+              log('自动放闸完成（轮询应立即恢复）')
+            }
+          } catch (e) { log('自动放闸失败（可手动点诊断页的"恢复轮询"）：' + String(e?.message || e).slice(0, 100)) }
+        })()
         // 桥连上微信 → 自动打开控制面板（用户要求「桥开了自动打开面板」）
         void maybeOpenPanel().catch(() => {})
         // 客户端（重）启动过 → 轮询有短暂空窗，期间的消息不会进上下文 → 主动回补
@@ -1324,8 +1400,24 @@ const namesFile = join(dirname(memoryDir), 'members.json')
         // 桥说数据库打不开了 → 自己发一句话，让微信写库、打开 message_0.db，轮询随即恢复。
         // 这样**不用重启客户端**（重启可能要手机确认登录，用户明确说不想手动点）。
         lastWakeAt = Date.now()      // 记下来：健康自检把它当"轮询有问题"的强证据
+        // ★ 2026-10-28：原来没有任何限流 —— 客户端退出后 75 秒内连发 7 次、全是
+        //   "wake 失败：fetch failed"（桥已经禁发），既没用又在给客户端加负担。
+        //   两道闸：① 桥在硬闸/暂停中就别发（发了也白发）② 最多 3 次/10 分钟
         void (async () => {
           try {
+            try {
+              const ps = await client.call('pollStatus', {}, 5000)
+              if (ps && (ps.hardStopped || ps.paused)) {
+                log('wake 跳过：桥处于硬闸/暂停中（此时发消息也送不出去）')
+                return
+              }
+            } catch { /* 拿不到状态就继续按限流走 */ }
+            wakeTimes = wakeTimes.filter((t) => Date.now() - t < 10 * 60_000)
+            if (wakeTimes.length >= 3) {
+              log('wake 跳过：10 分钟内已唤醒 ' + wakeTimes.length + ' 次（上限 3）')
+              return
+            }
+            wakeTimes.push(Date.now())
             // 唤醒是【技术动作】（让微信写库、打开 message_0.db），不是社交发言：
             // 发到文件传输助手，群里完全看不到 → 因此不受安静时段限制
             // （以前发群里，半夜被静音掉 → 库打不开 → 机器人一直听不见 ✗）
@@ -1572,6 +1664,55 @@ const namesFile = join(dirname(memoryDir), 'members.json')
   // 三层：① 消息级短期记忆（r.msgs）② 长期事实（facts，这里）③ 群成员名字（已有）
   const factsDir = join(dirname(memoryDir), 'facts')
   const factsFile = (roomId) => join(factsDir, String(roomId).replace(/[^\w@.-]/g, '_') + '.json')
+  const globalFactsPath = join(factsDir, '_all.json')
+
+  /** 记忆是不是全局共享（她不按群记事） */
+  const globalMemory = () => config.memoryScope !== 'room'
+
+  /** 该群的记忆文件 → 全局模式下所有群都指向同一份 */
+  const factsPathFor = (roomId) => (globalMemory() ? globalFactsPath : factsFile(roomId))
+
+  /**
+   * 首次启用全局记忆时，把各群的历史记忆合并成一份（幂等）。
+   * 每条保留 sourceRoom，便于面板显示"这条是哪来的"；合并时按文字相似度去重。
+   */
+  function migrateToGlobalMemory() {
+    if (!globalMemory()) return { merged: 0, from: 0 }
+    let exists = false
+    try { exists = Array.isArray(JSON.parse(readFileSync(globalFactsPath, 'utf8'))) } catch { exists = false }
+    if (exists) return { merged: 0, from: 0, already: true }
+    let files = []
+    try { files = readdirSync(factsDir).filter((f) => f.endsWith('.json') && f !== '_all.json') } catch { return { merged: 0, from: 0 } }
+    const all = []
+    const seen = []
+    for (const f of files) {
+      let arr = []
+      try { arr = JSON.parse(readFileSync(join(factsDir, f), 'utf8')) } catch { continue }
+      const roomId = f.replace(/\.json$/, '')
+      for (const it of Array.isArray(arr) ? arr : []) {
+        const text = String(it && it.text || '').trim()
+        if (!text) continue
+        const n = normFact(text)
+        if (seen.some((x) => factSimilar(x, n))) continue   // 跨群去重
+        seen.push(n)
+        all.push({ ...it, sourceRoom: it.sourceRoom || roomId })
+      }
+    }
+    const mig = MV2.migrateList(all, Date.now(), memCfg())
+    const withIds = MV2.ensureIds(mig.items, Date.now())
+    try {
+      mkdirSync(factsDir, { recursive: true })
+      writeFileSync(globalFactsPath, JSON.stringify(withIds.items, null, 2))
+      // 旧文件挪到备份目录（不删，可回滚）
+      const bk = join(factsDir, 'per-room-backup-' + Date.now())
+      mkdirSync(bk, { recursive: true })
+      for (const f of files) { try { renameSync(join(factsDir, f), join(bk, f)) } catch { /* ignore */ } }
+      log(`记忆合并为全局库：${files.length} 个群 → ${withIds.items.length} 条（旧文件已备份到 ${bk}）`)
+    } catch (e) {
+      log('记忆合并失败：' + String(e?.message || e).slice(0, 140))
+    }
+    return { merged: withIds.items.length, from: files.length }
+  }
 
   /** 记忆 v2 的参数（每次现算，面板改了立即生效） */
   function memCfg() {
@@ -1589,16 +1730,29 @@ const namesFile = join(dirname(memoryDir), 'members.json')
     }
   }
 
+  /** 给"来源群"补上可读的群名（面板显示用；roomNameCache 有就用它） */
+  function enrichSourceNames(arr) {
+    for (const it of (arr || [])) {
+      if (!it || it.sourceRoomName || !it.sourceRoom) continue
+      const n = roomNameCache.get(it.sourceRoom)
+      if (n && !String(n).endsWith('@chatroom')) it.sourceRoomName = n
+    }
+    return arr
+  }
+
   function loadFacts(r) {
     try {
-      const saved = JSON.parse(readFileSync(factsFile(r.roomId), 'utf8'))
+      const saved = JSON.parse(readFileSync(factsPathFor(r.roomId), 'utf8'))
       let arr = Array.isArray(saved) ? saved : []
       // v2：旧数据（{text,kind,at}）自动补 强度/情绪/重要度/id
       if (config.memoryV2 !== false) {
         const needRebase = arr.some((x) => x && x.migratedFrom === 'v1')   // 旧条目需按新基准重算强度
         const mig = MV2.migrateList(arr, Date.now(), memCfg())
         const withIds = MV2.ensureIds(mig.items, Date.now())
-        arr = withIds.items
+        // 补情绪标签：v1 迁移来的条目情绪全是"未知"，用本地词表从正文反推（0 token）
+        const bf = MV2.backfillEmotion(withIds.items, Date.now())
+        arr = bf.items
+        if (bf.changed) { r.facts = arr; saveFacts(r); log(`记忆情绪回填：${bf.changed} 条「未知」→ 按正文推断`) }
         r.facts = arr
         if (mig.changed || withIds.changed || needRebase) {
           log(`记忆迁移 v1→v2：${r.roomName || r.roomId} ${mig.changed} 条补字段、${withIds.changed} 条补 id（已落盘）`)
@@ -1608,6 +1762,7 @@ const namesFile = join(dirname(memoryDir), 'members.json')
         r.facts = arr
       }
     } catch { r.facts = [] }
+    enrichSourceNames(r.facts)
     return r.facts
   }
 
@@ -1620,9 +1775,12 @@ const namesFile = join(dirname(memoryDir), 'members.json')
       //   归档条目也一起留盘上（有 geometry 上限，30 天后 sweep 会清）。
       const active = all.filter((x) => !x.archived)
       const archived = all.filter((x) => x.archived).slice(-200)
-      const cap = Math.max(20, Number(config.memoryMaxActive) || 120) + 40   // 留一点余量给 sweep 前
+      const baseMax = globalMemory()
+        ? (Number(config.memoryGlobalMax) || 400)
+        : (Number(config.memoryMaxActive) || 120)
+      const cap = Math.max(20, baseMax) + 40   // 留一点余量给 sweep 前
       const kept = active.slice(-cap).concat(archived)
-      writeFileSync(factsFile(r.roomId), JSON.stringify(kept, null, 2))
+      writeFileSync(factsPathFor(r.roomId), JSON.stringify(kept, null, 2))
       r.facts = kept
     } catch { /* ignore */ }
   }
@@ -1761,6 +1919,9 @@ const namesFile = join(dirname(memoryDir), 'members.json')
         sources: (meta && Array.isArray(meta.sources) ? meta.sources : []).slice(0, 3),
       }
       const withIds = MV2.ensureIds([item], Date.now())
+      // 全局记忆：记下"这条是从哪个群学到的"（不限制使用范围，只保留出处）
+      withIds.items[0].sourceRoom = r.roomId
+      withIds.items[0].sourceRoomName = r.roomName || r.roomId
       r.facts.push(withIds.items[0])
       log(`长期记忆 +1（${kind}｜重要度 ${importance.toFixed(2)}｜情绪 ${emotion.label}${emotion.intensity >= 0.6 ? '★' : ''}）`)
     } else {
@@ -1861,9 +2022,40 @@ let res = await callLlm(route, sys, usr, undefined)
    * 记忆巡检：按遗忘曲线归档该忘的、清掉归档到期的、容量超限按权重淘汰。
    * 每群独立跑；只在有变化时才落盘（避免无意义的写）。
    */
+  /** 空闲恢复精力：没有消息时慢慢回血（每次巡检/定时器调用） */
+  function personaIdleRecover(now = Date.now()) {
+    if (config.personaEnabled === false) return
+    for (const r of rooms.values()) {
+      try {
+        const st = personaOf(r)
+        const next = PS.recoverEnergy(st, now, loadCfg())
+        if (next !== st) { r.__persona = next; savePersona(r, next) }
+        break   // 全局模式下只需处理一次
+      } catch { /* ignore */ }
+    }
+  }
+
   function memorySweepAll(now = Date.now()) {
     const cfg = memCfg()
     const out = { rooms: 0, archived: 0, purged: 0, evicted: 0, total: 0 }
+    // ★ 全局模式：所有群共用一份记忆 → 只巡检一次，否则每个群都会写同一个文件（互相覆盖）
+    if (globalMemory()) {
+      const any = rooms.values().next().value
+      const facts = (any && any.facts) || (() => {
+        try { return JSON.parse(readFileSync(globalFactsPath, 'utf8')) } catch { return [] }
+      })()
+      if (!Array.isArray(facts) || !facts.length) return out
+      const res = MV2.sweep(facts, now, cfg)
+      out.rooms = 1
+      out.total = res.items.length
+      if (res.archived || res.purged || res.evicted) {
+        try { writeFileSync(globalFactsPath, JSON.stringify(res.items, null, 2)) } catch { /* ignore */ }
+        for (const r of rooms.values()) r.facts = res.items   // 所有群指向同一份
+        out.archived += res.archived; out.purged += res.purged; out.evicted += res.evicted
+        log(`记忆巡检（全局）：归档 ${res.archived}｜清理 ${res.purged}｜容量淘汰 ${res.evicted}（生效 ${res.items.filter((x) => !x.archived).length} 条）`)
+      }
+      return out
+    }
     for (const r of rooms.values()) {
       const facts = r.facts || []
       if (!facts.length) continue
@@ -1882,6 +2074,712 @@ let res = await callLlm(route, sys, usr, undefined)
     return out
   }
 
+  // ── 性格状态（每群一份：心情/精力/亲密度/好恶/目标/日记）──────────
+  const personaDir = join(dirname(memoryDir), 'persona')
+  const personaFile = (roomId) => join(personaDir, String(roomId).replace(/[^\w@.-]/g, '_') + '.json')
+  const globalPersonaPath = join(personaDir, '_global.json')
+  /** 性格（心情/好恶/目标/自传）是否全局 —— 跟随 memoryScope */
+  const personaPathFor = (roomId) => (globalMemory() ? globalPersonaPath : personaFile(roomId))
+
+  function personaCfg() {
+    return {
+      diaryEveryMs: (Number(config.personaDiaryHours) || 6) * 3_600_000,
+      maxGoals: Number(config.personaMaxGoals) || 3,
+      seedLikes: config.personaSeedLikes === undefined ? 2 : Number(config.personaSeedLikes),
+      seedDislikes: config.personaSeedDislikes === undefined ? 1 : Number(config.personaSeedDislikes),
+      moodFollow: Number(config.personaMoodFollow) || 0.35,
+    }
+  }
+
+  function narrativeCfg() {
+    return {
+      minDiaries: Number(config.personaNarrativeMinDiaries) || 3,
+      maxDrift: config.personaNarrativeMaxDrift === undefined ? 0.30 : Number(config.personaNarrativeMaxDrift),
+    }
+  }
+
+  /**
+   * 让她重写"我是个什么样的人"（自传）。
+   * 分三层：persona（用户写的身份+底线，不可改）→ narrative（她自己写，会演化）→ 状态。
+   * 两道护栏：身份锚点不能丢、单次改写不许剧烈漂移（失败就保留旧版）。
+   */
+  async function writeNarrative(r, { force = false } = {}) {
+    if (config.personaEnabled === false || config.personaSelfNarrative === false) {
+      return { ok: false, reason: '自传功能已关闭' }
+    }
+    const st = personaOf(r)
+    const everyMs = (Number(config.personaNarrativeHours) || 24) * 3_600_000
+    const gate = PS.shouldWriteNarrative(st, Date.now(), {
+      everyMs,
+      minDiaries: Number(config.personaNarrativeMinDiaries) || 3,
+    })
+    if (!force && !gate.ok) return { ok: false, reason: gate.reason }
+
+    const cur = st.narrative || {}
+    let memBlock = []
+    try {
+      const sel = MV2.selectMemories(r.facts || [], {
+        now: Date.now(),
+        query: (st.diary || []).slice(0, 5).map((d) => d.text).join(' '),
+        cfg: memCfg(),
+      })
+      memBlock = sel.picked || []
+    } catch { /* 记忆不可用不影响 */ }
+
+    const { sys, usr } = PS.buildNarrativePrompt({
+      core: config.persona || '',
+      state: st,
+      diaries: st.diary || [],
+      memories: memBlock,
+      prev: cur.text || '',
+    })
+    let res = null
+    try {
+      const route = resolveRoute()
+      stats.llmCalls++
+      res = await callLlm(route, sys, usr, undefined)
+      if (!String(res && res.text || '').trim()) res = await callLlm(route, '', sys + '\n\n' + usr, undefined)
+    } catch (e) {
+      log('写自传失败：' + String(e?.message || e).slice(0, 140))
+      return { ok: false, reason: String(e?.message || e).slice(0, 140) }
+    }
+    const raw = String(res && res.text || '').trim().replace(/^```[\s\S]*?```$/g, '').trim()
+    let text = raw
+    let check = PS.validateNarrative(text, { core: config.persona || '', prev: cur.text || '', cfg: narrativeCfg() })
+    // 只因"变化过大"被拒 → 自动重试一次，明确要求贴着上一版改（每天重写很容易写飞）
+    if (!check.ok && /变化过大/.test(check.reason) && cur.text) {
+      log(`自传变化过大，正在按上一版重试一次（v${cur.version || 0}）`)
+      try {
+        const sys2 = sys + String.fromCharCode(10,10) + '这次必须**保留上一版的措辞和结构**，只做小幅增删（改不超过三成），不要重写。'
+        const usr2 = usr + `
+
+【上一版原文，请在此基础上微调】
+${cur.text}`
+        stats.llmCalls++
+        const r2 = await callLlm(route, sys2, usr2, undefined)
+        const raw2 = String(r2 && r2.text || '').trim().replace(/^```[\s\S]*?```$/g, '').trim()
+        const check2 = PS.validateNarrative(raw2, { core: config.persona || '', prev: cur.text || '', cfg: narrativeCfg() })
+        if (check2.ok) { text = raw2; check = check2 }
+      } catch (e) { log('自传重试失败：' + String(e?.message || e).slice(0, 100)) }
+    }
+    if (!check.ok) {
+      log(`自传被护栏拦下（保留旧版 v${cur.version || 0}）：${check.reason}`)
+      return { ok: false, reason: check.reason, rejected: true }
+    }
+    const next = PS.writeNarrative(st, text, Date.now(), narrativeCfg())
+    savePersona(r, next)
+    log(`自传更新 v${next.narrative.version}：${text.slice(0, 70)}…`)
+    return { ok: true, version: next.narrative.version, text, previous: cur.text || '' }
+  }
+
+  /** 取（或首次创建）某个群的性格状态 */
+  function personaOf(r) {
+    if (r.__persona) return r.__persona
+    let st = null
+    try {
+      const raw = JSON.parse(readFileSync(personaPathFor(r.roomId), 'utf8'))
+      if (raw && typeof raw === 'object') st = raw
+    } catch { /* 首次 */ }
+    if (!st) {
+      st = PS.createState(r.roomId, Date.now(), personaCfg())
+      log(`性格状态初始化「${r.roomName || r.roomId}」：喜欢 ${st.tastes.likes.map((x) => x.text).join('、') || '无'}｜讨厌 ${st.tastes.dislikes.map((x) => x.text).join('、') || '无'}｜目标「${(st.goals[0] || {}).text || '无'}」`)
+      savePersona(r, st)
+    }
+    // traits 缺失就补上并落盘（面板要显示，漂移也要有基线）
+    if (!st.traits) {
+      try {
+        st = PS.ensureTraits(st, Date.now())
+        savePersona(r, st)
+        log('性格：已初始化行为维度（traits）')
+      } catch { }
+    }
+    r.__persona = st
+    return st
+  }
+
+  function savePersona(r, st) {
+    try {
+      mkdirSync(personaDir, { recursive: true })
+      r.__persona = st
+      writeFileSync(personaPathFor(r.roomId), JSON.stringify(st, null, 1))
+    } catch { /* ignore */ }
+  }
+
+  function loadCfg() {
+    return {
+      basePerMin: Number(config.personaEnergyBasePerMin) || 24,
+      roomBonus: config.personaEnergyRoomBonus === undefined ? 0.6 : Number(config.personaEnergyRoomBonus),
+      maxRooms: Number(config.personaEnergyMaxRooms) || 8,
+    }
+  }
+
+  /** 最近 2 小时内有消息的群 → 算"同时活跃几个群" */
+  function activeRoomCount(now = Date.now()) {
+    let n = 0
+    for (const r of rooms.values()) {
+      const last = (r.msgs || []).reduce((m, x) => Math.max(m, Number(x.ts) || 0), 0)
+      if (last && now - last < 2 * 3_600_000) n++
+    }
+    return Math.max(1, n)
+  }
+
+  /**
+   * 内心/记忆是全局的，所以面板不该再要求选群。
+   * 这里拿"随便一个已有群"当载体（只为了复用 roomState 的容器），拿不到就用合成对象。
+   */
+  let globalHostCache = null
+  function globalHostRoom() {
+    // 取第一个真实群当"载体"（内心/记忆是全局的，具体哪个群无所谓）
+    for (const r of rooms.values()) {
+      if (r && r.policy) return r
+    }
+    // 一个真实群都没有时（插件刚启动、还没收到消息）→ 用一个脱壳对象，
+    // **不要塞进 rooms**：塞进去会让 resolveRoom 之类按名字查找时冒出"找不到群：_global"，
+    // 而且它没有 policy，曾导致面板保存配置整体报错（2026-10-28）。
+    if (!globalHostCache) {
+      globalHostCache = {
+        roomId: '_global', roomName: '全局', msgs: [], facts: [], memberNames: [],
+        policy: { cfg: config }, recentReplies: [],
+      }
+    }
+    return globalHostCache
+  }
+
+  // ── 2：承诺追踪（她说"等下帮你找"，到点真回来）──────────────
+  function promiseState(r) {
+    const st = personaOf(r)
+    return (st.promises || [])
+  }
+  function notePromise(r, text) {
+    if (config.humanPromise === false) return
+    try {
+      const p = H2.detectPromise(text)
+      if (!p) return
+      const st = personaOf(r)
+      const list = (st.promises || []).filter((x) => x && !x.done).slice(-4)
+      list.push({ ...p, roomId: r.roomId })
+      savePersona(r, { ...st, promises: list })
+      log(`承诺已登记：${String(p.text).slice(0, 40)}（${Math.round((p.dueAt - Date.now()) / 60000)} 分钟后该兑现）`)
+    } catch { /* ignore */ }
+  }
+
+  /** 到点的承诺 → 让她回来说一句（走正常发消息路径） */
+  async function fulfillPromises() {
+    if (config.humanPromise === false) return { done: 0 }
+    let n = 0
+    for (const r of rooms.values()) {
+      try {
+        const st = personaOf(r)
+        const list = st.promises || []
+        const due = H2.duePromises(list, Date.now())
+        if (!due.length) continue
+        for (const p of due.slice(0, 1)) {
+          const okSend = await sendPromiseFollowUp(r, p)
+          const next = list.map((x) => (x && x.at === p.at && x.text === p.text ? { ...x, done: true, doneAt: Date.now(), spoken: !!okSend } : x))
+          savePersona(r, { ...st, promises: next })
+          if (okSend) { n++; log(`承诺已兑现：${String(p.text).slice(0, 40)}`) }
+        }
+        // 过期作废
+        const dead = H2.expirePromises(st.promises || [], Date.now())
+        if (dead.length) {
+          const keep = (st.promises || []).filter((x) => !dead.includes(x))
+          savePersona(r, { ...st, promises: keep })
+        }
+      } catch (e) { log('兑现承诺失败：' + String(e?.message || e).slice(0, 100)) }
+    }
+    return { done: n }
+  }
+
+  async function sendPromiseFollowUp(r, promise) {
+    try {
+      const route = resolveRoute()
+      stats.llmCalls++
+      const res = await callLlm(route, buildSystem(r), H2.promiseFulfillPrompt(promise), config.reasoningEffort || undefined)
+      let text = cleanReply(res.text, { maxLen: config.maxReplyChars, maxLines: 0 })
+      if (!text) return false
+      const sent = await client.call('sendText', { roomId: r.roomId, text }, 30_000)
+      if (sent && (sent.rc === 0 || sent.rc === undefined || sent.ok !== false)) {
+        push(r, { ts: Date.now(), isSelf: true, sender: 'self', senderName: '我', text })
+        return true
+      }
+      return false
+    } catch (e) { log('兑现承诺发送失败：' + String(e?.message || e).slice(0, 100)); return false }
+  }
+
+  /**
+   * 6：连续追击 —— 说完一句，过一会儿自己补一句。
+   * 只在"群里还没接话"时补，避免打断别人；一轮最多两次。
+   */
+  async function sendFollowUp(r, plan) {
+    if (config.humanFollowUp === false) return false
+    try {
+      // 这期间有人说话了 → 不补（别打断）
+      const lastOther = (r.msgs || []).filter((m) => m && !m.isSelf).slice(-1)[0]
+      const lastSelfTs = Number(r.__followUpSentAt) || 0
+      if (lastOther && Number(lastOther.ts) > lastSelfTs + 1000 && Date.now() - Number(lastOther.ts) < 60_000) {
+        return false
+      }
+      const st = personaOf(r)
+      const prompt = `你刚才说过一句，现在自己又想起一点补充（或者想问一句）。开头可以用「${plan.seed}」，也可以不用。`
+        + '保持很短（不超过 25 字），像真人随口补一句，不要总结、不要问候。'
+      const route = resolveRoute()
+      stats.llmCalls++
+      const res = await callLlm(route, buildSystem(r), prompt, config.reasoningEffort || undefined)
+      const text = cleanReply(res.text, { maxLen: 60, maxLines: 0 })
+      if (!text || text.length < 2) return false
+      // 同一条不发两遍
+      if ((r.sentTexts || []).slice(-6).some((x) => normText(x.text) === normText(text))) return false
+      const sent = await client.call('sendText', { roomId: r.roomId, text }, 30_000)
+      if (sent && (sent.rc === 0 || sent.rc === undefined || sent.ok !== false)) {
+        r.__followUpSentAt = Date.now()
+        r.__followUpCount = (Number(r.__followUpCount) || 0) + 1
+        ;(r.sentTexts ||= []).push({ text, at: Date.now() })
+        if (r.sentTexts.length > 40) r.sentTexts = r.sentTexts.slice(-40)
+        push(r, { ts: Date.now(), isSelf: true, sender: 'self', senderName: '我', text })
+        log('补了一句：' + text.slice(0, 40))
+        return true
+      }
+      return false
+    } catch (e) {
+      log('补一句失败：' + String(e?.message || e).slice(0, 90))
+      return false
+    }
+  }
+
+  /** 消息驱动的状态更新（每条群消息都过一遍，纯内存计算，很便宜） */
+  function personaOnMessage(r, m) {
+    if (config.personaEnabled === false) return
+    if (!m || m.isSelf) return
+    try {
+      const st = personaOf(r)
+      const text = String(m.text || '')
+      const atBot = m.isAtMe || (config.botName && text.includes(config.botName)) || /大肥鱼|肥鱼|鲸鱼娘/.test(text)
+      const emo = MV2.guessEmotion(text)
+      let next = PS.applyMessage(st, { emotion: emo, sender: m.sender, text, isSelf: false, atBot }, Date.now(), personaCfg())
+      // ★ 精力：不再"每条扣一点"（群一多就长期困死），改成按消息速率 + 活跃群数算负荷
+      try {
+        const hour = new Date().getHours()
+        next = PS.updateEnergyLoad(next, {
+          activeRooms: activeRoomCount(),
+          now: Date.now(),
+          night: hour >= 0 && hour < 6,
+          cfg: loadCfg(),
+        })
+      } catch { /* 精力模型坏了不影响对话 */ }
+      // 踩到好恶：即时影响心情（讨厌的事会真不高兴）
+      const hit = PS.tasteHit(next, text)
+      if (hit) {
+        const dv = hit.kind === 'like' ? 0.08 * hit.weight : -0.18 * hit.weight
+        next = { ...next, mood: { ...next.mood, valence: Math.max(-1, Math.min(1, next.mood.valence + dv)) } }
+        if (hit.kind === 'dislike') log(`性格：「${r.roomName}」被踩到讨厌的点（${hit.text}）→ 心情下降`)
+        if (config.humanMoodCause !== false) {
+          const who = nameOf(m.sender, m.senderName) || 'someone'
+          next = PS.pushMoodLog(next, {
+            reason: who + (hit.kind === 'dislike' ? ' touched a thing she hates: ' : ' mentioned something she likes: ') + hit.text,
+            delta: dv,
+            valenceAfter: next.mood.valence,
+          })
+        }
+      }
+      // 3：群友在纠正她 → 改记忆（而不是嘴硬到底）
+      try {
+        if (config.humanCorrection !== false) {
+          const corr = H2.detectCorrection(text)
+          if (corr) {
+            const res2 = H2.applyCorrection(r.facts || [], corr, Date.now())
+            if (res2.changed) {
+              r.facts = res2.items
+              saveFacts(r)
+              log(`记忆已按纠正更新：${String(corr.raw).slice(0, 50)}`)
+            }
+          }
+        }
+      } catch { /* ignore */ }
+      // I: repeated questions from the same person wear on her patience
+      try { if (config.humanPatience !== false && atBot) next = PS.noteQuestion(next, m.sender) } catch { }
+      // F: new slang in the group (local heuristic, no LLM)
+      //   关键：用"她本来就认识的词"当基准 —— 记忆库 + 她自己说过的话里出现过的，
+      //   一律不算新梗。否则 2~4 字切片会把"图片/居然能够/每天都在"这种普通词当成梗
+      //   （实测踩过：词表被普通词塞满，还把"图片"当成学会的梗）。
+      try {
+        if (config.humanLearnTerms !== false) {
+          const STOP = new Set(['我们', '你们', '他们', '这个', '那个', '什么', '怎么', '可以', '就是', '不是',
+            '没有', '一个', '知道', '现在', '时候', '东西', '这样', '那样', '然后', '因为', '所以', '但是',
+            '如果', '已经', '还是', '也是', '还有', '可能', '应该', '自己', '别人', '今天', '明天', '昨天',
+            '哈哈', '呵呵', '好的', '收到', '真的', '感觉', '觉得', '一下', '有点', '比较', '特别', '图片',
+            '表情', '语音', '视频', '群里', '我们', '你们', '刚才', '刚才说', '反正', '其实', '不过', '而且'])
+          // 她已有的词汇（缓存，记忆条数变了才重建）
+          const memLen = (r.facts || []).length
+          if (!r.__knownText || r.__knownTextLen !== memLen) {
+            r.__knownText = ((r.facts || []).slice(-400).map((x) => String(x.text || '')).join(' ')
+              + ' ' + ((r.recentReplies || []).slice(-60).map((x) => String(x.text || '')).join(' ')))
+              .slice(0, 400000)
+            r.__knownTextLen = memLen
+          }
+          const known = r.__knownText || ''
+          const cands = new Set()
+          for (const seg of String(text).split(/[\s，。！？,.!?、~～]+/)) {
+            const segs = seg.match(/[\u4e00-\u9fa5]{2,4}/g) || []
+            for (const t of segs) {
+              if (STOP.has(t)) continue
+              if (known.includes(t)) continue          // 她本来就会 → 不是新梗
+              cands.add(t)
+            }
+          }
+          for (const t of cands) {
+            const res = PS.noteTerm(next, t, Date.now())
+            if (res.changed) next = res.state
+          }
+        }
+      } catch { }
+      // 节流：内存里实时更新，落盘最多每 60 秒一次（每条群消息都写盘太浪费）
+      r.__persona = next
+      const lastSave = Number(r.__personaSavedAt) || 0
+      if (Date.now() - lastSave > 60_000) {
+        r.__personaSavedAt = Date.now()
+        savePersona(r, next)
+      }
+    } catch (e) {
+      log('性格状态更新失败：' + String(e?.message || e).slice(0, 120))
+    }
+  }
+
+  // ── 方案⑥：反馈驱动的性格漂移 ─────────────────────────────
+  //  发一条 → 记下"这句话用了哪些行为维度" → 等 settleMin 分钟 →
+  //  看群里真实反应（被夸/被接话/被怼/没人说话）→ 小幅调整对应的 trait。
+  //  默认关闭（personaFeedback=false），先在日志里看它打算怎么调，确认没问题再开。
+  let pendingFeedback = []      // [{roomId, at, sig, parts}]
+
+  function feedbackEnabled() {
+    return config.personaEnabled !== false && config.personaFeedback === true
+  }
+
+  /** 记一条待结算（在 deliver 真正发出文字后调用） */
+  function noteFeedback(r, text, { parts = 1, hasSticker = false } = {}) {
+    if (!feedbackEnabled()) return
+    try {
+      const sig = PS.traitSignature(text, { parts, hasSticker })
+      if (!Object.keys(sig).length) return
+      pendingFeedback.push({ roomId: r.roomId, at: Date.now(), sig, sentAt: Date.now() })
+      if (pendingFeedback.length > 50) pendingFeedback = pendingFeedback.slice(-50)
+    } catch (e) { log('记录反馈签名失败：' + String(e?.message || e).slice(0, 100)) }
+  }
+
+  /** 判断这批消息给出的反馈类型 */
+  function judgeOutcome(item, msgs) {
+    const after = (msgs || []).filter((m) => m && !m.isSelf && Number(m.ts || 0) > item.sentAt)
+    if (!after.length) return { outcome: 'ignored', why: '发出后没人说话' }
+    const text = after.map((m) => String(m.text || '')).join(' ')
+    const atBot = /大肥鱼|肥鱼|鲸鱼娘/.test(text)
+    if (/别说了|闭嘴|滚|烦死|别吵|安静点|能不能别/.test(text)) return { outcome: 'hurt', why: '被制止/被怼' }
+    if (atBot && /好可爱|真棒|厉害|喜欢你|乖|笑死|哈哈|好耶|可爱捏|真好/.test(text)) return { outcome: 'praise', why: '被夸' }
+    // 有人接着说话（尤其接着她的话）→ 弱正反馈
+    return { outcome: 'engage', why: '有人接话' }
+  }
+
+  /** 结算所有到期的发言 */
+  function settleFeedback(now = Date.now()) {
+    if (!feedbackEnabled() || !pendingFeedback.length) return { settled: 0 }
+    const settleMs = (Number(config.personaFeedbackSettleMin) || 10) * 60_000
+    const cfg = {
+      lr: config.personaFeedbackLr === undefined ? 0.018 : Number(config.personaFeedbackLr),
+    }
+    let settled = 0
+    const keep = []
+    for (const item of pendingFeedback) {
+      if (now - item.at < settleMs) { keep.push(item); continue }
+      const r = rooms.get(item.roomId)
+      if (!r) continue   // 房间没了，丢弃
+      const { outcome, why } = judgeOutcome(item, r.msgs || [])
+      try {
+        const st = personaOf(r)
+        const res = PS.applyFeedback(st, item.sig, outcome, now, cfg)
+        savePersona(r, res.state)
+        settled++
+        const d = res.delta || {}
+        const parts = Object.entries(d).map(([k, v]) => `${PS.TRAIT_LABELS[k] || k} ${v > 0 ? '+' : ''}${v.toFixed(3)}`).join('、')
+        if (parts) log(`性格漂移「${r.roomName || r.roomId}」${outcome}（${why}）→ ${parts}`)
+      } catch (e) {
+        log('反馈结算失败：' + String(e?.message || e).slice(0, 120))
+      }
+    }
+    pendingFeedback = keep
+    return { settled }
+  }
+
+  /**
+   * 写一篇"自己的日记"（自我叙事）。
+   * 输入：当天最近的群聊 + 检索出来的长期记忆（用 v2 的检索，带情绪/强度）
+   * 输出：{title, text, likes[], dislikes[]} —— 好恶增量会写回状态（这是"性格自己长"的地方）
+   */
+  async function writeDiary(r, { force = false } = {}) {
+    if (config.personaEnabled === false) return { ok: false, reason: '性格功能已关闭' }
+    const st = personaOf(r)
+    if (!force && !PS.shouldWriteDiary(st, Date.now(), personaCfg())) {
+      return { ok: false, reason: '还没到写日记的时间' }
+    }
+    const msgs = (r.msgs || []).slice(-40).filter((m) => m && m.text)
+    if (msgs.length < 6) return { ok: false, reason: '聊天太少（不足 6 条），没什么可写的' }
+    let memBlock = ''
+    try {
+      const sel = MV2.selectMemories(r.facts || [], { now: Date.now(), query: msgs.map((m) => m.text).join(' '), cfg: memCfg() })
+      memBlock = (sel.picked || []).map((x) => '- ' + x.text).join('\n')
+    } catch { /* 记忆不可用就算了 */ }
+    const transcript = msgs.map((m) => (m.isSelf ? '我' : (m.senderName || '群友')) + '：' + String(m.text).slice(0, 100)).join('\n')
+    const inner = PS.describeState(st, personaCfg())
+    const sys = '你要以第一人称写一篇短短的日记。只输出一个 JSON 对象，不要解释、不要代码块。'
+    const usr = `你现在的心情：${inner.text}\n`
+      + `你喜欢：${(st.tastes.likes || []).map((x) => x.text).join('、') || '（还没什么）'}\n`
+      + `你讨厌：${(st.tastes.dislikes || []).map((x) => x.text).join('、') || '（暂时没有）'}\n`
+      + `你最近心里想要的：${(st.goals || []).filter((g) => !g.done).map((g) => g.text).join('、') || '（没什么）'}\n`
+      + (memBlock ? `\n你能想起来的往事：\n${memBlock}\n` : '')
+      + `\n今天群里发生的事：\n${transcript}\n`
+      + `\n写 80~160 字，像真人写日记：写你**在意**的那一两件事 + 你的真实感受（可以抱怨、可以开心、可以犯嘀咕）。`
+      + `不要流水账，不要总结全文，不要提到"作为AI"。\n`
+      + `输出格式：{"title":"4~8字的小标题","text":"正文","mood":"一个词","likes":["今天更喜欢了的东西"],"dislikes":["今天有点烦的东西"]}`
+      + `（likes/dislikes 只在真的产生新偏好时才给，没有就给空数组）`
+    let res = null
+    try {
+      const route = resolveRoute()
+      stats.llmCalls++
+      res = await callLlm(route, sys, usr, undefined)
+      if (!String(res && res.text || '').trim()) res = await callLlm(route, '', sys + '\n\n' + usr, undefined)
+    } catch (e) {
+      log('写日记失败：' + String(e?.message || e).slice(0, 140))
+      return { ok: false, reason: String(e?.message || e).slice(0, 140) }
+    }
+    const parsed = PS.parseDiaryJson(res && res.text)
+    if (!parsed.text) return { ok: false, reason: '模型没写出内容' }
+    let next = PS.pushDiary(st, parsed, Date.now(), personaCfg())
+    let addedL = 0
+    let addedD = 0
+    for (const t of parsed.likes || []) {
+      const rr = PS.addTaste(next, 'likes', t, 'diary', Date.now(), personaCfg())
+      next = rr.state
+      if (rr.added) addedL++
+    }
+    for (const t of parsed.dislikes || []) {
+      const rr = PS.addTaste(next, 'dislikes', t, 'diary', Date.now(), personaCfg())
+      next = rr.state
+      if (rr.added) addedD++
+    }
+    savePersona(r, next)
+    log(`日记「${r.roomName || r.roomId}」《${parsed.title || '无题'}》：${parsed.text.slice(0, 60)}…` + (addedL || addedD ? `（好恶 +${addedL}/+${addedD}）` : ''))
+    return { ok: true, diary: parsed, addedLikes: addedL, addedDislikes: addedD }
+  }
+
+  const narrativeAllowed = () => config.personaEnabled !== false && config.personaSelfNarrative !== false
+
+  /** 反馈结算定时器：每 2 分钟看一遍有没有到期的发言要结算 */
+  function startFeedbackTimer() {
+    if (config.personaEnabled === false) return
+    // ★ 定时器始终运行，开关由 settleFeedback() 内部判断。
+    //   以前关着启动就不建定时器 → 面板打开开关也不生效，必须重启，很不合理。
+    if (config.personaFeedback !== true) log('性格：反馈驱动漂移当前关闭（面板「内心」页可随时打开，立即生效，无需重启）')
+    const iv = setInterval(() => {
+      try {
+        if (!feedbackEnabled() || !pendingFeedback.length) return
+        const res = settleFeedback()
+        if (res.settled) log(`性格：结算了 ${res.settled} 条发言的反馈`)
+      } catch (e) { log('反馈结算异常：' + String(e?.message || e).slice(0, 120)) }
+    }, 2 * 60_000)
+    track(iv)
+    log(`性格：反馈驱动漂移已启用（发言后 ${config.personaFeedbackSettleMin || 10} 分钟结算，学习率 ${config.personaFeedbackLr || 0.018}）`)
+  }
+
+  /** H: mark that she mentioned being hungry, so she does not repeat it this meal window */
+  function markBodyIfNeeded(r) {
+    if (config.humanBodyState === false) return
+    try {
+      const st = personaOf(r)
+      const b = PS.bodyState(st)
+      if (b.hungry && b.key) {
+        savePersona(r, PS.markBodySaid(st, b.key))
+        log('humanize: meal window, she may mention being hungry (' + b.key + ')')
+      }
+    } catch { }
+  }
+
+  /** G: self review - read her own recent lines and find what is off */
+  async function selfReview(r, { force = false } = {}) {
+    if (config.personaEnabled === false) return { ok: false, reason: 'persona disabled' }
+    const everyMs = (Number(config.humanSelfReviewDays) || 7) * 86400000
+    if (!everyMs && !force) return { ok: false, reason: 'self review disabled' }
+    const st = personaOf(r)
+    const gate = PS.shouldSelfReview(st, Date.now(), everyMs || 7 * 86400000)
+    if (!force && !gate.ok) return { ok: false, reason: 'not due yet' }
+    const mine = (r.msgs || []).filter((m) => m && m.isSelf && m.text).slice(-40).map((m) => '- ' + String(m.text).slice(0, 80))
+    if (mine.length < 5) return { ok: false, reason: 'too few recent lines' }
+    const diary = (st.diary || []).slice(0, 3).map((d) => '- ' + String(d.text).slice(0, 60))
+    const sys = 'You are reviewing your own chat style honestly. Output JSON only, no prose, no code fence.'
+    const usr = 'Your recent lines in the group:\n' + mine.join('\n') + '\n\n'
+      + (diary.length ? 'Your recent diary:\n' + diary.join('\n') + '\n\n' : '')
+      + 'Find 1-3 real problems (no compliments). Look for: too much like customer service, over-explaining,'
+      + ' too long, too clingy, too harsh, too stiff.\n'
+      + 'Format: {"findings":["problem1","problem2"]}'
+    try {
+      const route = resolveRoute()
+      stats.llmCalls++
+      const res = await callLlm(route, sys, usr, undefined)
+      const raw = String(res && res.text || '').trim().replace(/^```(?:json)?\s*|```$/g, '')
+      const m = raw.match(/\{[\s\S]*\}/)
+      let findings = []
+      if (m) { try { findings = JSON.parse(m[0]).findings || [] } catch { findings = [] } }
+      if (!findings.length) return { ok: false, reason: 'model gave nothing' }
+      savePersona(r, PS.saveSelfReview(personaOf(r), findings, Date.now()))
+      log('self review: ' + findings.join(' | '))
+      return { ok: true, findings }
+    } catch (e) {
+      return { ok: false, reason: String(e?.message || e).slice(0, 120) }
+    }
+  }
+
+  /**
+   * D: when the group has been quiet for a while, she may bring up a topic she likes.
+   * Conservative on purpose: idle window + low probability + 2h cooldown.
+   */
+  function maybeProactiveTopic() {
+    if (config.personaEnabled === false || config.humanProactiveTopic === false) return false
+    const idleMin = Number(config.humanProactiveIdleMin) || 40
+    const r = globalHostRoom()
+    const lastAt = (r.msgs || []).reduce((m, x) => Math.max(m, Number(x.ts) || 0), 0)
+    if (!lastAt || Date.now() - lastAt < idleMin * 60000) return false
+    const lastSay = Number(r.__lastProactiveAt) || 0
+    if (Date.now() - lastSay < 2 * 3600000) return false
+    if (Math.random() > (Number(config.humanProactiveChance) || 0.08)) return false
+    try {
+      const st = personaOf(r)
+      const likes = ((st.tastes && st.tastes.likes) || []).map((x) => x.text)
+      const goals = (st.goals || []).filter((g) => !g.done).map((g) => g.text)
+      const theme = likes[0] || goals[0] || ''
+      if (!theme) return false
+      r.__proactiveHint = theme
+      r.__lastProactiveAt = Date.now()
+      log('humanize: quiet ' + Math.round((Date.now() - lastAt) / 60000) + ' min, brings up: ' + theme)
+      return true
+    } catch { return false }
+  }
+
+  /**
+   * 7：她自己的事 —— 安静超过 15 分钟、3 小时没做过，就"自己在看点东西"。
+   *    只用真实素材（她的好恶/目标），提示词明确禁止编造新闻事实。
+   */
+  async function doActivity(r) {
+    if (config.humanActivity === false) return false
+    try {
+      const st = personaOf(r)
+      const lastAt = Number(r.__activityAt) || 0
+      const lastMsg = (r.msgs || []).reduce((m, x) => Math.max(m, Number(x.ts) || 0), 0)
+      const quietMin = lastMsg ? (Date.now() - lastMsg) / 60000 : 999
+      const plan = H2.planActivity({
+        tastes: (st.tastes && st.tastes.likes) || [],
+        goals: (st.goals || []).filter((g) => !g.done),
+        lastAt,
+        quietMin,
+      })
+      if (!plan) return false
+      r.__activityAt = Date.now()
+      const route = resolveRoute()
+      stats.llmCalls++
+      const res = await callLlm(route, buildSystem(r), H2.activityPrompt(plan.topic), config.reasoningEffort || undefined)
+      const text = cleanReply(res.text, { maxLen: 80, maxLines: 0 })
+      if (!text || text.length < 2) return false
+      const sent = await client.call('sendText', { roomId: r.roomId, text }, 30_000)
+      if (sent && (sent.rc === 0 || sent.rc === undefined || sent.ok !== false)) {
+        push(r, { ts: Date.now(), isSelf: true, sender: 'self', senderName: '我', text })
+        log('自己做点事，顺口分享：' + text.slice(0, 40))
+        return true
+      }
+      return false
+    } catch (e) { log('自己的事失败：' + String(e?.message || e).slice(0, 90)); return false }
+  }
+
+  /** 2/7 定时器：每 3 分钟检查到点的承诺；每小时试一次"自己的事" */
+  function startHuman2Timer() {
+    if (config.personaEnabled === false) return
+    const iv = setInterval(() => {
+      void (async () => {
+        try { await fulfillPromises() } catch { }
+      })()
+    }, 3 * 60_000)
+    track(iv)
+    const iv2 = setInterval(() => {
+      void (async () => {
+        const r = globalHostRoom()
+        try { await doActivity(r) } catch { }
+      })()
+    }, 60 * 60_000)
+    track(iv2)
+    log('人性化②：承诺兑现（每 3 分钟）+ 自己的事（每小时）定时器已启动')
+  }
+
+  /** G/H timer: hourly (self review when due, meal-window hungry mark) */
+  function startHumanTimer() {
+    if (config.personaEnabled === false) return
+    const iv = setInterval(() => {
+      void (async () => {
+        const r = globalHostRoom()
+        try { markBodyIfNeeded(r) } catch { }
+        try { maybeProactiveTopic() } catch { }
+        try {
+          const everyMs = (Number(config.humanSelfReviewDays) || 7) * 86400000
+          if (everyMs > 0) {
+            const st = personaOf(r)
+            if (PS.shouldSelfReview(st, Date.now(), everyMs).ok) await selfReview(r)
+          }
+        } catch { }
+      })()
+    }, 3600000)
+    track(iv)
+    // 启动时立刻跑一次：初始化性格状态（traits 等），并把"该复盘了吗"检查一遍
+    setTimeout(() => {
+      try { markBodyIfNeeded(globalHostRoom()) } catch { }
+      try { const st = personaOf(globalHostRoom()); if (PS.shouldSelfReview(st, Date.now(), (Number(config.humanSelfReviewDays) || 7) * 86400000 || 7 * 86400000).ok) void selfReview(globalHostRoom()) } catch { }
+    }, 12000)
+    log('humanize: self-review/body timer started (hourly check + one immediate init)')
+  }
+
+  /** 自传定时器：每小时看一遍有没有群该重写"我是个什么样的人"了 */
+  function startNarrativeTimer() {
+    if (!narrativeAllowed()) return
+    const iv = setInterval(() => {
+      void (async () => {
+        for (const r of rooms.values()) {
+          try {
+            const st = personaOf(r)
+            const gate = PS.shouldWriteNarrative(st, Date.now(), {
+              everyMs: (Number(config.personaNarrativeHours) || 24) * 3_600_000,
+              minDiaries: Number(config.personaNarrativeMinDiaries) || 3,
+            })
+            if (!gate.ok) continue
+            await writeNarrative(r)
+          } catch { /* 单群失败不影响 */ }
+        }
+      })()
+    }, 60 * 60_000)
+    track(iv)
+    log(`性格：自传定时器已启动（每 ${config.personaNarrativeHours || 24} 小时、攒够 ${config.personaNarrativeMinDiaries || 3} 篇日记后允许重写）`)
+  }
+
+  /** 日记定时器：每 30 分钟看一遍有没有群该写了 */
+  function startDiaryTimer() {
+    if (config.personaEnabled === false) return
+    if (!(Number(config.personaDiaryHours) > 0)) { log('性格：日记功能关闭（personaDiaryHours=0）'); return }
+    const iv = setInterval(() => {
+      void (async () => {
+        for (const r of rooms.values()) {
+          try {
+            const st = personaOf(r)
+            if (!PS.shouldWriteDiary(st, Date.now(), personaCfg())) continue
+            await writeDiary(r)
+          } catch (e) { /* 单个群失败不影响别的群 */ }
+        }
+      })()
+    }, 30 * 60_000)
+    track(iv)
+    log(`性格：日记定时器已启动（每群每 ${config.personaDiaryHours} 小时写一篇，检查间隔 30 分钟）`)
+  }
+
   // ── 群成员名字（wxid → 昵称）────────────────────────────────
   let bridge = null            // 最近一次 hello 的状态快照
   let bridgeSelf = ''
@@ -1890,7 +2788,8 @@ let res = await callLlm(route, sys, usr, undefined)
 
   // ── 健康自检 / 失联监控的状态（只读检查，除告警外不发消息）────
   let lastMsgAt = 0            // 最近一次成功收到消息（判断"轮询还在不在工作"）
-  let lastWakeAt = 0           // 桥最近一次喊"数据库打不开"（强负面信号）
+  let lastWakeAt = 0
+  let wakeTimes = []      // wake 限流用（最多 3 次/10 分钟）           // 桥最近一次喊"数据库打不开"（强负面信号）
   let healthStreak = 0         // 连续异常次数（2 次 = 10 分钟 → 告警）
   let healthAlerted = false    // 是否已经发过"失联"告警（用于恢复时配对告警）
   let healthLast = null        // 最近一次自检结果（{ at, items, bad }，status 摘要复用）
@@ -2058,6 +2957,25 @@ let res = await callLlm(route, sys, usr, undefined)
       return
     }
     // 对话延续判定：① 上一条我回过的人又说话 ② 我刚主动冒泡后有人接话
+    // ── 4：沉默的艺术（知道什么时候不该说话）──
+    //   以前"不回"只靠概率和模型吐 [不回]；现在先按情境判断：
+    //   群里吵架 / 别人正互聊 / 上句没人接 / 深夜低精力 / 对方正在被怼 → 别插嘴。
+    if (config.humanSilence !== false) {
+      try {
+        const st0 = personaOf(r)
+        const sd = H2.silenceDecision({
+          recent: (r.msgs || []).slice(-12),
+          trigger,
+          energy: st0.energy,
+          now: Date.now(),
+        })
+        if (sd.silent) {
+          stats.skipped++
+          log('沉默（' + sd.reason + '）→ 这条不回')
+          return
+        }
+      } catch { /* 判断失败就按原逻辑走 */ }
+    }
     const contWindow = config.conversationWindowMs
     const isContinuation = (!!r.lastRepliedSender
         && trigger.sender === r.lastRepliedSender
@@ -2221,8 +3139,65 @@ let res = await callLlm(route, sys, usr, undefined)
           r.facts = newList
           r.factsLastRecall = { at: Date.now(), ids: sel.picked.map((x) => x.id), stats: sel.stats }
           log(`记忆检索：命中 ${sel.picked.length}/${sel.stats.total} 条（平均保持率 ${sel.stats.avgRetention}）`)
-          return '\n【长期记忆（检索自长期记忆库，按相关度与重要度挑选；越重要的越牢）】\n'
-            + sel.picked.map((f) => '- ' + f.text).join('\n')
+          // ★ B：按保持率分级表达（人是"记得住的确定、记不清的含糊"，不是复读机）
+          const now2 = Date.now()
+          const graded = sel.picked.map((f) => ({
+            text: f.text,
+            ...PS.recallConfidence(MV2.retention(f, now2)),
+          }))
+          const sure = graded.filter((x) => x.band === 'sure')
+          const fuzzy = graded.filter((x) => x.band === 'fuzzy')
+          const vague = graded.filter((x) => x.band === 'vague')
+          const lines = []
+          if (config.humanImperfectRecall === false) {
+            lines.push('\n【长期记忆（关于这个群和这些人，别忘）】')
+            for (const x of graded) lines.push('- ' + x.text)
+            return lines.join('\n')
+          }
+          lines.push('\n【长期记忆】以下是你"记得"的事，按清晰度分了三档：')
+          if (sure.length) {
+            lines.push('· 记得很清楚（可以直接说）：')
+            for (const x of sure) lines.push('  - ' + x.text)
+          }
+          if (fuzzy.length) {
+            lines.push('· 有点模糊（要说"好像/记得有人说过…"，别当成确定事实）：')
+            for (const x of fuzzy) lines.push('  - ' + x.text)
+          }
+          if (vague.length) {
+            lines.push('· 几乎想不起来（要说"记不太清了，是不是…"，**不许硬编细节**）：')
+            for (const x of vague) lines.push('  - ' + x.text)
+          }
+          // 9：被聊天里的词勾起的回忆（不是随机抽奖 —— 线索来自当前对话 + 她的好恶）
+          if (config.humanAssociation !== false) {
+            try {
+              const st9 = personaOf(r)
+              const cues = H2.cueWords({
+                recent: (r.msgs || []).slice(-4),
+                tastes: (st9.tastes && st9.tastes.likes) || [],
+              })
+              const assoc = H2.pickAssociation(facts || [], {
+                cues,
+                exclude: graded.map((g) => g.text),
+                now: now2,
+              })
+              if (assoc) {
+                lines.push('· 刚才聊天里「' + assoc.cue + '」让你想起一件事（顺口提一句就行，别当成话题中心）：' + assoc.text)
+              }
+            } catch { /* ignore */ }
+          }
+          // 偶尔"突然想起"一件旧事（人有不自觉的回忆）
+          if (Math.random() < 0.05) {
+            try {
+              const pool2 = (facts || []).filter((x) => x && !x.archived && Number(x.importance) >= 0.5)
+              if (pool2.length) {
+                const pick = pool2[Math.floor(Math.random() * pool2.length)]
+                if (!graded.some((g) => g.text === pick.text)) {
+                  lines.push('· 你刚才突然想起一件事（跟当前话题无关也可以顺口提一句）：' + pick.text)
+                }
+              }
+            } catch { /* ignore */ }
+          }
+          return lines.join('\n')
         } catch (e) {
           log('记忆检索失败，退回旧切片：' + String(e?.message || e).slice(0, 120))
           return '\n【长期记忆】\n' + facts.slice(-18).map((f) => '- ' + f.text).join('\n')
@@ -2233,6 +3208,62 @@ let res = await callLlm(route, sys, usr, undefined)
         ? `\n【注意】你刚问过：「${r.pendingQuestion.text}」，还没人回答。**不要再问同一件事**，聊别的或先安静。`
         : '',
       `你的性格：${config.persona}`,
+      // ★ 性格四件套：心情/精力/亲密度 + 好恶 + 私人目标 + 自己写的近况。
+      //   全部是"会随经历变化的数据"，不是写死的人设，所以她会显得有脾气、有偏好、有连续性。
+      (config.personaEnabled === false ? '' : (() => {
+        try {
+          const st = personaOf(r)
+          const names = {}
+          for (const [k, v] of Object.entries(config.memberNames || {})) names[k] = v
+          const parts = []
+          // ★ 自传优先于"性格形容词"：这是她自己写的"我是个什么样的人"
+          // 方案⑥：把漂移后的行为倾向定性写进提示词（不暴露数值）
+          // 她是一个人，同时在几个群——让模型知道这个事实（说话才不会"换个群换个人"）
+          try {
+            const n = activeRoomCount()
+            if (n > 1) parts.push(`\n【你同时在 ${n} 个群里聊天】都是一个你，不是分身；记忆、脾气、喜好全都通用。`)
+          } catch { /* ignore */ }
+          // ★ C/E/H/I：人性化细节（心情来由、对谁什么态度、身体、耐心）
+          try {
+            const extra = []
+            if (config.humanMoodCause !== false) {
+              const cause = PS.describeMoodCause(st)
+              if (cause) extra.push('【心情来由】' + cause + '（说的时候可以带出来，别装作没事）')
+            }
+            if (config.humanRelationTiers !== false && trigger && trigger.sender) {
+              const rel = PS.describeRelationTo(st, trigger.sender, trigger.senderName || '')
+              if (rel) extra.push('【对面是谁】' + rel)
+            }
+            if (config.humanBodyState !== false) {
+              const body = PS.bodyState(st)
+              if (body.note) extra.push('【身体】' + body.note)
+            }
+            if (config.humanPatience !== false) {
+              const nag = PS.nagLevel(st)
+              if (nag === 1) extra.push('【耐心】被同一个人连着问了好几回，有点烦，语气可以稍微不耐烦一点（但还是要答）')
+              else if (nag >= 2) extra.push('【耐心】被问烦了，可以直说"你咋老问这个"，回答简短')
+            }
+            if (config.humanLearnTerms !== false) {
+              const un = PS.unlearnedTerms(st)
+              const ld = PS.learnedTerms(st, 4)
+              if (un.length) extra.push('【群里的新词】' + un.slice(0, 2).map((x) => x.term).join('、') + '（你还不太懂，可以问一句"这啥意思"）')
+              if (ld.length) extra.push('【你学会的群梗】' + ld.join('、') + '（可以自然用上）')
+            }
+            if (extra.length) parts.push('\n' + extra.join('\n'))
+          } catch { /* ignore */ }
+          const trText = (() => { try { return PS.describeTraits(st) } catch { return '' } })()
+          if (trText) parts.push(`\n【你最近说话的样子】${trText}`)
+          const nar = (st.narrative || {}).text
+          if (narrativeAllowed() && nar) {
+            parts.push(`\n【你对自己的认识（你自己写的，就按这个活）】\n${nar}`)
+          }
+          parts.push(PS.buildInnerBlock(st, { names, cfg: personaCfg() }))
+          try {
+            if (r.__proactiveHint) parts.push('\n【现在群里有点安静，你想主动提一句：' + r.__proactiveHint + '】（别太刻意，像随口一说）')
+          } catch { }
+          return parts.join('\n')
+        } catch (e) { return '' }
+      })()),
       // 铁律：绝不外泄系统/技术内部信息。
       // 起因：测试文本曾把'数据库句柄/atlist/偏移'之类内部词发进了真实群，
       // 机器人接着聊了下去，等于把实现细节暴露给群友。
@@ -2527,7 +3558,7 @@ let res = await callLlm(route, sys, usr, undefined)
     const killer = track(setTimeout(() => ac.abort(new Error('视觉超时')), 60_000))
     let text = ''
     try {
-      const stream = ctx.llm.stream({
+      const stream = llmStreamTracked({
         provider: config.visionProvider || config.provider || undefined,
         model: config.visionModel,
         messages: [createUserMessage({ source: { kind: 'user' }, content })],
@@ -2959,6 +3990,28 @@ let res = await callLlm(route, sys, usr, undefined)
   }
 
   /** 调一次 LLM，同时收集诊断信息（空回复时靠它定位原因） */
+  /**
+   * 包一层 ctx.llm.stream：只在**本插件发起**调用期间给 pluginLlmDepth 计数，
+   * 这样 llm/stream 钩子就只记录大肥鱼自己的模型，不会混进 DSH 主对话的调用。
+   */
+  function llmStreamTracked(opts) {
+    pluginLlmDepth++
+    let src
+    try {
+      src = ctx.llm.stream(opts)
+    } catch (e) {
+      pluginLlmDepth--
+      throw e
+    }
+    return (async function* () {
+      try {
+        for await (const chunk of src) yield chunk
+      } finally {
+        pluginLlmDepth = Math.max(0, pluginLlmDepth - 1)
+      }
+    })()
+  }
+
   async function callLlm(route, systemText, userText, effort) {    const ac = new AbortController()
     const killer = track(setTimeout(() => ac.abort(new Error('LLM 超时')), 30_000))
     let text = ''
@@ -2977,7 +4030,7 @@ let res = await callLlm(route, sys, usr, undefined)
       }
       if (effort) opts.reasoningEffort = effort
       if (systemText) opts.system = systemText
-      const stream = ctx.llm.stream(opts)
+      const stream = llmStreamTracked(opts)
       for await (const chunk of stream) {
         diag.chunks[chunk.type] = (diag.chunks[chunk.type] || 0) + 1
         if (chunk.type === 'text-delta') {
@@ -3128,6 +4181,9 @@ let res = await callLlm(route, sys, usr, undefined)
   }
 
   async function proactiveSay(r) {
+// 消费掉"想聊的话题"，避免之后莫名其妙旧事重提
+    const _proactiveTheme = r.__proactiveHint || ''
+    r.__proactiveHint = ''
     const trigger = { sender: 'proactive', senderName: '我', text: '', typeName: 'text', roomId: r.roomId }
     let text = ''
     try {
@@ -3141,6 +4197,20 @@ let res = await callLlm(route, sys, usr, undefined)
         '群里已经安静了很久。你想主动冒个泡、找个话题聊聊（或者只是随口说一句）。',
         '要求：像真人突然在群里开口那样自然。不要问候式客套（禁止"有什么可以帮您""大家好"这类），',
         '可以接着之前的聊天内容问一句、吐槽一句、或者抛个话头。',
+        ...(() => {
+          // D：用她自己的好恶/目标当话题。之前这个提示挂在一个全局变量上，
+          //    主动冒泡遍历各群时读不到、用完也不清 → 等于没生效。
+          try {
+            const st = personaOf(r)
+            const likes = ((st.tastes && st.tastes.likes) || []).map((x) => x.text)
+            const goals = (st.goals || []).filter((g) => !g.done).map((g) => g.text)
+            const want = _proactiveTheme || likes[0] || goals[0] || ''
+            const bits = []
+            if (want) bits.push('你最近在意/喜欢的东西：' + want + '（可以顺着这个开口，要自然，别像在推销）')
+            if (likes.length > 1) bits.push('你还喜欢：' + likes.slice(1, 3).join('、'))
+            return bits
+          } catch { return [] }
+        })(),
         '只输出你要发的那一条消息本身。',
       ].join('\n')
       const res = await callLlm(route, buildSystem(r), userText, config.reasoningEffort || undefined)
@@ -3487,6 +4557,33 @@ let res = await callLlm(route, sys, usr, undefined)
   const VOICE_STRONG_WINDOW_MS = 10 * 60_000
   const VOICE_STRONG_COUNT = 2
 
+  // ── 语音发送冷却 ─────────────────────────────────────────────
+  //  2026-10-28 事故：17:25:13 发 6.1s 语音、17:25:26 又发 4.0s（间隔 13 秒），
+  //  17:26:13 客户端退出（无崩溃转储 / 无 WER → 属"退出"而非访问违例）。
+  //  历史同类：01:00 那次 7 分钟 7 条后崩、"语音+发图"一起崩。
+  //  语音发送要 hook 构造微信内部对象，连发最容易踩对象所有权。
+  //  两道闸：① 两条语音最少隔 voiceMinGapSec 秒 ② 10 分钟最多 voiceMaxPer10Min 条
+  let lastVoiceAt = 0
+  let voiceSentTimes = []
+  function voiceCooldownOk() {
+    const now = Date.now()
+    const gapSec = config.voiceMinGapSec === undefined ? 90 : Number(config.voiceMinGapSec)
+    const maxPer10 = config.voiceMaxPer10Min === undefined ? 3 : Number(config.voiceMaxPer10Min)
+    if (gapSec > 0 && lastVoiceAt && now - lastVoiceAt < gapSec * 1000) {
+      return { ok: false, why: 'voice cooldown: ' + Math.round((now - lastVoiceAt) / 1000) + 's < ' + gapSec + 's' }
+    }
+    voiceSentTimes = voiceSentTimes.filter((t) => now - t < 10 * 60_000)
+    if (maxPer10 > 0 && voiceSentTimes.length >= maxPer10) {
+      return { ok: false, why: 'voice rate limit: already ' + voiceSentTimes.length + ' in 10min (max ' + maxPer10 + ')' }
+    }
+    return { ok: true }
+  }
+  function markVoiceSent() {
+    lastVoiceAt = Date.now()
+    voiceSentTimes.push(lastVoiceAt)
+    if (voiceSentTimes.length > 20) voiceSentTimes = voiceSentTimes.slice(-20)
+  }
+
   function shouldSendVoice(r, trigger, text) {
     if (!config.voiceSay) return { yes: false, why: 'voiceSay=false（总开关关着）' }
     const t = String(text || '').trim()
@@ -3516,6 +4613,9 @@ let res = await callLlm(route, sys, usr, undefined)
       return { yes: true, why: `强烈要求（${arr.length} 次）` }
     }
     if (isQuiet(quietWindows)) return { yes: false, why: '安静时段（深夜不发语音）' }
+    // 冷却闸：连发语音会让客户端退出（见 voiceCooldownOk 上方注释）
+    const cd = voiceCooldownOk()
+    if (!cd.ok) return { yes: false, why: cd.why }
     const wasVoice = trigger?.typeName === 'voice' || !!trigger?.voiceText
     const p = Number(wasVoice ? config.voiceSayOnVoiceProbability : config.voiceSayProbability)
     if (!(p > 0)) return { yes: false, why: `概率为 0（p=${p}）` }
@@ -3538,13 +4638,23 @@ let res = await callLlm(route, sys, usr, undefined)
     //   用户实测：语音 + 发图一起来，客户端会偶发崩溃（媒体发送对象所有权问题尚未定位），
     //   同一轮里同时触发两条媒体发送会显著提高撞车概率。这里做互斥兜底。
     let sentVoiceThisReply = false
+    // ★ 2026-10-28 修：这行原来被插在下面"检测到重复回复→放弃这条"的分支里，
+    //   只有撞上重复才会记一次 → 正常回复从来没进过待结算队列，
+    //   feedbackLog 永远是空的、traits 一动不动（用户实测：性格漂移一直没变化）。
+    //   正确位置：确实是这一轮要发的正文，就在这里记签名。
+    try {
+      if (reply.text && feedbackEnabled()) {
+        noteFeedback(r, reply.text, { parts: 1, hasSticker: !!reply.wantSticker })
+      }
+    } catch { /* 不影响发送 */ }
     if (reply.text) {
       // 防重复③：这句回复最近说过一模一样的话 → 不重复发（复读最不像人）
       const nReply = normText(reply.text)
       const dup = (r.recentReplies || []).find((x) => normText(x.text) === nReply && Date.now() - x.at < config.repeatWindowMs)
       if (dup && nReply) {
         log(`不重复发同样的回复（${Math.round((Date.now() - dup.at) / 1000)}s 前说过："${dup.text}"）`)
-        // 只发图的话仍然允许；纯文字就放弃这条
+        // 方案⑥：记下"这句话用了哪些行为维度"，等真实反馈回来再微调性格
+      // 只发图的话仍然允许；纯文字就放弃这条
         if (!reply.wantSticker && !reply.stickerOnly) return
         reply = { ...reply, text: '' }
       }
@@ -3599,6 +4709,7 @@ let res = await callLlm(route, sys, usr, undefined)
             }, 150_000)
           } catch (e) { vs = { ok: false, error: String(e?.message || e) } }
           if (vs?.ok) {
+            markVoiceSent()
             sentVoiceThisReply = true
             log(`发语音气泡成功：${vs.bytes} 字节 / ${vs.durationMs}ms（main）`)
             stats.sentVoice = (stats.sentVoice || 0) + 1
@@ -3638,6 +4749,26 @@ let res = await callLlm(route, sys, usr, undefined)
           ;(r.sentTexts ||= []).push({ text: mm.text, at: Date.now() })
           if (r.sentTexts.length > 40) r.sentTexts = r.sentTexts.slice(-40)
           push(r, { ts: Date.now(), isSelf: true, sender: 'self', senderName: '我', text: mm.text })
+          // 2：这句话里有没有"承诺"（等下帮你找…）→ 登记，到点回来兑现
+          try { if (i === parts.length - 1) notePromise(r, mm.text) } catch { }
+          // 6：说完最后一条，有概率过一会儿自己补一句
+          try {
+            if (i === parts.length - 1 && config.humanFollowUp !== false) {
+              const plan = H2.planFollowUp({ text: mm.text, energy: personaOf(r).energy })
+              if (plan) {
+                const lastAt = Number(r.__lastFollowUpAt) || 0
+                if (Date.now() - lastAt > 10 * 60_000) {
+                  r.__lastFollowUpAt = Date.now()
+                  r.__followUpCount = 0
+                  if (r.__followUpTimer) clearTimeout(r.__followUpTimer)
+                  r.__followUpTimer = track(setTimeout(() => {
+                    void sendFollowUp(r, plan).catch(() => { })
+                  }, plan.delayMs))
+                  log(`准备过 ${Math.round(plan.delayMs / 1000)} 秒补一句（${plan.seed}…）`)
+                }
+              }
+            }
+          } catch { }
         } catch (e) {
           log('发送失败：' + String(e?.message || e))
           return
@@ -3840,6 +4971,7 @@ let res = await callLlm(route, sys, usr, undefined)
     if (memEvery && config.memoryV2 !== false) {
       const memIv = setInterval(() => {
         try { memorySweepAll() } catch (e) { log('记忆巡检失败：' + String(e?.message || e).slice(0, 140)) }
+        try { personaIdleRecover() } catch { /* ignore */ }
       }, memEvery)
       track(memIv)
       log(`记忆巡检已启动：每 ${Math.round(memEvery / 3600000)} 小时一次（memoryConsolidate=${config.memoryConsolidate}）`)
@@ -4484,6 +5616,17 @@ let res = await callLlm(route, sys, usr, undefined)
    *                           false = 只查失联关键项（心跳用，最多打一次 hook）
    * @returns {Promise<{at:number, items:Array<{name:string,level:string,text:string,advice:string}>, bad:string[], warn:string[]}>}
    */
+  /** 最近有过消息的群（探针优先用它：分片里一定有它的表） */
+  function mostActiveRoom() {
+    let best = ''
+    let bestTs = 0
+    for (const [rid, r] of rooms.entries()) {
+      const ts = (r.msgs || []).reduce((m, x) => Math.max(m, Number(x.ts) || 0), Number(r.lastActivityAt) || 0)
+      if (ts > bestTs) { bestTs = ts; best = rid }
+    }
+    return best
+  }
+
   async function healthCheck({ deep = true } = {}) {
     const items = []
     const add = (name, level, text, advice = '') => { items.push({ name, level, text, advice }) }
@@ -4510,28 +5653,51 @@ let res = await callLlm(route, sys, usr, undefined)
     // ★ 探测会话：没有已知群时【别跳过】✗ —— 用 filehelper 兜底（它一定存在），
     //   否则"数据库读不出 + 还没有已知会话"会被判成 warn（跳过），
     //   于是机器人静默失聪时自检照样报"正常"（2026-10-19 被这个盲区坑了一整晚）。
-    const probeRoom = (config.rooms && config.rooms[0]) || [...rooms.keys()][0] || 'filehelper'
+    // ★ 2026-10-28 修复（这是"误判 → 自愈重启微信"的真凶）：
+    //   以前探针固定用 config.rooms[0]（或第一个已知群）。但微信的消息库是**分片**的，
+    //   某个会话在当前分片里不一定有消息表 → 查询报「没找到这个会话的表」 →
+    //   hook 存活 + 数据库可读 同时判 bad → 连续 3 次 → 自愈把微信重启一遍。
+    //   今天 12:06 / 16:07 两次重启都是这么来的。
+    //   现在：按候选列表依次试（filehelper 一定有表 → 最近有消息的群 → 配置里的群），
+    //   任何一个成功就算可读；只有全失败才判不可读。
+    const probeCandidates = []
+    const pushP = (x) => { const v = String(x || '').trim(); if (v && !probeCandidates.includes(v)) probeCandidates.push(v) }
+    pushP('filehelper')                                        // 一定有会话表，最可靠
+    pushP(mostActiveRoom())                                    // 最近有消息的群
+    for (const x of (config.rooms || [])) pushP(x)              // 用户指定的群
+    pushP([...rooms.keys()][0])                                 // 兜底：任意已知会话
+    const probeRoom = probeCandidates[0]
     let dbOk = false
     let dbText = ''
     let dbAdvice = ''
+    let dbProbeRoom = ''
     if (!cs.connected) {
       dbText = '未检查（桥未连接）'
       dbAdvice = '桥恢复后自动可查'
     } else {
-      try {
-        const res = await client.call('searchMessages', { roomId: probeRoom, query: '', limit: 1, scan: 50 }, 15000)
-        // 注意：桥的这个 op **不抛错**，失败时返回 { items: [], error: '…' }（server.mjs:329/336）
-        // —— 只看 items 是数组会把它误判成"可读"，必须同时看 error 字段。
-        dbOk = Array.isArray(res?.items) && !res?.error
-        dbText = dbOk ? `消息库可读（探针会话「${probeRoom}」取到 ${res.items.length} 条）`
-          : (res?.error ? '查询失败：' + String(res.error).slice(0, 80) : '查询返回结构异常')
-        dbAdvice = dbOk ? '' : 'hook 的 QueryDB 或轮询器异常：看 bridge 日志里的 SQL 失败行'
-      } catch (e) {
-        dbText = '读不到：' + String(e?.message || e).slice(0, 90)
-        dbAdvice = 'hook 卡死或数据库没打开：桥会自己重试；持续失败看 bridge 日志（可能要唤醒/重启客户端）'
+      const tried = []
+      for (const cand of probeCandidates.slice(0, 3)) {
+        tried.push(cand)
+        try {
+          const res = await client.call('searchMessages', { roomId: cand, query: '', limit: 1, scan: 50 }, 8000)
+          // 桥的这个 op **不抛错**，失败时返回 { items: [], error: '…' }
+          if (Array.isArray(res?.items) && !res?.error) {
+            dbOk = true
+            dbProbeRoom = cand
+            dbText = `消息库可读（探针会话「${cand}」取到 ${res.items.length} 条）`
+            break
+          }
+          // 换个会话再试（"没找到这个会话的表" 属于会话维度的问题，不代表库坏了）
+          dbText = res?.error ? '查询失败：' + String(res.error).slice(0, 80) : '查询返回结构异常'
+        } catch (e) {
+          dbText = '读不到：' + String(e?.message || e).slice(0, 90)
+        }
+      }
+      if (!dbOk) {
+        dbAdvice = `已试 ${tried.join(' / ')} 都读不到：hook 的 QueryDB 或轮询器异常（看 bridge 日志的 SQL 失败行）`
       }
     }
-    // 桥连着却读不出库 → 一律判 bad（不再有"跳过"这条路）
+    // 桥连着却读不出库 → 判 bad；连不上 → warn
     const dbLevel = dbOk ? 'ok' : (cs.connected ? 'bad' : 'warn')
     add('hook 存活', dbOk ? 'ok' : dbLevel, dbOk ? 'QueryDB 有响应（hook 正常）' : dbText, dbAdvice)
     add('数据库可读', dbLevel, dbText, dbAdvice)
@@ -4720,6 +5886,9 @@ let res = await callLlm(route, sys, usr, undefined)
   let selfHealDay = ''
   let selfHealCount = 0
   let selfHealBusy = false
+  // wechatPower.start 的每日计数（与自愈分开，但同样有上限）
+  let powerDay = ''
+  let powerCount = 0
   async function trySelfHeal(reason) {
     if (!config.selfHeal || selfHealBusy) return
     const hour = new Date().getHours()
@@ -4767,7 +5936,26 @@ let res = await callLlm(route, sys, usr, undefined)
     if (healthStreak >= 3) {
       const hookBad = badItems.some((i) => i.name === 'hook 存活')
       const dbBad = badItems.some((i) => i.name === '数据库可读')
-      if (hookBad && dbBad) void trySelfHeal('数据库死锁（hook 存活/数据库可读 同时异常）')
+      if (hookBad && dbBad) {
+        // ★ 2026-10-28：两种情况下的"读不到库"是**预期内**的，重启微信只会更糟：
+        //   ① 桥正在暂停/退避（我们自己停了手，库当然读不到）
+        //   ② 微信正在备份/重建数据库（material 刚被写过，句柄短暂失效）
+        //   实测：12:06 那次自愈就是 ① 误判成"数据库死锁"，白重启了一次微信。
+        void (async () => {
+          try {
+            const ps = await client.call('pollStatus', {}, 6000)
+            if (ps && (ps.paused || ps.hardStopped || Number(ps.pauseLeftSec) > 0)) {
+              log('自愈跳过：桥正在暂停/退避中（此时读不到库属预期，不重启微信）')
+              return
+            }
+            if (ps && ps.maintaining) {
+              log('自愈跳过：微信正在备份/重建数据库（material 刚更新，稍后会自己恢复）')
+              return
+            }
+          } catch { /* 状态拿不到就走原流程 */ }
+          void trySelfHeal('数据库死锁（hook 存活/数据库可读 同时异常）')
+        })()
+      }
     }
     if (healthStreak >= 2) {
           const mins = Math.round((healthStreak * (Number(config.healthCheckMs) || 300_000)) / 60000)
@@ -4830,7 +6018,7 @@ let res = await callLlm(route, sys, usr, undefined)
       if (!liveName && raw?.roomName && !String(raw.roomName).endsWith('@chatroom')) r.roomName = raw.roomName
     } catch { /* 没有短期记忆 */ }
     try {
-      const saved = JSON.parse(readFileSync(factsFile(room.roomId), 'utf8'))
+      const saved = JSON.parse(readFileSync(factsPathFor(room.roomId), 'utf8'))
       let arr = Array.isArray(saved) ? saved : []
       // ★ 面板/工具读取路径也要做同样的 v2 归一化，否则这里显示的是"没有强度/情绪的旧数据"，
       //   而机器人内部用的是归一化后的（两边不一致，排查时会被误导）。
@@ -4838,8 +6026,9 @@ let res = await callLlm(route, sys, usr, undefined)
       if (config.memoryV2 !== false) {
         const mig = MV2.migrateList(arr, Date.now(), memCfg())
         arr = MV2.ensureIds(mig.items, Date.now()).items
+        arr = MV2.backfillEmotion(arr, Date.now()).items
       }
-      r.facts = arr
+      r.facts = enrichSourceNames(arr)
     } catch { /* 没有长期记忆 */ }
     return r
   }
@@ -5912,11 +7101,32 @@ let res = await callLlm(route, sys, usr, undefined)
         }
       }
       case 'wechatPower': {
+        // ★ 2026-10-28：这条路径原来是"点了就重启"，既没有"已经在跑"的判断，
+        //   也没有次数上限 —— 误触一次就是全部数据库句柄重来 + 一轮假崩溃记录
+        //   （今天 15:12 那次就是这么来的）。下面加两道闸。
         // 微信客户端电源开关：关 = 杀进程，开 = 启动并自动点「进入微信」
         // 实际动作在桥 → scripts/wechat-power.ps1（UIA 点击只能在 PowerShell 做）
         const action = String(a.action || 'status')
         if (!['status', 'kill', 'start'].includes(action)) {
           return { ok: false, error: 'action 只能是 status / kill / start' }
+        }
+        // ★ 闸①：已经在运行 + 已登录 → 不重启（按钮叫"启动"，不是"重启"）
+        if (action === 'start') {
+          try {
+            const st = await client.call('wechatPower', { action: 'status' }, 15000)
+            if (st && Number(st.procs) > 0 && (st.isLogin === 1 || st.isLogin === true)) {
+              log('[wechatPower] start 被跳过：微信已在运行且已登录（procs=' + st.procs + '）')
+              return { ...st, ok: true, skipped: true, reason: '客户端已在运行且已登录，未重启（避免句柄全部重来）' }
+            }
+          } catch { /* 状态拿不到就继续尝试启动 */ }
+          // ★ 闸②：显式重启每天最多 2 次（和自愈分开计数，但同样有上限）
+          const dstr = new Date().toISOString().slice(0, 10)
+          if (powerDay !== dstr) { powerDay = dstr; powerCount = 0 }
+          if (powerCount >= 2) {
+            log('[wechatPower] start 被拒绝：今天已启动/重启过 ' + powerCount + ' 次')
+            return { ok: false, error: '今天微信已被启动/重启 ' + powerCount + ' 次，为保护数据库不再自动重启（如需强制，请手动运行 deploy-hook.ps1）' }
+          }
+          powerCount++
         }
         // start 要等 UIA 点进主界面 + hook 就绪，放宽到 150 秒
         const timeout = action === 'start' ? 150000 : 40000
@@ -6317,7 +7527,7 @@ let res = await callLlm(route, sys, usr, undefined)
           force: !!a.force,
         }, 240_000)
       case 'memory.list': {
-        const room = await resolveRoom(a.room)
+        const room = globalMemory() ? globalHostRoom() : await resolveRoom(a.room)
         const r = panelRoomView(room)
         const now = Date.now()
         const cfg = memCfg()
@@ -6340,7 +7550,7 @@ let res = await callLlm(route, sys, usr, undefined)
       }
       // ── 记忆 v2 单项操作（面板用）──────────────────────────
       case 'memory.pin': {
-        const room = await resolveRoom(a.room)
+        const room = globalMemory() ? globalHostRoom() : await resolveRoom(a.room)
         const r = panelRoomView(room)
         const hit = (r.facts || []).find((f) => f && f.id === a.id)
         if (!hit) return { ok: false, error: '找不到这条记忆（id 可能已变）' }
@@ -6350,7 +7560,7 @@ let res = await callLlm(route, sys, usr, undefined)
         return { ok: true, pinned: hit.pinned }
       }
       case 'memory.archive': {
-        const room = await resolveRoom(a.room)
+        const room = globalMemory() ? globalHostRoom() : await resolveRoom(a.room)
         const r = panelRoomView(room)
         const hit = (r.facts || []).find((f) => f && f.id === a.id)
         if (!hit) return { ok: false, error: '找不到这条记忆' }
@@ -6362,7 +7572,7 @@ let res = await callLlm(route, sys, usr, undefined)
       }
       case 'memory.review': {
         // "复习"：手动把强度提上去（相当于又被想起来了）
-        const room = await resolveRoom(a.room)
+        const room = globalMemory() ? globalHostRoom() : await resolveRoom(a.room)
         const r = panelRoomView(room)
         const hit = (r.facts || []).find((f) => f && f.id === a.id)
         if (!hit) return { ok: false, error: '找不到这条记忆' }
@@ -6373,25 +7583,160 @@ let res = await callLlm(route, sys, usr, undefined)
         saveFacts(r)
         return { ok: true, strengthBefore: +before.toFixed(2), strengthAfter: +Number(hit.strength).toFixed(2) }
       }
+      // ── 性格（内心）：状态 / 写日记 / 好恶 / 目标 ──────────────
+      case 'persona.state': {
+        const room = globalHostRoom()
+        const r = panelRoomView(room)
+        const st = personaOf(r)
+        const bodyNow = (() => { try { return PS.bodyState(st) } catch { return null } })()
+        const human = {
+          moodCause: (() => { try { return config.humanMoodCause === false ? '' : PS.describeMoodCause(st) } catch { return '' } })(),
+          body: bodyNow ? { note: bodyNow.note, sleepy: !!bodyNow.sleepy, hungry: !!bodyNow.hungry } : null,
+          nag: (() => { try { return PS.nagLevel(st) } catch { return 0 } })(),
+          learnedTerms: (() => { try { return PS.learnedTerms(st, 8) } catch { return [] } })(),
+          unlearnedTerms: (() => { try { return PS.unlearnedTerms(st) } catch { return [] } })(),
+          selfReview: st.selfReview || null,
+          relations: (() => {
+            try {
+              if (config.humanRelationTiers === false) return []
+              return Object.entries(st.affinity || {}).sort((a, b) => b[1] - a[1]).slice(0, 6).map(([w, v]) => ({
+                who: w, name: (config.memberNames || {})[w] || w, value: +Number(v).toFixed(2), tier: PS.affinityTier(v),
+              }))
+            } catch { return [] }
+          })(),
+        }
+        return { ok: true, ...PS.summarize(st), human, enabled: config.personaEnabled !== false, roomId: r.roomId, roomName: r.roomName }
+      }
+      case 'persona.diaryWrite': {
+        const room = globalHostRoom()
+        const r = panelRoomView(room)
+        return await writeDiary(r, { force: true })
+      }
+      case 'persona.tasteAdd': {
+        const room = globalHostRoom()
+        const r = panelRoomView(room)
+        const kind = a.kind === 'dislikes' ? 'dislikes' : 'likes'
+        const res = PS.addTaste(personaOf(r), kind, a.text, 'manual', Date.now(), personaCfg())
+        savePersona(r, res.state)
+        return { ok: true, added: !!res.added, kind }
+      }
+      case 'persona.tasteRemove': {
+        const room = globalHostRoom()
+        const r = panelRoomView(room)
+        const st = personaOf(r)
+        const kind = a.kind === 'dislikes' ? 'dislikes' : 'likes'
+        const list = ((st.tastes && st.tastes[kind]) || []).filter((x) => x.text !== a.text)
+        savePersona(r, { ...st, tastes: { ...st.tastes, [kind]: list }, updatedAt: Date.now() })
+        return { ok: true, left: list.length }
+      }
+      case 'persona.narrativeWrite': {
+        const room = globalHostRoom()
+        const r = panelRoomView(room)
+        return await writeNarrative(r, { force: true })
+      }
+      case 'persona.load': {
+        const room = globalHostRoom()
+        const r = panelRoomView(room)
+        const st = personaOf(r)
+        return { ok: true, ...PS.explainLoad(st, loadCfg()), activeRooms: activeRoomCount() }
+      }
+      case 'persona.selfReview': {
+        const r = globalHostRoom()
+        return await selfReview(r, { force: true })
+      }
+      case 'persona.traits': {
+        const room = globalHostRoom()
+        const r = panelRoomView(room)
+        const st = personaOf(r)
+        return { ok: true, ...PS.summarizeTraits(st), enabled: feedbackEnabled(), settleMin: Number(config.personaFeedbackSettleMin) || 10 }
+      }
+      case 'persona.traitsReset': {
+        const room = globalHostRoom()
+        const r = panelRoomView(room)
+        const st = PS.ensureTraits(personaOf(r), Date.now())
+        savePersona(r, { ...st, traits: { ...st.traitBaseline }, feedbackLog: [], traitsUpdatedAt: Date.now() })
+        log(`性格漂移已复位「${r.roomName || r.roomId}」`)
+        return { ok: true }
+      }
+      case 'persona.narrativeRestore': {
+        const room = globalHostRoom()
+        const r = panelRoomView(room)
+        const st = personaOf(r)
+        const res = PS.restoreNarrative(st, a.version, Date.now(), narrativeCfg())
+        if (!res.ok) return { ok: false, error: res.reason }
+        savePersona(r, res.state)
+        log(`自传回滚「${r.roomName || r.roomId}」→ v${a.version}（新版本 v${res.state.narrative.version}）`)
+        return { ok: true, narrative: res.state.narrative }
+      }
+      case 'persona.goalReroll': {
+        const room = globalHostRoom()
+        const r = panelRoomView(room)
+        const st = PS.rerollGoals(personaOf(r), Date.now(), personaCfg())
+        savePersona(r, st)
+        return { ok: true, goals: st.goals }
+      }
+      case 'memory.purgePreview': {
+        // 只列清单，不动数据
+        const room = globalMemory() ? globalHostRoom() : await resolveRoom(a.room)
+        const r = panelRoomView(room)
+        const cand = MV2.findForgettable(r.facts || [], {
+          maxWeight: a.maxWeight === undefined ? 0.15 : Number(a.maxWeight),
+          onlyUnknown: !!a.onlyUnknown,
+          neverUsed: a.neverUsed === undefined ? true : !!a.neverUsed,
+          olderThanDays: Number(a.olderThanDays) || 0,
+        }, Date.now())
+        return {
+          ok: true,
+          count: cand.length,
+          total: (r.facts || []).filter((x) => x && !x.archived).length,
+          items: cand.slice(0, 50).map((x) => ({
+            id: x.id, text: x.text, w: x._weight, r: x._retention, ageDays: x._ageDays,
+            emotion: (x.emotion || {}).label || '', importance: x.importance,
+          })),
+        }
+      }
+      case 'memory.purge': {
+        // confirm=false → 只回数量；confirm=true → 归档（软删，30 天内可恢复）
+        const room = globalMemory() ? globalHostRoom() : await resolveRoom(a.room)
+        const r = panelRoomView(room)
+        const cand = MV2.findForgettable(r.facts || [], {
+          maxWeight: a.maxWeight === undefined ? 0.15 : Number(a.maxWeight),
+          onlyUnknown: !!a.onlyUnknown,
+          neverUsed: a.neverUsed === undefined ? true : !!a.neverUsed,
+          olderThanDays: Number(a.olderThanDays) || 0,
+        }, Date.now())
+        if (!a.confirm) return { ok: true, count: cand.length, done: false }
+        const ids = new Set(cand.map((x) => x.id))
+        let n = 0
+        const now = Date.now()
+        const next = (r.facts || []).map((x) => {
+          if (!x || !ids.has(x.id)) return x
+          n++
+          return { ...x, archived: true, archivedAt: now, archivedReason: '面板手动清理（低权重）' }
+        })
+        saveFacts({ ...r, facts: next })
+        log(`记忆手动清理：归档 ${n} 条（权重 < ${a.maxWeight === undefined ? 0.15 : a.maxWeight}）`)
+        return { ok: true, count: cand.length, archived: n, done: true }
+      }
       case 'memory.sweep': {
         const res = memorySweepAll()
         return { ok: true, ...res }
       }
       case 'memory.add': {
-        const room = await resolveRoom(a.room)
+        const room = globalMemory() ? globalHostRoom() : await resolveRoom(a.room)
         const r = panelRoomView(room)
         const ok = addFact(r, String(a.add || ''), 'manual')
         return { ok, count: (r.facts || []).length }
       }
       case 'memory.clear': {
-        const room = await resolveRoom(a.room)
+        const room = globalMemory() ? globalHostRoom() : await resolveRoom(a.room)
         const r = panelRoomView(room)
         r.facts = []
         saveFacts(r)
         return { ok: true, count: 0 }
       }
       case 'memory.extract': {
-        const room = await resolveRoom(a.room)
+        const room = globalMemory() ? globalHostRoom() : await resolveRoom(a.room)
         const r = panelRoomView(room)
         // ★ 2026-10-28：开关关着时 extractFacts 直接 return 0，面板却提示"提炼完成：新增 0 条"，
         //   看起来像"提炼失败但没报错"。这里把原因带出去。
@@ -6740,7 +8085,7 @@ let res = await callLlm(route, sys, usr, undefined)
         const ok = addFact(r, String(args.add), 'manual')
         lines.push(ok ? ('已记住：' + args.add) : '这条已经记过了（或太长）')
       }
-      lines.push('「' + r.roomName + '」长期记忆 ' + ((r.facts || []).length) + ' 条｜文件：' + factsFile(r.roomId))
+      lines.push('长期记忆 ' + ((r.facts || []).length) + ' 条（' + (globalMemory() ? '全局共享，所有群通用' : '本群独立') + '）｜文件：' + factsPathFor(r.roomId))
       for (const f of (r.facts || []).slice(-25)) {
         const d = new Date(f.at).toLocaleString('zh-CN', { hour12: false })
         lines.push('  [' + f.kind + '] ' + d + '  ' + f.text)
@@ -6750,6 +8095,7 @@ let res = await callLlm(route, sys, usr, undefined)
       return lines.join('\n')
     },
   }), SHORT + ': wechat_bot_memory')
+
 
   ctx.effect(() => safeRegister({
     name: 'wechat_bot_search',
@@ -6863,6 +8209,8 @@ let res = await callLlm(route, sys, usr, undefined)
     healthCheck,
     lastHealth: () => healthLast,
     lastRoute: () => lastTextRoute || lastRoute,
+    // 路由从哪来：config（插件自己配的）/ dsh（跟随 DSH）/ last（兜底上次）
+    routeSource: () => (config.provider && config.model ? 'config' : 'dsh'),
     hasSpeech: () => !!speechService(),
     hasAttachments: () => {
       try { return !!(ctx.get?.('attachments') ?? ctx.attachments) } catch { return false }
@@ -6920,9 +8268,45 @@ let res = await callLlm(route, sys, usr, undefined)
     })()
   }, 8000))
 
+  try {
+    // 清掉历史版本可能留下的合成房间（它没有 policy，会让配置保存失败）
+    if (rooms.has('_global')) { rooms.delete('_global'); log('已清理残留的合成房间 _global') }
+  } catch { }
+  try {
+    const mig = migrateToGlobalMemory()
+    if (mig.merged) log(`记忆作用域：全局（${mig.from} 个群的 ${mig.merged} 条已合并为一份，所有群共用）`)
+    else if (globalMemory()) log('记忆作用域：全局（所有群共用一份记忆库）')
+    else log('记忆作用域：每群独立（memoryScope=room）')
+  } catch (e) { log('记忆合并检查失败：' + String(e?.message || e).slice(0, 120)) }
   loadNames()      // 载入群成员名字映射
+  startDiaryTimer() // 性格：自我叙事（写日记）
+  startNarrativeTimer() // 性格：自传（她自己写的"我是个什么样的人"）
+  startFeedbackTimer()  // 性格：反馈驱动的漂移（默认关，需手动打开）
+  startHumanTimer()     // 人性化：自我复盘 + 身体感
+  startHuman2Timer()    // 人性化②：承诺兑现 + 自己的事
   // 群名缓存：等 hook/微信稍就绪再拉一次（失败也不影响启动，面板请求时会重试）
   track(setTimeout(() => { void refreshNameCaches() }, 5000))
   log(`插件已启动｜bridge=${config.bridgeUrl}｜昵称=${config.botName}｜闲聊概率=${config.replyProbability}｜安静时段=${config.quietHours || 'off'}｜记忆目录=${memoryDir}`)
+  // ★ 2026-10-28：吃过"ESM 缓存导致用旧模块"的亏（PS.shouldWriteNarrative is not a function）。
+  //   启动时直接检查关键导出，缺了立刻在日志里喊出来。
+  try {
+    const need = {
+      'memory-v2': ['selectMemories', 'reinforceList', 'sweep', 'stats', 'guessEmotion', 'migrateList'],
+      persona: ['createState', 'applyMessage', 'describeState', 'buildInnerBlock',
+        'shouldWriteDiary', 'pushDiary', 'parseDiaryJson', 'addTaste', 'tasteHit', 'rerollGoals', 'progressGoals',
+        'shouldWriteNarrative', 'writeNarrative', 'restoreNarrative', 'validateNarrative', 'buildNarrativePrompt'],
+    }
+    const missing = []
+    if (need['memory-v2'].some((k) => typeof MV2[k] !== 'function')) missing.push('memory-v2')
+    if (need.persona.some((k) => typeof PS[k] !== 'function')) {
+      const lack = need.persona.filter((k) => typeof PS[k] !== 'function')
+      missing.push('persona（缺 ' + lack.join('/') + '）')
+    }
+    if (missing.length) {
+      log('❌ 模块自检失败：' + missing.join('；') + ' —— 多半是 ESM 缓存用了旧文件，需要重启 DSH 或换 ?v=')
+    } else {
+      log('模块自检：memory-v2 ✓｜persona ✓（含自传）')
+    }
+  } catch (e) { log('模块自检异常：' + String(e?.message || e).slice(0, 120)) }
   log(`当前人格：${config.persona}`)
 }

@@ -415,7 +415,15 @@ async function handle(op, a = {}) {
     }
     case 'pollStatus': {
       // 只读：轮询器快照（硬闸 / 暂停 / 连续失败 / 轮数 / 条数 / 表数）
-      return { ok: true, ...bridge.pollStatus?.() }
+      const snap = bridge.pollStatus?.() || {}
+      // ★ maintaining = 微信正在备份/重建数据库（material 刚被写过）。
+      //   这种时候读不到库是**预期内**的：插件据此不要触发自愈重启。
+      let maintaining = false
+      try {
+        const pl = bridge?.poller
+        if (pl && typeof pl._dbMaintaining === 'function') maintaining = !!pl._dbMaintaining().maintaining
+      } catch { /* ignore */ }
+      return { ok: true, ...snap, maintaining }
     }
     case 'wechatPower': {
       // 微信客户端电源开关：kill = 杀进程，start = 启动并自动点「进入微信」，status = 查状态

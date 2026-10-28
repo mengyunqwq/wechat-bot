@@ -10,6 +10,8 @@
  * 产出的事件结构与 hook 回调完全一致，所以桥和插件都不需要改。
  */
 import { createHash } from 'node:crypto'
+import { existsSync, statSync, readdirSync } from 'node:fs'
+import { join } from 'node:path'
 import { decompress as zstdDecompress } from 'fzstd'
 import { resolveDataRoot } from './wechat-image.mjs'
 import { voiceEnabled, findVoiceFile, decodeVoice, decodeVoiceBytes, xmlVoiceMeta } from './wechat-voice.mjs'
@@ -55,7 +57,7 @@ export class DbPoller {
    * @param {number} [o.intervalMs]
    * @param {(path:string,body:any,method?:string,timeout?:number)=>Promise<any>} [o.onReadFail] 读库失败回调（给上层进"禁止发送"窗口用）
    */
-  constructor({ api, emit, log, intervalMs = 2500, onReady = null, onReadFail = null }) {
+  constructor({ api, emit, log, intervalMs = Number(process.env.WECHAT_POLL_MS) || 6000, onReady = null, onReadFail = null }) {
     this.api = api
     this.emit = emit
     this.log = log
@@ -109,6 +111,79 @@ export class DbPoller {
     else if (reason) this.log('轮询状态重置（' + reason + '）')
   }
 
+  /**
+   * 微信是否正在做数据库备份/重建（material 三件套刚被写过）。
+   *
+   * 背景：db_storage 下每个库都有 xxx.db-first/-incremental/-last.material，
+   * 微信会周期性重写它们（实测一天 7 次）。重写期间库句柄短暂失效，
+   * 我们的读会失败 —— 这是**预期内的**，不该累计成"连续失败"进而暂停/告警/
+   * 触发插件自愈重启微信（那会把一次几秒的窗口放大成一次重启）。
+   *
+   * 判定：扫描 db_storage（缓存 5 秒），取最新 material 的 mtime。
+   *   · 90 秒内写过 → maintaining = true
+   *   · 但最多静默 5 分钟（超过就当作真故障，避免掩盖真实问题）
+   */
+  _dbMaintaining() {
+    const now = Date.now()
+    if (this._mainCheckAt && now - this._mainCheckAt < 5000) return this._mainState
+    this._mainCheckAt = now
+    let newest = 0
+    try {
+      const roots = [
+        'D:\\Users\\Administrator\\xwechat_files',
+        join(process.env.USERPROFILE || '', 'xwechat_files'),
+        join(process.env.USERPROFILE || '', 'Documents', 'xwechat_files'),
+      ]
+      const seen = new Set()
+      for (const root of roots) {
+        if (!root || seen.has(root)) continue
+        seen.add(root)
+        try {
+          if (!existsSync(root)) continue
+          const st = statSync(root)
+          if (!st.isDirectory()) continue
+        } catch { continue }
+        // 只在 <root>/<账号>/db_storage 下找，最多两层，避免全盘扫
+        let accounts = []
+        try { accounts = readdirSync(root).filter((n) => /^wxid_[0-9a-z]+_/i.test(n)) } catch { continue }
+        for (const acc of accounts) {
+          const base = join(root, acc, 'db_storage')
+          if (!existsSync(base)) continue
+          let subs = []
+          try { subs = readdirSync(base) } catch { continue }
+          for (const sub of subs) {
+            const dir = join(base, sub)
+            try { if (!statSync(dir).isDirectory()) continue } catch { continue }
+            let files = []
+            try { files = readdirSync(dir) } catch { continue }
+            for (const f of files) {
+              if (!f.endsWith('.material')) continue
+              try {
+                const m = statSync(join(dir, f)).mtimeMs
+                if (m > newest) newest = m
+              } catch { /* ignore */ }
+            }
+          }
+        }
+      }
+    } catch { /* 扫描失败就当没在维护 */ }
+    const quietMs = 90_000
+    const capMs = 5 * 60_000
+    const active = newest > 0 && now - newest < quietMs
+    // 静默上限：从第一次观察到起算，超过 5 分钟就不再静默
+    if (active) {
+      if (!this._mainSince) this._mainSince = now
+      if (now - this._mainSince > capMs) {
+        this._mainState = { maintaining: false, newest, capped: true }
+        return this._mainState
+      }
+    } else {
+      this._mainSince = 0
+    }
+    this._mainState = { maintaining: active, newest, capped: false }
+    return this._mainState
+  }
+
   /** 当前是否处于"暂停轮询"窗口（含硬闸） */
   paused() { return this._hardGiveUp || (this._pauseUntil > 0 && Date.now() < this._pauseUntil) }
 
@@ -117,6 +192,20 @@ export class DbPoller {
 
   /** 读库失败：连续 5 次 → 暂停 + 指数退避 */
   _noteReadFail(e) {
+    // ★ 微信正在备份/重建库 → 这几秒读不到是预期的：不计入连续失败、不暂停、不告警。
+    //   否则一次 30 秒的窗口会被放大成"暂停 60s + 插件自愈重启微信"。
+    try {
+      const m = this._dbMaintaining()
+      if (m.maintaining) {
+        this._expectFailLogged = this._expectFailLogged || 0
+        if (Date.now() - this._expectFailLogged > 60_000) {
+          this._expectFailLogged = Date.now()
+          this.log('微信正在备份/重建数据库（material 刚更新）→ 本次读失败按预期忽略，不计入连续失败')
+        }
+        this._lastReadErr = String(e?.message || e)
+        return
+      }
+    } catch { /* 检测失败就走正常流程 */ }
     this.stats.errors++
     this._consecFail++
     this._lastReadErr = String(e?.message || e)
