@@ -349,6 +349,14 @@ export const CONFIG_META = {
   linkVideoFrames: {
     group: 'link', label: '抽帧数', type: 'number', min: 0, max: 12, step: 1, unit: '帧',
   },
+  linkVideoFps: {
+    group: 'link', label: '每秒抽几帧（链接视频）', type: 'number', min: 0.2, max: 4, step: 0.2, unit: '帧/秒',
+    help: '默认 1（每秒一帧）。每 20 帧拼一张联系表，长视频会分成多张逐张识别。调高更细但更慢更费。',
+  },
+  videoFps: {
+    group: 'vision', label: '每秒抽几帧（微信视频）', type: 'number', min: 0.2, max: 4, step: 0.2, unit: '帧/秒',
+    help: '同上，作用于微信里直接发的视频。',
+  },
 
   // ── 抖音 ────────────────────────────────────────────────────
   douyinShare: {

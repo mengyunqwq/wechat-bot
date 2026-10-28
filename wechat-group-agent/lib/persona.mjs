@@ -833,26 +833,131 @@ export function describeMoodCause(state, now = Date.now(), windowMs = 3 * 3_600_
 }
 
 // ── E. 关系分层：亲密度 → 三档态度 ─────────────────────────────────
-export function affinityTier(v) {
+/**
+ * 好感度七阶（2026-10-29 用户要求）
+ *
+ *   50% = 正常普通人 —— 这是**中点**，不是"陌生人"。
+ *   往下：有点烦 → 讨厌（可以讥讽）
+ *   往上：有点喜欢 → 喜欢（会求抱抱）→ 很亲（只有这一档可以亲密）
+ *
+ * 每档都带一个"能做什么 / 不能做什么"，直接进提示词，避免模型自由发挥。
+ */
+export const AFFINITY_STAGES = [
+  { key: 'hate',      min: 0.00, max: 0.14, label: '讨厌',    tone: '讥讽' },
+  { key: 'annoy',     min: 0.15, max: 0.29, label: '有点烦',  tone: '敷衍' },
+  { key: 'cold',      min: 0.30, max: 0.44, label: '冷淡',    tone: '客气但短' },
+  { key: 'normal',    min: 0.45, max: 0.55, label: '普通人',  tone: '正常' },
+  { key: 'friend',    min: 0.56, max: 0.70, label: '朋友',    tone: '热络' },
+  { key: 'bestie',    min: 0.71, max: 0.85, label: '好朋友',  tone: '很熟、会撒娇' },
+  { key: 'crush',     min: 0.86, max: 1.00, label: '心动',    tone: '可以亲密' },
+]
+
+/** 七阶：返回阶段对象（带 key/label/tone/min/max） */
+/**
+ * 「只喜欢一个人」（2026-10-29 用户要求）
+ *
+ * 语义：最多只有一个人能进入「有点喜欢」以上（>55%）。
+ *   · 那个人默认是主人（masterWxid / masterName 命中者）
+ *   · 其他人一律压在 55%（普通人）以内 —— 好感可以涨到 55% 见顶
+ *   · 例外：某人对她足够好（>85%）且主人缺席时，允许她自己"选中"他
+ *
+ * @returns {{state, top, clamped: string[]}}  clamped = 本次被压回去的人
+ */
+export function enforceSingleLove(state, { masterWxid = '', masterName = '', cap = 0.70, allowOverrideAt = 0.86 } = {}) {
+  const aff = { ...(state.affinity || {}) }
+  let top = ''
+  let topV = -1
+  for (const [w, v] of Object.entries(aff)) {
+    const val = clamp01(num(v))
+    if (masterWxid && w === masterWxid) {           // 主人优先
+      top = w; topV = Math.max(val, 0.95); break
+    }
+    if (val > topV) { topV = val; top = w }
+  }
+  if (!top) return { state, top: null, clamped: [] }
+  // 主人不在场时：若最高者已到 allowOverrideAt（她真的动心了），允许他独占
+  const keepTop = top
+  const clamped = []
+  for (const [w, v] of Object.entries(aff)) {
+    if (w === keepTop) continue
+    const val = clamp01(num(v))
+    if (val > cap) { aff[w] = cap; clamped.push(w) }
+  }
+  if (!clamped.length) return { state, top: { wxid: keepTop, value: topV }, clamped }
+  return {
+    state: { ...state, affinity: aff, loveLockedAt: Date.now() },
+    top: { wxid: keepTop, value: topV },
+    clamped,
+  }
+}
+
+export function affinityStage(v) {
   const x = clamp01(v)
-  if (x >= 0.75) return 'close'
-  if (x >= 0.45) return 'familiar'
-  return 'stranger'
+  for (const st of AFFINITY_STAGES) {
+    if (x >= st.min && x <= st.max) return st
+  }
+  return x > 0.55 ? AFFINITY_STAGES[5] : AFFINITY_STAGES[3]
 }
 
-export const TIER_STYLE = {
-  close: '很熟：可以怼回去、可以撒娇、称呼随意、会主动关心他',
-  familiar: '算熟：正常聊天、偶尔开玩笑，不撒娇',
-  stranger: '不熟：礼貌但不热络，不主动搭话，不透露私事',
+/** 兼容旧调用：只给 key（hate/annoy/cold/normal/like/fond/intimate） */
+export function affinityTier(v) {
+  return affinityStage(v).key
 }
 
-/** 按亲密度给"当前说话对象"的差别化指令 */
+// 旧 key 兼容（面板/测试可能还有 like/fond/intimate 的写法）
+export const TIER_ALIAS = { like: 'friend', fond: 'bestie', intimate: 'crush' }
+
+/** 每一档"她可以怎么说话"（直接塞提示词，越往下说越难听，越往上越亲） */
+export const STAGE_STYLE = {
+  hate: '讥讽、冷淡、爱答不理：可以阴阳怪气一句、可以只回两个字，不主动帮他任何事',
+  annoy: '敷衍：回得短、没耐心、不接话头；他多说两句你会嫌烦',
+  cold: '客气但疏远：礼貌回答，不热络、不开玩笑、不透露自己的事',
+  normal: '像普通群友：正常聊天、偶尔接梗，既不亲密也不刻薄',
+  friend: '朋友：愿意多聊两句、会主动接话、会关心他在说什么',
+  bestie: '好朋友：很熟、会开玩笑互怼、会主动找他聊天，但不做亲密举动',
+  crush: '心动（只有他一个）：可以撒娇、要抱抱、说想他 —— 这是**唯一**允许说亲密话的人',
+}
+
+/** 按好感度给"当前说话对象"的差别化指令（七阶 + 是否最高分） */
 export function describeRelationTo(state, senderWxid, name) {
   if (!senderWxid) return ''
   const v = clamp01(num((state.affinity || {})[senderWxid], 0.5))
-  const tier = affinityTier(v)
-  return `${name || senderWxid}（${Math.round(v * 100)}%，${TIER_STYLE[tier]}）`
+  const st = affinityStage(v)
+  const who = `${name || senderWxid}（好感度 ${Math.round(v * 100)}%，${st.label}：${STAGE_STYLE[st.key]}）`
+  const top = topAffinityPerson(state)
+  if (top && top.wxid === senderWxid && st.key === 'crush') {
+    return who + '｜**他是你现在的最高好感，是唯一可以亲密的人**'
+  }
+  return who
 }
+
+/**
+ * 好感度最高的人（亲密行为只对他）。
+ * ★ 主人默认最高：只要配了 masterName，主人就按 >= 0.95 算，
+ *   除非有人被手动/自动顶到比他还高（那种情况视为"她用行动选了别人"，允许）。
+ */
+export function topAffinityPerson(state, { masterName = '', masterWxid = '' } = {}) {
+  const aff = { ...(state.affinity || {}) }
+  if (masterWxid) aff[masterWxid] = Math.max(num(aff[masterWxid], 0), 0.95)
+  let best = null
+  for (const [wxid, v] of Object.entries(aff)) {
+    if (!best || num(v) > best.value) best = { wxid, value: clamp01(num(v)) }
+  }
+  if (best && masterName && !best.name) best.name = best.wxid === masterWxid ? masterName : ''
+  return best
+}
+
+/** 亲密行为门槛：只有 intimate 档 + 必须是最高好感那个人 */
+export function canBeIntimate(state, senderWxid, opts = {}) {
+  if (!senderWxid) return { ok: false, why: '不知道是谁' }
+  const v = clamp01(num((state.affinity || {})[senderWxid], 0.5))
+  const st = affinityStage(v)
+  if (st.key !== 'crush') return { ok: false, why: `好感度 ${Math.round(v * 100)}% 只到「${st.label}」，不能亲密` }
+  const top = topAffinityPerson(state, opts)
+  if (top && top.wxid !== senderWxid) return { ok: false, why: '他不是最高好感的人' }
+  return { ok: true, why: '最高好感 + 很亲' }
+}
+
 
 // ── F. 学新梗：新词候选 → 问一句 → 学会自己用 ──────────────────────
 /**
@@ -907,6 +1012,41 @@ export function noteTerm(state, term, now = Date.now(), opts = {}) {
 }
 
 /** 还没学会、但已经出现过的词（可以问"这啥意思"） */
+/**
+ * 手动加一个群梗（面板"添加"按钮用）。
+ * 默认直接标记 learned=true（你加的肯定是真梗，不用等它出现几次）。
+ */
+export function addTerm(state, term, now = Date.now(), opts = {}) {
+  const t = String(term || '').trim().replace(/^#/, '')
+  const len = [...t].length
+  if (!t || len < 1 || len > 20) return { state, ok: false, why: '长度要 1~20 字' }
+  const lex = { ...(state.lexicon || {}) }
+  if (lex[t]) {
+    lex[t] = { ...lex[t], count: Math.max(2, num(lex[t].count, 0)), learned: true, lastAt: now, manual: true }
+    return { state: { ...state, lexicon: lex, updatedAt: now }, ok: true, why: '已存在，已标记为会用', existed: true }
+  }
+  lex[t] = { count: 2, firstAt: now, lastAt: now, learned: opts.learned !== false, manual: true }
+  // 上限 40：手加的词优先保留，其余按最近使用排
+  const keys = Object.keys(lex).sort((a, b) => {
+    const ma = lex[a].manual ? 1 : 0
+    const mb = lex[b].manual ? 1 : 0
+    if (ma !== mb) return mb - ma
+    return num(lex[b].lastAt) - num(lex[a].lastAt)
+  }).slice(0, 40)
+  const trimmed = {}
+  for (const k of keys) trimmed[k] = lex[k]
+  return { state: { ...state, lexicon: trimmed, updatedAt: now }, ok: true, why: '已添加' }
+}
+
+/** 删掉一个群梗（面板 chips 上的 × ） */
+export function removeTerm(state, term, now = Date.now()) {
+  const t = String(term || '').trim()
+  const lex = { ...(state.lexicon || {}) }
+  if (!lex[t]) return { state, ok: false, why: '表里没有这个词' }
+  delete lex[t]
+  return { state: { ...state, lexicon: lex, updatedAt: now }, ok: true }
+}
+
 export function unlearnedTerms(state) {
   return Object.entries(state.lexicon || {})
     .filter(([, v]) => v && !v.learned && num(v.count) >= 2)

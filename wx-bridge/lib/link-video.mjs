@@ -18,7 +18,7 @@
  *     删的时候整目录 `rmSync` 一次干净（**不会漏下 yt-dlp 的 .part/.info.json/.fNNN.m4a 残留**）。
  */
 import { execFile, execFileSync } from 'node:child_process'
-import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync } from 'node:fs'
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { dirname, extname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { probeVideo } from './wechat-video.mjs'
@@ -401,17 +401,39 @@ function readInfoJson(dir) {
  *   siteName:string,host:string,resolvedUrl:string,videoBytes:number,frames:number,
  *   sheetBytes:number}|null>}
  */
+/**
+ * 抖音/抖音短链：默认复用「刷推荐流」那个 Playwright 登录态导出的 cookies。
+ * 为什么：yt-dlp 下抖音会报 "Fresh cookies (not necessarily logged in) are needed"，
+ * 而 douyin-brush.py 每次刷完都会把它导到 data/_douyin/cookies.txt。
+ * 这样"静音刷 + 下载抽音轨"才能同时成立（播放静音、音轨从文件里抽）。
+ */
+export function defaultDouyinCookies(url = '') {
+  try {
+    const u = String(url || '')
+    if (!/douyin|iesdouyin/i.test(u)) return ''
+    const p = join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'data', '_douyin', 'cookies.txt')
+    if (!existsSync(p)) return ''
+    const st = statSync(p)
+    if (st.size < 100) return ''
+    // 太旧就提醒（cookies 一般能撑几天；太旧 yt-dlp 会说 stale）
+    if (Date.now() - st.mtimeMs > 7 * 86_400_000) return p   // 还是给它，失败会优雅降级
+    return p
+  } catch { return '' }
+}
+
 export async function fetchLinkVideoSheet(url, {
-  maxSeconds = 300, maxMB = 80, timeoutMs = 120_000, cookies = '', frames = 6, log = () => {},
+  maxSeconds = 300, maxMB = 80, timeoutMs = 120_000, cookies = '', frames = 6, fps = 1, log = () => {},
 } = {}) {
   const tag = '链接视频'
-  const v = await fetchLinkVideo(url, { maxSeconds, maxMB, timeoutMs, cookies, log })
+  // 没显式给 cookies 时，抖音自动用刷推荐流导出的那份
+  const useCookies = cookies || defaultDouyinCookies(url)
+  const v = await fetchLinkVideo(url, { maxSeconds, maxMB, timeoutMs, cookies: useCookies, log })
   if (!v?.file) return null
   try {
     // ⚠️ tag 必须**唯一**：probeVideo/video-probe.py 的产物文件名是 `<tag>-sheet.jpg` / `<tag>-audio.wav`，
     // tag 撞了的话两条链接同时处理会互相覆盖联系表（描述到别人的视频 ✗）——和 type 43 那条路的 tag 一个道理。
     const tag = `link-${v.site}-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`
-    const r = probeVideo(v.file, { frames: Number(frames) || 6, tag, log })
+    const r = probeVideo(v.file, { frames: Number(frames) || 6, fps: Number(fps) > 0 ? Number(fps) : 1, tag, log })
     if (!r?.sheet) {
       log(`${tag}：抽帧/拼表失败（下载是成功的，${Math.round(v.bytes / 1024)}KB）→ 放弃`)
       return null
@@ -420,6 +442,9 @@ export async function fetchLinkVideoSheet(url, {
       + `｜时长 ${r.durationSec || v.durationSec}s${r.wav ? `｜音轨 ${r.wavSeconds}s` : '｜无音轨'}`)
     return {
       sheet: r.sheet,
+      // ★ 每秒 1 帧、每 20 帧一张 → 长视频有多张联系表。这里全部透传，
+      //   让插件逐张交给视觉（之前只传第一张，等于只看开头 20 秒）。
+      sheets: Array.isArray(r.sheets) ? r.sheets : (r.sheet ? [r.sheet] : []),
       wav: r.wav || '',
       durationSec: r.durationSec || v.durationSec || 0,
       title: v.title,
@@ -436,5 +461,80 @@ export async function fetchLinkVideoSheet(url, {
     // 带重试：Windows 上刚下完的大文件句柄可能还没释放（实测踩到过），删不掉就交给 1 小时后的兜底清理
     if (await removeLinkVideoDir(v.tmpDir)) log(`${tag}：已删除下载的临时视频目录`)
     else log(`${tag}：⚠️ 临时目录这次没删掉（${v.tmpDir}）—— 已交给 pruneLinkVideoTemp 兜底（1 小时后自动清）`)
+  }
+}
+
+/**
+ * 直链视频（抖音 CDN 的 playAddr 等）→ 下载 → 抽帧 + 抽音轨。
+ *
+ * 为什么需要它（2026-10-29）：
+ *   yt-dlp 下抖音会报 "Fresh cookies (not necessarily logged in) are needed"，
+ *   即使把登录态 cookies 导出来喂它也不认（它要的是浏览器同源上下文）。
+ *   而 Playwright 刷推荐流时，网络响应里本来就有 `video.play_addr.url_list`（CDN 直链）——
+ *   拿这个直链直接下，绕开 yt-dlp 的抖音解析，也绕开 cookies 问题。
+ *
+ * 注意：CDN 直链**需要 Referer + 移动端 UA**，否则 403；链接有时效（几小时）。
+ */
+export async function fetchDirectVideoSheet(url, {
+  referer = 'https://www.douyin.com/', ua = '', maxMB = 80, frames = 6, fps = 1, timeoutMs = 120_000, log = () => {},
+} = {}) {
+  const tag = '直链视频'
+  if (!/^https?:\/\//i.test(String(url || ''))) {
+    log(`${tag}：不是 http(s) 链接，跳过`)
+    return null
+  }
+  const dir = join(LINK_TMP, 'direct-' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5))
+  try {
+    mkdirSync(dir, { recursive: true })
+  } catch { /* ignore */ }
+  const dst = join(dir, 'direct.mp4')
+  const UA = ua || 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36'
+  try {
+    const ac = new AbortController()
+    const timer = setTimeout(() => ac.abort(), timeoutMs)
+    let res
+    try {
+      res = await fetch(url, {
+        signal: ac.signal,
+        headers: {
+          'user-agent': UA,
+          referer,
+          accept: '*/*',
+          'accept-language': 'zh-CN,zh;q=0.9',
+          range: 'bytes=0-',
+        },
+      })
+    } finally { clearTimeout(timer) }
+    if (!res || !res.ok) {
+      log(`${tag}：下载失败 HTTP ${res ? res.status : '?'}（直链可能过期或需要 Referer）`)
+      return null
+    }
+    const len = Number(res.headers.get('content-length') || 0)
+    if (len > maxMB * 1024 * 1024) {
+      log(`${tag}：太大（${Math.round(len / 1048576)}MB > ${maxMB}MB）→ 放弃`)
+      return null
+    }
+    const buf = Buffer.from(await res.arrayBuffer())
+    if (!buf.length) { log(`${tag}：下载到 0 字节`); return null }
+    writeFileSync(dst, buf)
+    log(`${tag}：已下载 ${Math.round(buf.length / 1024)}KB → 抽帧/抽音轨…`)
+    const r = probeVideo(dst, { frames: Number(frames) || 6, fps: Number(fps) > 0 ? Number(fps) : 1, tag, log })
+    if (!r?.sheet && !r?.wav) {
+      log(`${tag}：抽帧和音轨都失败（文件可能不完整）`)
+      return null
+    }
+    return {
+      sheet: r.sheet || '',
+      sheets: Array.isArray(r.sheets) ? r.sheets : (r.sheet ? [r.sheet] : []),
+      wav: r.wav || '',
+      durationSec: r.durationSec || 0,
+      frames: r.frames || 0,
+      sheetBytes: r.sheetBytes || 0,
+      videoBytes: buf.length,
+      direct: true,
+    }
+  } catch (e) {
+    log(`${tag}：异常 ${String(e?.message || e).slice(0, 120)}`)
+    return null
   }
 }

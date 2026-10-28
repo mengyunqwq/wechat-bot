@@ -289,7 +289,7 @@ export function pruneVideoTemp(maxAgeMs = 60 * 60_000) {
  * 跑 video-probe.py：抽帧拼联系表 + 抽音轨成 16k WAV。
  * @returns {{sheet:string,wav:string,durationSec:number,frames:number,sheetBytes:number,wavSeconds:number}|null}
  */
-export function probeVideo(videoPath, { frames = 6, tag = 'video', log = () => {} } = {}) {
+export function probeVideo(videoPath, { frames = 6, fps = 1, tag = 'video', log = () => {} } = {}) {
   if (!existsSync(SCRIPT)) { log(`视频抽帧：脚本不存在（${SCRIPT}）`); return null }
   if (!existsSync(videoPath)) { log(`视频抽帧：源文件不存在（${videoPath}）`); return null }
   try {
@@ -299,8 +299,12 @@ export function probeVideo(videoPath, { frames = 6, tag = 'video', log = () => {
   } catch { /* ignore */ }
   const safe = String(tag).replace(/[^\w.-]/g, '_').slice(0, 40) || 'video'
   try {
+    // ★ 2026-10-28：加 --fps（每秒抽几帧，默认 1）。脚本会按时长 × fps 决定帧数，
+    //   每 20 帧拼一张联系表 → 长视频会产出多张（之前调用方只用了第一张，等于只看到前 20 秒）。
     const out = execFileSync(PY, [SCRIPT, '--in', videoPath, '--out-dir', VIDEO_TMP,
-      '--frames', String(Number(frames) || 6), '--tag', safe],
+      '--frames', String(Number(frames) || 6),
+      '--fps', String(Number(fps) > 0 ? Number(fps) : 1),
+      '--tag', safe],
     { windowsHide: true, timeout: 300_000, encoding: 'utf8', env: PY_ENV })
     for (const line of String(out || '').split(/\r?\n/)) {
       if (line.startsWith('JSON: ')) {

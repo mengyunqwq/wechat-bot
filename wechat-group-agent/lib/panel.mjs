@@ -40,7 +40,10 @@ const ALLOWED_OPS = new Set([
   'persona.state', 'persona.diaryWrite', 'persona.tasteAdd', 'persona.tasteRemove', 'persona.goalReroll',   // ★ 性格四件套
   'persona.narrativeWrite', 'persona.narrativeRestore',   // ★ 自传（她自己写人设）
   'persona.traits', 'persona.traitsReset', 'persona.load',   // ★ 方案⑥ 反馈驱动漂移 + 精力负荷
-  'persona.selfReview',   // ★ G 自我复盘      // ★ 2026-10-27：TTS 服务（GPT-SoVITS）状态/启停/重启/试合成
+  'persona.selfReview',   // ★ G 自我复盘
+  'persona.settleNow',    // ★ 反馈队列立即结算
+  'persona.addTerm',      // ★ 手动加群梗
+  'persona.removeTerm',   // ★ 删群梗      // ★ 2026-10-27：TTS 服务（GPT-SoVITS）状态/启停/重启/试合成
 ])
 
 /**

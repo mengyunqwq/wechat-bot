@@ -1270,7 +1270,7 @@ export class WeChatHookBridge {
    *
    * @returns {{file:string, kind:'video'|'cover', wav:string, durationSec:number, frames:number, note:string, srcVideo?:string}|null}
    */
-  async fetchVideo(xml, roomId = '', nearTs = 0, frames = 6) {
+  async fetchVideo(xml, roomId = '', nearTs = 0, frames = 6, fps = 1) {
     const log = (s) => this.log(s)
     let root = ''
     try { root = await resolveDataRoot(this.api.bind(this), this.selfWxid || '') } catch { /* ignore */ }
@@ -1283,7 +1283,7 @@ export class WeChatHookBridge {
       if (hv) {
         const mp4 = hiresVideoToMp4(hv.path)
         this.log(`高分辨率视频命中：${hv.name}（${Math.round(hv.size / 1024)}KB）→ ${mp4}`)
-        const r = probeVideo(mp4, { frames: Number(frames) || 6, fps: 1, tag, log })
+        const r = probeVideo(mp4, { frames: Number(frames) || 6, fps: Number(fps) > 0 ? Number(fps) : 1, tag, log })
         if (r?.sheet) {
           const sheetCount = (r.sheets || [r.sheet]).length
           this.log(`视频内容已抽取：${r.frames} 帧（每秒 1 帧）→ ${sheetCount} 张联系表`

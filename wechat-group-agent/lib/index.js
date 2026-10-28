@@ -16,9 +16,9 @@
  */
 import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, unlinkSync, writeFileSync, copyFileSync, rmSync, openSync, closeSync } from 'node:fs'
 import { execFileSync, execSync, exec as execCb, spawn as spawnCb } from 'node:child_process'
-import * as MV2 from './memory-v2.mjs?v=vmvry562n'   // 艾宾浩斯遗忘曲线 + 情绪加权（?v= 用于打破 ESM 缓存）
+import * as MV2 from './memory-v2.mjs?v=vmvscopc1'   // 艾宾浩斯遗忘曲线 + 情绪加权（?v= 用于打破 ESM 缓存）
 import * as H2 from './human2.mjs'   // 第二轮人性化：承诺/纠错/沉默/追话/联想/自己的事
-import * as PS from './persona.mjs?v=vmvry562n'      // 性格四件套 + 自传（?v= 打破 ESM 缓存）
+import * as PS from './persona.mjs?v=vmvscopc1'      // 性格四件套 + 自传（?v= 打破 ESM 缓存）
 import net from 'node:net'
 import { request as httpsRequest } from 'node:https'
 import { join, dirname } from 'node:path'
@@ -46,7 +46,7 @@ try {
 } catch { /* ignore */ }
 
 export const name = '@dsh-external/dsh-wechat-bot'
-export const version = '2.0.0'
+export const version = '2.0.1'
 // Cordis 4.0.4 的 inject 只认**数组**或"服务名→配置"映射；
 // 写成 { required, optional } 会让依赖解析失败、fiber 永远 pending（踩过：改了代码却一直跑旧实例）。
 // 这里只声明必然存在的两个服务；attachments（视觉识别用）改为**惰性获取**，
@@ -317,13 +317,16 @@ const DEFAULT_CONFIG = {
   linkVideoMaxMB: 80,            // 大小上限（MB）：超了桥侧直接放弃（yt-dlp --max-filesize）
   linkVideoCooldownMs: 120_000,  // 同一个群两分钟内只处理一条链接（防刷）
   linkVideoTimeoutMs: 120_000,   // 桥侧下载超时（到点杀子进程；被@时也不放宽，免得卡住）
-  linkVideoFrames: 6,            // 抽几帧拼联系表（0 = 用 videoFrames）
+  linkVideoFrames: 6,            // 时长未知时抽几帧（时长已知时按 fps × 时长）
+  videoFps: 1,                  // ★ 微信视频每秒抽几帧（默认 1，每 20 帧一张联系表）
+  linkVideoFps: 1,               // ★ 每秒抽几帧（默认 1）：1 fps + 每 20 帧一张联系表
 
   // ── 抖音自动刷（★ 只读）+ 挑一条分享到群 ──────────────────────────
   //   红线：只读（不点赞 / 不评论 / 不关注 / 不私信）—— 脚本里写死。
   //   为什么只读：抖音风控对"写操作"极敏感，自动点赞/评论基本必封号。
   douyinShare: true,                  // 总开关（关掉就完全不刷）
   douyinShareIntervalMs: 7_200_000,   // 至少隔多久刷一次（默认 2 小时）
+  douyinAudioViaDownload: true,       // ★ 静音刷抖音时，音轨从下载的视频里抽（不再靠浏览器录音）
   douyinBrushCount: 3,                // 每次刷几条候选（3 条挑 1 条，够快也不至于没得选）
   // ── 受限自愈（默认关闭）───────────────────────────────────────
   //   仅针对「hook 死锁」这一个特征：status 正常、execute 永远超时、桥和客户端都活着。
@@ -440,6 +443,7 @@ const DEFAULT_CONFIG = {
   // ── 更像人的细节（B~I）────────────────────────────────────
   humanImperfectRecall: true,     // B：记不清就说得含糊（按保持率 R 分级表达）
   humanMoodCause: true,           // C：心情要有来由（能说出"为什么"）
+  personaLoveExclusive: true,        // ★ 只喜欢一个人：其他人好感压在 55%（普通）以内
   humanRelationTiers: true,       // E：对熟人/生人态度不同
   humanLearnTerms: true,          // F：遇到群里的新词会先问、再学着用
   humanBodyState: true,           // H：只"困/饿"，且必须自洽（不编造生活）
@@ -462,7 +466,7 @@ const DEFAULT_CONFIG = {
   // ── 方案⑥ 反馈驱动的性格漂移 ──────────────────────────────
   personaFeedback: false,         // 默认关！先观察日志再决定开（风险最高的一项）
   personaFeedbackLr: 0.018,       // 学习率（每次调整幅度）
-  personaFeedbackSettleMin: 10,   // 发言后多少分钟结算反馈
+  personaFeedbackSettleMin: 3,    // 发言后多少分钟结算反馈（收到接话会提前结算）
   // 问过的问题等多久算"还没人接"（这期间不再主动追问同一件事）
   pendingQuestionWaitMs: 45 * 60_000,
   minReplyGapMs: 6_000,          // 同群两次回复最小间隔（对话延续时只要求 2s）
@@ -1290,6 +1294,7 @@ const namesFile = join(dirname(memoryDir), 'members.json')
     r.msgs.push({ id: m.id || '', ts, isSelf: !!m.isSelf, sender: m.sender, senderName, text: m.text })
     // 性格：每条消息都过一遍状态机（心情/精力/亲密度/目标进度）
     try { personaOnMessage(r, m) } catch { /* 性格坏不影响对话 */ }
+    try { applySingleLove(r) } catch { /* 独占钳制失败不影响对话 */ }
     if (r.msgs.length > 300) r.msgs = r.msgs.slice(-300)
     if (++r.dirty >= 20) saveMemory(r)
   }
@@ -1510,6 +1515,7 @@ const namesFile = join(dirname(memoryDir), 'members.json')
           ? await client.call('fetchVideo', {
             xml: m.xml || '', roomId: m.roomId || '', ts: m.ts || 0,
             frames: Number(config.videoFrames) || 6,
+            fps: config.videoFps === undefined ? 1 : Number(config.videoFps),
           }, 300_000)
           : await client.call('fetchMedia', { xml: m.xml || '', type: m.type, roomId: m.roomId || '', ts: m.ts || 0 }, 90_000)
         if (media?.file) {
@@ -2346,6 +2352,24 @@ ${cur.text}`
     }
   }
 
+  /** ★ 只喜欢一个人：把除"心动对象"以外的人好感压回 ≤55%（每次更新后调用） */
+  function applySingleLove(r) {
+    if (config.personaLoveExclusive === false) return
+    try {
+      const st = personaOf(r)
+      const masterWxid = Object.keys(st.affinity || {}).find((w) => {
+        const nm = String((config.memberNames || {})[w] || '').trim()
+        return config.masterName && nm && nm === String(config.masterName).trim()
+      }) || ''
+      const res = PS.enforceSingleLove(st, { masterWxid, masterName: config.masterName || '' })
+      if (res.clamped && res.clamped.length) {
+        savePersona(r, res.state)
+        const names = res.clamped.map((w) => (config.memberNames || {})[w] || w).slice(0, 3)
+        log(`好感度：只喜欢一个人 → 把 ${names.join('、')}${res.clamped.length > 3 ? ' 等' : ''} 压回 55%（普通人）`)
+      }
+    } catch { /* 不影响主流程 */ }
+  }
+
   /** 消息驱动的状态更新（每条群消息都过一遍，纯内存计算，很便宜） */
   function personaOnMessage(r, m) {
     if (config.personaEnabled === false) return
@@ -2448,7 +2472,11 @@ ${cur.text}`
   //  发一条 → 记下"这句话用了哪些行为维度" → 等 settleMin 分钟 →
   //  看群里真实反应（被夸/被接话/被怼/没人说话）→ 小幅调整对应的 trait。
   //  默认关闭（personaFeedback=false），先在日志里看它打算怎么调，确认没问题再开。
-  let pendingFeedback = []      // [{roomId, at, sig, parts}]
+  // ★ 2026-10-28 优化：队列改存进 persona 状态（落盘），插件重载不再丢。
+  //   原来只在内存里、还要等 10 分钟才结算 —— 今天重载十几次，每条都在窗口内被清空，
+  //   所以 feedbackLog 一直是 0、traits 一动不动（用户实测"性格漂移一直不变"）。
+  //   现在：① 落盘 ② 窗口缩短到 3 分钟 ③ 只要群里有人接话就提前结算（不用干等）
+  const PF_KEEP = 40
 
   function feedbackEnabled() {
     return config.personaEnabled !== false && config.personaFeedback === true
@@ -2460,8 +2488,9 @@ ${cur.text}`
     try {
       const sig = PS.traitSignature(text, { parts, hasSticker })
       if (!Object.keys(sig).length) return
-      pendingFeedback.push({ roomId: r.roomId, at: Date.now(), sig, sentAt: Date.now() })
-      if (pendingFeedback.length > 50) pendingFeedback = pendingFeedback.slice(-50)
+      const st = personaOf(r)
+      const q = [...(st.pendingFeedback || []), { roomId: r.roomId, at: Date.now(), sentAt: Date.now(), sig }].slice(-PF_KEEP)
+      savePersona(r, { ...st, pendingFeedback: q })
     } catch (e) { log('记录反馈签名失败：' + String(e?.message || e).slice(0, 100)) }
   }
 
@@ -2479,22 +2508,32 @@ ${cur.text}`
 
   /** 结算所有到期的发言 */
   function settleFeedback(now = Date.now()) {
-    if (!feedbackEnabled() || !pendingFeedback.length) return { settled: 0 }
-    const settleMs = (Number(config.personaFeedbackSettleMin) || 10) * 60_000
+    if (!feedbackEnabled()) return { settled: 0, pending: 0 }
+    const host = globalHostRoom()
+    const st = personaOf(host)
+    const queue = st.pendingFeedback || []
+    if (!queue.length) return { settled: 0, pending: 0 }
+    const settleMs = (Number(config.personaFeedbackSettleMin) || 3) * 60_000
+    const ttlMs = (Number(config.personaFeedbackTtlMin) || 30) * 60_000
     const cfg = {
       lr: config.personaFeedbackLr === undefined ? 0.018 : Number(config.personaFeedbackLr),
     }
     let settled = 0
+    let next = { ...st }
     const keep = []
-    for (const item of pendingFeedback) {
-      if (now - item.at < settleMs) { keep.push(item); continue }
+    for (const item of queue) {
+      const age = now - Number(item.at || now)
       const r = rooms.get(item.roomId)
-      if (!r) continue   // 房间没了，丢弃
-      const { outcome, why } = judgeOutcome(item, r.msgs || [])
+      if (!r) continue                                   // 房间没了
+      const msgs = r.msgs || []
+      const hasReaction = msgs.some((m) => m && !m.isSelf && Number(m.ts) > Number(item.sentAt || 0))
+      // 结算时机：满了窗口，或者「已经有人接话」（不用干等），或者超 TTL 强制作废
+      const ready = age >= settleMs || (hasReaction && age >= 45_000) || age >= ttlMs
+      if (!ready) { keep.push(item); continue }
+      const { outcome, why } = judgeOutcome(item, msgs)
       try {
-        const st = personaOf(r)
-        const res = PS.applyFeedback(st, item.sig, outcome, now, cfg)
-        savePersona(r, res.state)
+        const res = PS.applyFeedback(next, item.sig, outcome, now, cfg)
+        next = res.state
         settled++
         const d = res.delta || {}
         const parts = Object.entries(d).map(([k, v]) => `${PS.TRAIT_LABELS[k] || k} ${v > 0 ? '+' : ''}${v.toFixed(3)}`).join('、')
@@ -2503,8 +2542,9 @@ ${cur.text}`
         log('反馈结算失败：' + String(e?.message || e).slice(0, 120))
       }
     }
-    pendingFeedback = keep
-    return { settled }
+    next = { ...next, pendingFeedback: keep }
+    savePersona(host, next)
+    return { settled, pending: keep.length }
   }
 
   /**
@@ -2578,13 +2618,13 @@ ${cur.text}`
     if (config.personaFeedback !== true) log('性格：反馈驱动漂移当前关闭（面板「内心」页可随时打开，立即生效，无需重启）')
     const iv = setInterval(() => {
       try {
-        if (!feedbackEnabled() || !pendingFeedback.length) return
+        if (!feedbackEnabled()) return
         const res = settleFeedback()
-        if (res.settled) log(`性格：结算了 ${res.settled} 条发言的反馈`)
+        if (res.settled) log(`性格：结算了 ${res.settled} 条发言的反馈（队列剩余 ${res.pending}）`)
       } catch (e) { log('反馈结算异常：' + String(e?.message || e).slice(0, 120)) }
-    }, 2 * 60_000)
+    }, 60_000)
     track(iv)
-    log(`性格：反馈驱动漂移已启用（发言后 ${config.personaFeedbackSettleMin || 10} 分钟结算，学习率 ${config.personaFeedbackLr || 0.018}）`)
+    log(`性格：反馈驱动漂移已启用（发言后 ${config.personaFeedbackSettleMin || 3} 分钟结算/收到接话即提前结算，学习率 ${config.personaFeedbackLr || 0.018}，队列已持久化）`)
   }
 
   /** H: mark that she mentioned being hungry, so she does not repeat it this meal window */
@@ -3167,7 +3207,10 @@ ${cur.text}`
             lines.push('· 几乎想不起来（要说"记不太清了，是不是…"，**不许硬编细节**）：')
             for (const x of vague) lines.push('  - ' + x.text)
           }
-          // 9：被聊天里的词勾起的回忆（不是随机抽奖 —— 线索来自当前对话 + 她的好恶）
+          // 9：联想浮现 —— 候选由本地筛（快、免费），**挑哪条由模型决定**。
+          //   ★ 2026-10-28 改：原来是本地按分数排序后"随机挑一条"直接塞给模型，
+          //     等于替她决定了"想起什么"。现在把 3~5 条候选编号列出，
+          //     由模型判断这条回复里要不要提、提哪条（不需要就不提）。
           if (config.humanAssociation !== false) {
             try {
               const st9 = personaOf(r)
@@ -3175,25 +3218,19 @@ ${cur.text}`
                 recent: (r.msgs || []).slice(-4),
                 tastes: (st9.tastes && st9.tastes.likes) || [],
               })
-              const assoc = H2.pickAssociation(facts || [], {
+              const cands = H2.associationCandidates(facts || [], {
                 cues,
                 exclude: graded.map((g) => g.text),
                 now: now2,
+                limit: 5,
               })
-              if (assoc) {
-                lines.push('· 刚才聊天里「' + assoc.cue + '」让你想起一件事（顺口提一句就行，别当成话题中心）：' + assoc.text)
-              }
-            } catch { /* ignore */ }
-          }
-          // 偶尔"突然想起"一件旧事（人有不自觉的回忆）
-          if (Math.random() < 0.05) {
-            try {
-              const pool2 = (facts || []).filter((x) => x && !x.archived && Number(x.importance) >= 0.5)
-              if (pool2.length) {
-                const pick = pool2[Math.floor(Math.random() * pool2.length)]
-                if (!graded.some((g) => g.text === pick.text)) {
-                  lines.push('· 你刚才突然想起一件事（跟当前话题无关也可以顺口提一句）：' + pick.text)
-                }
+              if (cands.length) {
+                r.__recallCandidates = cands.map((x) => ({ id: x.id, text: x.text }))
+                lines.push('')
+                lines.push('【可能忽然想起的旧事】（候选，不必都用；自己判断这条回复里提不提、提哪条）')
+                cands.forEach((x, i) => lines.push(`  ${i + 1}. ${x.text}`))
+                lines.push('用法：如果确实想在回复里带一句，就在**回复最后**加上 [想起:N]（N=上面的序号，只写一个）；'
+                  + '如果这条不适合提旧事，就不要加这个标记。**不要解释这个标记，也不要提"候选"两个字**。')
               }
             } catch { /* ignore */ }
           }
@@ -3231,7 +3268,21 @@ ${cur.text}`
               if (cause) extra.push('【心情来由】' + cause + '（说的时候可以带出来，别装作没事）')
             }
             if (config.humanRelationTiers !== false && trigger && trigger.sender) {
-              const rel = PS.describeRelationTo(st, trigger.sender, trigger.senderName || '')
+              // ★ 好感度七阶 + 心动独占（主人默认心动对象）
+              let rel = PS.describeRelationTo(st, trigger.sender, trigger.senderName || '')
+              try {
+                const masterWxid2 = Object.keys(st.affinity || {}).find((w) => {
+                  const nm = String((config.memberNames || {})[w] || '').trim()
+                  return config.masterName && nm && nm === String(config.masterName).trim()
+                }) || ''
+                const top = PS.topAffinityPerson(st, { masterName: config.masterName || '', masterWxid: masterWxid2 })
+                if (top) {
+                  const topName = top.name || String((config.memberNames || {})[top.wxid] || top.wxid)
+                  rel += `｜心动对象是「${topName}」(${Math.round(top.value * 100)}%)：亲密的话只能对他说`
+                }
+                const gate = PS.canBeIntimate(st, trigger.sender, { masterName: config.masterName || '', masterWxid: masterWxid2 })
+                rel += gate.ok ? '｜他现在可以听你说亲密的话' : `｜不能对他做亲密举动（${gate.why}）`
+              } catch { }
               if (rel) extra.push('【对面是谁】' + rel)
             }
             if (config.humanBodyState !== false) {
@@ -3273,6 +3324,11 @@ ${cur.text}`
       // 接话判断：把"要不要回"交给模型理解，而不是靠概率。
       '接话判断（很重要）：每次先想一句"这条要不要我接"。',
       '  · 跟你无关的闲聊、别人之间的对话、纯表情/图片刷屏、别人已经答过的问题 → 只输出 [不回]。',
+      '  【好感度七阶】0-14% 讨厌（可以讥讽、爱答不理）｜15-29% 有点烦（敷衍）｜30-44% 冷淡（客气但短）｜'
+        + '45-55% 普通人（正常聊天，中点）｜56-70% 朋友（热络、主动接话）｜71-85% 好朋友（很熟、会开玩笑）｜'
+        + '86-100% 心动（**全世界只有一个人**，可以说想他、要抱抱）。',
+      '  除"心动"以外，别的群友好感最高只会到 70%（朋友）——别对普通群友说亲密的话。',
+      '  **亲密举动（抱抱/牵手/想他）只允许对「好感度最高」的那一个说**；对别人说就出戏。',
       '    我收到 [不回] 就什么都不发（这不算失礼，真人在群里也不会句句插嘴）。',
       '  · 但**有人 @ 你、有人点你的名字（大肥鱼/肥鱼/蓝鱼）、或者正在跟你一来一回聊天时**，',
       '    **必须回**，绝对不许输出 [不回]。',
@@ -3797,6 +3853,8 @@ ${cur.text}`
         maxMB: Number(config.linkVideoMaxMB) || 80,
         timeoutMs: Number(config.linkVideoTimeoutMs) || 120_000,
         frames: Number(config.linkVideoFrames) || Number(config.videoFrames) || 6,
+        // 每秒抽几帧（默认 1）。脚本按时长×fps 决定帧数，每 20 帧拼一张联系表。
+        fps: config.linkVideoFps === undefined ? 1 : Number(config.linkVideoFps),
       }, (Number(config.linkVideoTimeoutMs) || 120_000) + 60_000)
     } catch (e) {
       log(`链接视频：桥调用失败（降级成普通文本）：${String(e?.message || e).slice(0, 160)}｜${where}`)
@@ -3808,7 +3866,21 @@ ${cur.text}`
     }
 
     // ── 复用视频管线：联系表交视觉模型 + 音轨交 speechToText（与 type 43 一字不差的用法）──
-    const desc = await describeImageCached(res.sheet, 'videoSheet')
+    // ★ 2026-10-28：每秒 1 帧 → 60 秒视频会有 3 张联系表。以前只用 res.sheet（第一张），
+    //   等于只看了开头 20 秒。现在逐张识别、按段拼起来，长视频才是"整段看懂"。
+    const allSheets = (Array.isArray(res.sheets) && res.sheets.length ? res.sheets : [res.sheet]).filter(Boolean)
+    let desc = ''
+    if (allSheets.length > 1) {
+      const parts = []
+      for (let si = 0; si < allSheets.length; si++) {
+        const d1 = await describeImageCached(allSheets[si], 'videoSheet')
+        if (d1) parts.push('【第' + (si + 1) + '/' + allSheets.length + '段】' + d1)
+      }
+      desc = parts.join('\n')
+      log(`链接视频分段识别：${allSheets.length} 张联系表，成功 ${parts.length} 张`)
+    } else {
+      desc = await describeImageCached(allSheets[0], 'videoSheet')
+    }
     let audioText = ''
     if (res.wav) audioText = await transcribeVoice(res.wav, String(m.id || '') + ':lv')
     const siteName = String(res.siteName || hit.site || '')
@@ -3832,7 +3904,10 @@ ${cur.text}`
     }
 
     // 临时文件用完即删（都是副本；桥侧的下载目录它自己已经删了）
-    try { unlinkSync(res.sheet); log('已删除链接视频临时联系表') } catch { /* ignore */ }
+    for (const sh of allSheets) {
+      try { unlinkSync(sh) } catch { /* ignore */ }
+    }
+    if (allSheets.length) log(`已删除链接视频临时联系表（${allSheets.length} 张）`)
     if (res.wav) { try { unlinkSync(res.wav); log('已删除链接视频临时音轨 WAV') } catch { /* ignore */ } }
   }
 
@@ -4637,6 +4712,36 @@ ${cur.text}`
     // ★ 2026-10-27：本轮是否已经发过语音 —— 用来避免"语音和图片/表情包连着发"。
     //   用户实测：语音 + 发图一起来，客户端会偶发崩溃（媒体发送对象所有权问题尚未定位），
     //   同一轮里同时触发两条媒体发送会显著提高撞车概率。这里做互斥兜底。
+    // 9（模型挑选版）：回复末尾的 [想起:N] → 找出模型选中的那条记忆
+    //   · 从文本里去掉标记（不能让群友看到）
+    //   · 记录被想起（recallCount+1、lastRecallAt）
+    //   · 顺带给它加一点强度（被想起 = 复习了一次）
+    try {
+      if (reply && reply.text && config.humanAssociation !== false) {
+        const parsed = H2.parseRecallDirective(reply.text)
+        if (parsed.index > 0 && Array.isArray(r.__recallCandidates) && r.__recallCandidates.length) {
+          const chosen = r.__recallCandidates[parsed.index - 1]
+          reply = { ...reply, text: parsed.text }
+          if (chosen && chosen.id) {
+            const nowR = Date.now()
+            r.facts = (r.facts || []).map((m) => {
+              if (!m || m.id !== chosen.id) return m
+              return {
+                ...m,
+                recallCount: (Number(m.recallCount) || 0) + 1,
+                lastRecallAt: nowR,
+                strength: MV2.reinforceStrength(m, nowR, memCfg()),
+              }
+            })
+            try { saveFacts(r) } catch { }
+            log(`她想起了「${String(chosen.text).slice(0, 34)}」（模型选中 #${parsed.index}）`)
+          }
+        } else if (parsed.index > 0) {
+          // 没有候选却带了标记 → 只清标记，别把序号发到群里
+          reply = { ...reply, text: parsed.text }
+        }
+      }
+    } catch { /* 解析失败就当没标记 */ }
     let sentVoiceThisReply = false
     // ★ 2026-10-28 修：这行原来被插在下面"检测到重复回复→放弃这条"的分支里，
     //   只有撞上重复才会记一次 → 正常回复从来没进过待结算队列，
@@ -5432,12 +5537,55 @@ ${cur.text}`
         if (x.sheet) {
           try { seen = await describeImageCached(String(x.sheet), 'douyinSheet') } catch (e) { /* 单条失败不影响其它 */ }
         }
-        // ★ 桥侧在页面里把这个视频的声音录了下来（captureStream），这里用本地语音识别转成文字
+        // ★ 2026-10-29：浏览器现在默认静音（不放声音），所以桥不再录音 → x.audio 为空。
+        //   音轨改走"下载后抽 wav"：fetchLinkVideo → video-probe（1fps 联系表 + 16k 音轨）。
+        //   这样既没有扬声器声音，又能读到台词；顺手还能拿到比截图更清楚的逐帧画面。
         if (x.audio) {
           try {
             heard = await transcribeVoice(String(x.audio))
             if (!heard) log(`抖音：#${x.i} 转写返回空（音频 ${String(x.audio).split('\\').pop()}）`)
           } catch (e) { log(`抖音：#${x.i} 转写异常：` + String(e?.message || e).slice(0, 80)) }
+        } else if (config.douyinAudioViaDownload !== false) {
+          try {
+            // ★ 路线 A：优先用网络响应里抓到的 CDN 直链（playUrl）——
+            //   yt-dlp 下抖音会卡在 "Fresh cookies"，直链 + Referer 则不受限制。
+            let dl = null
+            if (x.playUrl) {
+              try {
+                dl = await client.call('fetchDirectVideo', {
+                  url: String(x.playUrl),
+                  referer: 'https://www.douyin.com/',
+                  maxMB: Number(config.linkVideoMaxMB) || 80,
+                  frames: Number(config.linkVideoFrames) || 6,
+                  fps: config.linkVideoFps === undefined ? 1 : Number(config.linkVideoFps),
+                }, 240_000)
+                if (dl && !dl.sheet && !dl.wav) dl = null
+              } catch (e) { log(`抖音：#${x.i} 直链下载失败，改试 yt-dlp：` + String(e?.message || e).slice(0, 70)) }
+            }
+            if (!dl) dl = await client.call('fetchLinkVideo', {
+              url: String(x.shareUrl || x.url || ''),
+              maxSeconds: Number(config.linkVideoMaxSeconds) || 300,
+              maxMB: Number(config.linkVideoMaxMB) || 80,
+              timeoutMs: Number(config.linkVideoTimeoutMs) || 120_000,
+              frames: Number(config.linkVideoFrames) || 6,
+              fps: config.linkVideoFps === undefined ? 1 : Number(config.linkVideoFps),
+            }, (Number(config.linkVideoTimeoutMs) || 120_000) + 60_000)
+            if (dl?.wav) {
+              heard = await transcribeVoice(String(dl.wav))
+              if (!seen && Array.isArray(dl.sheets) && dl.sheets.length) {
+                // 下载来的联系表比浏览器截图清楚得多 → 用它的画面
+                const parts2 = []
+                for (let si = 0; si < Math.min(dl.sheets.length, 3); si++) {
+                  const d2 = await describeImageCached(dl.sheets[si], 'videoSheet')
+                  if (d2) parts2.push((dl.sheets.length > 1 ? '【第' + (si + 1) + '段】' : '') + d2)
+                }
+                if (parts2.length) seen = parts2.join('\n')
+              }
+              for (const sh of (dl.sheets || [dl.sheet])) { try { if (sh) unlinkSync(sh) } catch { } }
+              try { unlinkSync(String(dl.wav)) } catch { }
+              log(`抖音：#${x.i} 音轨已从下载的视频里抽出（${dl.durationSec || '?'}s）→ 台词 ${heard ? '转写成功' : '转写为空'}`)
+            }
+          } catch (e) { log(`抖音：#${x.i} 下载取音轨失败（跳过台词）：` + String(e?.message || e).slice(0, 90)) }
         }
         watched.push({ ...x, seen: String(seen || ''), heard: String(heard || ''), dup: seenKeys.has(keyOf(x)) })
       }
@@ -7596,11 +7744,37 @@ ${cur.text}`
           learnedTerms: (() => { try { return PS.learnedTerms(st, 8) } catch { return [] } })(),
           unlearnedTerms: (() => { try { return PS.unlearnedTerms(st) } catch { return [] } })(),
           selfReview: st.selfReview || null,
+          // ★ 优化后：让面板能看见"队列里有几条在等结算"，而不是只显示 0 条调整记录
+          feedback: {
+            pending: (st.pendingFeedback || []).length,
+            settled: (st.feedbackLog || []).length,
+            settleMin: Number(config.personaFeedbackSettleMin) || 3,
+            lr: config.personaFeedbackLr === undefined ? 0.018 : Number(config.personaFeedbackLr),
+            enabled: feedbackEnabled(),
+          },
           relations: (() => {
             try {
               if (config.humanRelationTiers === false) return []
-              return Object.entries(st.affinity || {}).sort((a, b) => b[1] - a[1]).slice(0, 6).map(([w, v]) => ({
-                who: w, name: (config.memberNames || {})[w] || w, value: +Number(v).toFixed(2), tier: PS.affinityTier(v),
+              const masterWxid2 = Object.keys(st.affinity || {}).find((x) => {
+                const nm = String((config.memberNames || {})[x] || '').trim()
+                return config.masterName && nm && nm === String(config.masterName).trim()
+              }) || ''
+              const topPerson = PS.topAffinityPerson(st, { masterName: config.masterName || '', masterWxid: masterWxid2 })
+              // ★ 面板要"点阶段看都有谁" → 返回全部（按好感降序）
+              return Object.entries(st.affinity || {}).sort((a, b) => Number(b[1]) - Number(a[1])).map(([w, v]) => ({
+                who: w,
+                name: (config.memberNames || {})[w] || w,
+                // ★ 2026-10-29：主人默认心动 —— 面板直接按 95%（心动档）显示，
+                //   跟插件内部 topAffinityPerson 的算法保持一致（否则面板 76% 会让人困惑）。
+                value: +Number(w === masterWxid2 ? Math.max(Number(v), 0.95) : v).toFixed(2),
+                rawValue: +Number(v).toFixed(2),
+                isMaster: w === masterWxid2,
+                tier: PS.affinityTier(w === masterWxid2 ? Math.max(Number(v), 0.95) : v),
+                // ★ 七阶：阶段名 + 语气 + 是否心动对象（亲密独占）
+                stageKey: PS.affinityStage(w === masterWxid2 ? Math.max(Number(v), 0.95) : v).key,
+                stage: PS.affinityStage(w === masterWxid2 ? Math.max(Number(v), 0.95) : v).label,
+                tone: PS.affinityStage(w === masterWxid2 ? Math.max(Number(v), 0.95) : v).tone,
+                isTop: !!(topPerson && topPerson.wxid === w),
               }))
             } catch { return [] }
           })(),
@@ -7643,6 +7817,32 @@ ${cur.text}`
       case 'persona.selfReview': {
         const r = globalHostRoom()
         return await selfReview(r, { force: true })
+      }
+      case 'persona.addTerm': {
+        const w = String(args.term || args.text || '').trim()
+        if (!w) return { ok: false, reason: '词不能为空' }
+        const host = globalHostRoom()
+        const st = personaOf(host)
+        const r1 = PS.addTerm(st, w, Date.now())
+        if (!r1.ok) return { ok: false, reason: r1.why }
+        savePersona(host, r1.state)
+        log(`手动加群梗：「${w}」（${r1.why}）`)
+        return { ok: true, reason: r1.why, term: w, learned: !!(r1.state.lexicon || {})[w]?.learned }
+      }
+      case 'persona.removeTerm': {
+        const w = String(args.term || args.text || '').trim()
+        if (!w) return { ok: false, reason: '词不能为空' }
+        const host = globalHostRoom()
+        const st = personaOf(host)
+        const r1 = PS.removeTerm(st, w, Date.now())
+        if (!r1.ok) return { ok: false, reason: r1.why }
+        savePersona(host, r1.state)
+        log(`删掉群梗：「${w}」`)
+        return { ok: true, term: w }
+      }
+      case 'persona.settleNow': {
+        const res = settleFeedback()
+        return { ok: true, ...res }
       }
       case 'persona.traits': {
         const room = globalHostRoom()

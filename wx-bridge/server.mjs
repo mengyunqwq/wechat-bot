@@ -28,7 +28,7 @@ import { WcfBridge } from './lib/wcf.mjs'
 import { MockBridge } from './lib/mock.mjs'
 import { WxhelperBridge } from './lib/wxhelper.mjs'
 import { WeChatHookBridge } from './lib/wechat-hook.mjs'
-import { fetchLinkVideoSheet, pruneLinkVideoTemp } from './lib/link-video.mjs'
+import { fetchDirectVideoSheet, fetchLinkVideoSheet, pruneLinkVideoTemp } from './lib/link-video.mjs'
 import { generateStickerImage, listEmotions, autoBubble } from './lib/genimage.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
@@ -624,7 +624,9 @@ async function handle(op, a = {}) {
       // 拿不到视频文件就退回明文封面。**音轨转写由插件侧做**（DSH 的 speechToText，桥没有 ASR 服务）。
       if (typeof bridge.fetchVideo !== 'function') return { file: null, error: '该接入层不支持 fetchVideo' }
       const v = await bridge.fetchVideo(
-        String(a.xml || ''), String(a.roomId || ''), Number(a.ts || 0), Number(a.frames || 6))
+        String(a.xml || ''), String(a.roomId || ''), Number(a.ts || 0),
+        // 第 5 个参数：fps（每秒抽几帧）。以前没有，脚本默认 1 —— 显式传下去更清楚
+        Number(a.frames || 6), Number(a.fps) > 0 ? Number(a.fps) : 1)
       return v ? { ...v } : { file: null }
     }
     case 'fetchMedia': {
@@ -643,9 +645,24 @@ async function handle(op, a = {}) {
         timeoutMs: Number(a.timeoutMs) || 120_000,
         cookies: String(a.cookies || ''),
         frames: Number(a.frames) || 6,
+        fps: Number(a.fps) > 0 ? Number(a.fps) : 1,   // 每秒抽几帧（默认 1）
         log,
       })
       return r ? { ...r } : { sheet: '', wav: '', error: '未能取到该链接的视频（超时长/超大小/需要 cookies/站点不支持/网络失败）' }
+    }
+    case 'fetchDirectVideo': {
+      // 直链视频（抖音 CDN playAddr 等）：下载 → 抽帧 + 抽音轨。
+      // 用途：刷推荐流时拿到的 playAddr 直接下，绕开 yt-dlp 的抖音 cookies 限制。
+      const r = await fetchDirectVideoSheet(String(a.url || ''), {
+        referer: String(a.referer || 'https://www.douyin.com/'),
+        ua: String(a.ua || ''),
+        maxMB: Number(a.maxMB) || 80,
+        frames: Number(a.frames) || 6,
+        fps: Number(a.fps) > 0 ? Number(a.fps) : 1,
+        timeoutMs: Number(a.timeoutMs) || 120_000,
+        log,
+      })
+      return r ? { ...r } : { sheet: '', wav: '', error: '直链下载失败（可能过期/需要 Referer）' }
     }
     case 'douyinBrush': {
       // 只读「刷抖音」：跑 wx-bridge/douyin-brush.py（Playwright + 独立已登录 profile）

@@ -1227,11 +1227,62 @@ async function renderInner() {
     <div id="inner-body" style="margin-top:12px"><div class="empty">选一个群，点「读取」。</div></div>`;
   $('#inner-load').onclick = loadInner;
   void loadInner();   // 全局一个人 → 打开就自动加载，不用选群
-  $('#inner-diary').onclick = async () => {
+    // 群梗：添加 / 删除（事件委托，inner-body 重建也不丢）
+  const ib = $('#inner-body');
+  if (ib && !ib.__memeBound) {
+    ib.__memeBound = true;
+    ib.addEventListener('click', async (e) => {
+      const del = e.target.closest('.meme-del');
+      if (del) {
+        e.stopPropagation();
+        const term = del.dataset.term || '';
+        if (!term || !confirm('删掉「' + term + '」？')) return;
+        try {
+          await api('/action', { method: 'POST', body: JSON.stringify({ op: 'persona.removeTerm', args: { term } }) });
+          toast('已删掉：' + term, 'ok'); loadInner();
+        } catch (err) { toast('删除失败：' + err.message, 'err') }
+        return;
+      }
+      if (e.target.closest('#meme-add')) {
+        const inp = $('#meme-text');
+        const term = (inp && inp.value || '').trim();
+        if (!term) return toast('先输入一个词', 'err');
+        try {
+          const j = await api('/action', { method: 'POST', body: JSON.stringify({ op: 'persona.addTerm', args: { term } }) });
+          const r = j.result || {};
+          if (!r.ok) return toast('没加成：' + (r.reason || '未知'), 'err');
+          toast('已加：' + term + '（' + (r.reason || '') + '）', 'ok');
+          loadInner();
+        } catch (err) { toast('添加失败：' + err.message, 'err') }
+      }
+    });
+  }
+  // 好感度：展开/收起其余成员（事件委托）
+  const ibRel = $('#inner-body');
+  if (ibRel && !ibRel.__relMoreBound) {
+    ibRel.__relMoreBound = true;
+    ibRel.addEventListener('click', (e) => {
+      if (e.target.closest('#rel-more')) { App.innerRelExpand = true; loadInner(); return; }
+      if (e.target.closest('#rel-less')) { App.innerRelExpand = false; loadInner(); return; }
+    });
+  }
+  // 好感度：点阶段 chip → 只看这一档（再点取消）
+  const innerBody = $('#inner-body');
+  if (innerBody && !innerBody.__stageBound) {
+    innerBody.__stageBound = true;
+    innerBody.addEventListener('click', (e) => {
+      const chip = e.target.closest('.s-chip');
+      if (!chip) return;
+      const key = chip.dataset.stage || '';
+      App.innerStageFilter = (App.innerStageFilter === key) ? '' : key;
+      loadInner();
+    });
+  }
+$('#inner-diary').onclick = async () => {
     const btn = $('#inner-diary');
     btn.disabled = true; btn.textContent = '正在写…';
     try {
-      const j = await api('/action', { method: 'POST', body: JSON.stringify({ op: 'persona.diaryWrite', args: { room } }) });
+      const j = await api('/action', { method: 'POST', body: JSON.stringify({ op: 'persona.diaryWrite', args: {} }) });
       const r = j.result || {};
       if (r.ok) { toast('写完了：《' + (r.diary && r.diary.title || '无题') + '》', 'ok'); loadInner(); }
       else toast('没写成：' + (r.reason || '未知'), 'err');
@@ -1253,7 +1304,7 @@ async function renderInner() {
   $('#inner-reset-traits').onclick = async () => {
     if (!confirm('把所有行为维度恢复到基线，并清空调整记录？\n（她之后还会继续慢慢长，但这次回到原点）')) return;
     try {
-      await api('/action', { method: 'POST', body: JSON.stringify({ op: 'persona.traitsReset', args: { room } }) });
+      await api('/action', { method: 'POST', body: JSON.stringify({ op: 'persona.traitsReset', args: {} }) });
       toast('已复位', 'ok'); loadInner();
     } catch (e) { toast('失败：' + e.message, 'err') }
   };
@@ -1263,7 +1314,7 @@ async function renderInner() {
       '· 身份与底线（你写的人设）不会被改\n· 变化过大或出现出戏词会自动拒绝并保留旧版\n· 旧版本都留着，可回滚')) return;
     btn.disabled = true; btn.textContent = '正在写…';
     try {
-      const j = await api('/action', { method: 'POST', body: JSON.stringify({ op: 'persona.narrativeWrite', args: { room } }) });
+      const j = await api('/action', { method: 'POST', body: JSON.stringify({ op: 'persona.narrativeWrite', args: {} }) });
       const r = j.result || {};
       if (r.ok) { toast('自传已更新到 v' + r.version, 'ok'); loadInner(); }
       else toast('没写成（已保留旧版）：' + (r.reason || '未知'), 'err');
@@ -1276,6 +1327,24 @@ async function renderInner() {
       toast('目标已更新', 'ok'); loadInner();
     } catch (e) { toast('失败：' + e.message, 'err') }
   };
+}
+
+/** 七阶段位刻度：7 个格子，当前所在档高亮（比连续进度条更清楚"她在第几档"） */
+function stageMeter(v) {
+  const pctv = Math.max(0, Math.min(1, Number(v) || 0));
+  const bounds = [0.14, 0.29, 0.44, 0.55, 0.69, 0.85, 1.0];
+  let cur = bounds.findIndex((b) => pctv <= b);
+  if (cur < 0) cur = 6;
+  const colors = ['var(--bad)', '#d97a6c', 'var(--warn)', '#8a8f98', 'var(--a)', '#4fb286', 'var(--ok)'];
+  let out = '<div class="smeter" style="display:flex;gap:2px;flex:1;min-width:96px">';
+  for (let i = 0; i < 7; i++) {
+    const on = i === cur;
+    const passed = i < cur;
+    out += `<i style="flex:1;height:${on ? 12 : 8}px;border-radius:2px;transition:.15s;`
+      + `background:${on ? colors[i] : passed ? colors[i] + '55' : 'var(--line-2)'};`
+      + `${on ? `box-shadow:0 0 0 1px ${colors[i]}` : ''}"></i>`;
+  }
+  return out + '</div>';
 }
 
 function bar(v, color) {
@@ -1341,20 +1410,58 @@ async function loadInner() {
         })()}
       </div>
 
-      <div class="section"><div class="hd">💞 她在意谁 <span class="muted small">（态度分三档，说话方式会不一样）</span></div>
+                  <div class="section"><div class="hd">💞 好感度 <span class="muted small">（七阶；点下面的阶段可以看都有谁）</span></div>
         ${(() => {
           const rel = (hum && hum.relations) || [];
-          if (!rel.length) return '<div class="empty">还没有对谁形成印象。</div>';
-          const tierName = { close: '很熟·可以怼/撒娇', familiar: '算熟·正常聊', stranger: '不熟·礼貌不热络' };
-          return rel.map(x => `<div class="row" style="margin:3px 0">
-            <span class="small" style="min-width:130px">${esc(x.name || x.who)}</span>
-            ${bar(x.value, x.tier === 'close' ? 'var(--ok)' : x.tier === 'stranger' ? 'var(--warn)' : 'var(--accent)')}
-            <span class="small muted" style="min-width:44px">${Math.round(x.value * 100)}%</span>
-            <span class="small muted">${tierName[x.tier] || ''}</span></div>`).join('');
+          const STAGES = [
+            { key: 'hate',   label: '讨厌',   hint: '会讥讽' },
+            { key: 'annoy',  label: '有点烦', hint: '敷衍' },
+            { key: 'cold',   label: '冷淡',   hint: '客气但短' },
+            { key: 'normal', label: '普通人', hint: '50% 中点' },
+            { key: 'friend', label: '朋友',   hint: '热络' },
+            { key: 'bestie', label: '好朋友', hint: '很熟' },
+            { key: 'crush',  label: '心动',   hint: '唯一可亲密' },
+          ];
+          const colorOf = (v) => v < 0.30 ? 'var(--bad)' : v < 0.45 ? 'var(--warn)'
+            : v <= 0.55 ? '#8a8f98' : v <= 0.70 ? 'var(--a)' : v <= 0.85 ? '#4fb286' : 'var(--ok)';
+          const filter = App.innerStageFilter || '';
+          const filtered = filter ? rel.filter((x) => (x.stageKey || '') === filter) : rel;
+          // ★ 折叠：默认只显示前 6 个（主人一定在前），其余收进"展开"
+          const COLLAPSE_AT = 6;
+          const expanded = !!App.innerRelExpand;
+          const shown = (!filter && !expanded) ? filtered.slice(0, COLLAPSE_AT) : filtered;
+          const hidden = filtered.length - shown.length;
+          const chips = STAGES.map((st) => {
+            const n = rel.filter((x) => (x.stageKey || '') === st.key).length;
+            const on = filter === st.key;
+            return `<span class="chip s-chip${on ? ' on' : ''}" data-stage="${st.key}" title="${st.hint}｜${n} 人"
+              style="cursor:pointer;${on ? 'border-color:var(--a);font-weight:600' : ''}">${st.label} <span class="muted">${n}</span></span>`;
+          }).join('');
+          if (!rel.length) return `<div class="empty">还没有对谁形成印象。</div>${chips}`;
+          const rows = shown.map((x) => {
+            const pct = Math.round(x.value * 100);
+            return `<div class="row" style="margin:3px 0">
+              <span class="small" style="min-width:120px">${esc(x.name || x.who)}${
+                x.isMaster ? ' <span class="chip" style="padding:0 5px;font-size:11px;border-color:var(--ok)">主人·默认心动</span>'
+                : (x.isTop ? ' <b style="color:var(--ok)">★心动</b>' : '')}</span>
+              ${bar(x.value, colorOf(x.value))}
+              <span class="small muted" style="min-width:40px;text-align:right">${pct}%</span>
+              <span class="small" style="min-width:78px">${esc(x.stage || '')}${
+                x.isMaster && x.rawValue != null && Math.round(x.rawValue * 100) !== pct
+                  ? `<span class="muted" style="font-size:11px">（实际 ${Math.round(x.rawValue * 100)}%）</span>` : ''}</span></div>`;
+          }).join('');
+          return `<div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px">${chips}</div>
+            ${filter ? `<div class="muted small" style="margin-bottom:4px">只看「${STAGES.find((x) => x.key === filter).label}」：${shown.length} 人（再点一次取消）</div>` : ''}
+            ${rows || '<div class="empty">这一档暂时没人。</div>'}
+            ${hidden > 0 ? `<div class="row" style="margin-top:4px"><button class="btn" id="rel-more">展开其余 ${hidden} 人 ▾</button></div>` : ''}
+            ${(!filter && expanded && filtered.length > COLLAPSE_AT) ? `<div class="row" style="margin-top:4px"><button class="btn" id="rel-less">收起 ▴</button></div>` : ''}
+            <div class="muted small" style="margin-top:6px">
+              她只会对「心动」那<b>一个人</b>说亲密的话；其他人最高到 70%（朋友）。
+            </div>`;
         })()}
       </div>
 
-      <div class="section"><div class="hd">😻 好恶（会自己长）</div>
+<div class="section"><div class="hd">😻 好恶（会自己长）</div>
         <div class="row"><span class="muted small">喜欢</span>
           ${(tastes.likes || []).map(x => `<span class="chip">${esc(x.text)} <span class="muted">${Math.round((x.weight || 0) * 100)}%</span> <a href="#" data-taste-del="likes" data-taste-text="${esc(x.text)}" style="text-decoration:none">×</a></span>`).join('') || '<span class="muted small">还没有</span>'}</div>
         <div class="row" style="margin-top:6px"><span class="muted small">讨厌</span>
@@ -1369,7 +1476,10 @@ async function loadInner() {
           <label class="hswitch" style="margin-left:8px" title="开=按群里的真实反应慢慢调整她的说话倾向；关=冻结当前值不再变化">
             <span class="sw"><input type="checkbox" id="tr-enabled" ${tr && tr.enabled ? 'checked' : ''}><i></i></span>
             <span class="small">${tr && tr.enabled ? '已开启' : '已关闭'}</span>
-          </label></div>
+          </label>
+          ${(hum && hum.feedback) ? `<span class="pill" title="发出后进入队列，到点（或有人接话）就结算成一次微调">待结算 <b>${hum.feedback.pending || 0}</b> 条 · 已结算 ${hum.feedback.settled || 0} 次</span>
+          <button class="btn" id="tr-settle" title="立刻结算队列里到期的发言（不用等窗口）">立刻结算</button>` : ''}
+        </div>
         ${(() => {
           if (!tr || !tr.traits) return '<div class="empty">读取中…</div>';
           const labels = { humor: '爱玩梗', warmth: '黏人/撒娇', bluntness: '直白', chattiness: '话多', curiosity: '爱追问', edginess: '冒犯/阴阳', emoji: '爱发表情' };
@@ -1394,7 +1504,10 @@ async function loadInner() {
               return `<div style="padding:2px 0;border-bottom:1px dashed var(--line)"><span class="muted">${esc(fmtTime(x.at))}</span> · ${oc} · ${esc(ds || '（无变化）')}</div>`;
             }).join('')}</div>` : '<div class="small muted" style="margin-top:8px">还没有调整记录。要开这个功能：配置里把 personaFeedback 设为 true（建议先开着看几天日志）。</div>';
           return rows + logHtml + `<div class="small muted" style="margin-top:8px">
-            规则：每次只动一点点；被怼时「冒犯」维度掉得最狠；被无视只算 0.3 倍；每小时向基线回落 2%（防极化）。</div>`;
+            规则：每次只动一点点（约 1~2%）；被怼时「冒犯」维度掉得最狠；被无视只算 0.3 倍；
+            每小时向基线回落 2%（防极化）。
+            <br>结算时机：发出后 <b>3 分钟</b>，或者<b>有人接话就提前结算</b>（45 秒后即可）；
+            队列<b>落盘</b>，插件重载不会丢。</div>`;
         })()}
       </div>
 
@@ -1405,18 +1518,28 @@ async function loadInner() {
           <span class="small muted">${g.progress || 0}/3</span></div>`).join('') : '<div class="empty">暂时没有目标（点「换个目标」）。</div>'}
       </div>
 
-      <div class="section"><div class="hd">🗣 她学的群梗</div>
+            <div class="section"><div class="hd">🗣 她学的群梗
+          <span class="muted small">（也可以你自己加；加进去她就当会用）</span></div>
         ${(() => {
           if (!hum) return '<div class="empty">—</div>';
           const lr = hum.learnedTerms || [];
           const un = hum.unlearnedTerms || [];
-          const a1 = lr.length ? '<div class="row"><span class="muted small">已经会用</span>' + lr.map(t => `<span class="chip">${esc(t)}</span>`).join('') + '</div>' : '';
-          const a2 = un.length ? '<div class="row" style="margin-top:6px"><span class="muted small">还不太懂（会问）</span>' + un.map(x => `<span class="chip">${esc(x.term)} <span class="muted">${x.count}次</span></span>`).join('') + '</div>' : '';
-          return (a1 || a2) || '<div class="small muted">还没学到新梗（群里反复出现的词她会先问、再学着用）。</div>';
+          const chipOf = (t, learned) => `<span class="chip" style="margin:2px 3px 2px 0">${esc(t)}
+            <span class="meme-del" data-term="${esc(t)}" title="删掉"
+              style="cursor:pointer;opacity:.55;margin-left:4px">×</span></span>`;
+          const a1 = lr.length ? '<div class="row"><span class="muted small" style="min-width:70px">已经会用</span><div style="flex:1">'
+            + lr.map((t) => chipOf(t, true)).join('') + '</div></div>' : '';
+          const a2 = un.length ? '<div class="row" style="margin-top:6px"><span class="muted small" style="min-width:70px">还不太懂</span><div style="flex:1">'
+            + un.map((t) => chipOf(t, false)).join('') + '</div></div>' : '';
+          const body = (a1 || a2) || '<div class="small muted" style="margin-bottom:6px">还没学到新梗（群里反复出现的词她会先问、再学着用）。</div>';
+          return body + `<div class="row" style="margin-top:8px">
+            <input id="meme-text" type="text" placeholder="加一个群梗，比如：命运的齿轮开始转动"
+              style="flex:1;min-width:220px" maxlength="20">
+            <button class="btn primary" id="meme-add">添加</button></div>`;
         })()}
       </div>
 
-      <div class="section"><div class="hd">🪞 自我复盘 <span class="muted small">（每周一次，她会反省自己说话的样子）</span></div>
+<div class="section"><div class="hd">🪞 自我复盘 <span class="muted small">（每周一次，她会反省自己说话的样子）</span></div>
         ${(() => {
           const sr = (hum && hum.selfReview) || null;
           if (!sr || !(sr.findings || []).length) return '<div class="small muted">还没复盘过。点上面「自我复盘」。</div>';
@@ -1438,6 +1561,17 @@ async function loadInner() {
         toast('已删除', 'ok'); loadInner();
       } catch (e) { toast(e.message, 'err') }
     });
+    const trSettle = $('#tr-settle');
+    if (trSettle) trSettle.onclick = async () => {
+      trSettle.disabled = true;
+      try {
+        const j = await api('/action', { method: 'POST', body: JSON.stringify({ op: 'persona.settleNow', args: {} }) });
+        const r = j.result || {};
+        toast(r.settled ? `已结算 ${r.settled} 条（队列剩 ${r.pending || 0}）` : '队列里还没有到期的发言（发出后 3 分钟或有人接话才会结算）', r.settled ? 'ok' : 'err');
+        loadInner();
+      } catch (e) { toast('失败：' + e.message, 'err') }
+      finally { trSettle.disabled = false }
+    };
     const trSw = $('#tr-enabled');
     if (trSw) trSw.onchange = async () => {
       const on = trSw.checked;

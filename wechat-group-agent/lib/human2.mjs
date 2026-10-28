@@ -265,3 +265,55 @@ export function pickAssociation(memories, { cues = [], exclude = [], now = Date.
   const cue = cues.find((c) => String(pick.text).includes(c)) || cues[0]
   return { text: String(pick.text), cue, id: pick.id || '' }
 }
+
+/**
+ * 9（改进版）：产出"候选旧事"列表，**不做随机选择** —— 挑哪条交给模型。
+ *
+ * 为什么改：以前是本地按分数排序后随机取一条塞进提示词，等于替她决定"想起什么"，
+ * 经常出现"提了一件跟当前话题八竿子打不着的旧事"。现在本地只负责快速缩小范围
+ * （省 token、免得分心），真正的取舍交给模型（它会把标记写在回复末尾）。
+ *
+ * 排序依据（确定性）：线索命中数 > 重要度 > 越久没被用过的稍微优先。
+ */
+export function associationCandidates(memories, { cues = [], exclude = [], now = Date.now(), limit = 5 } = {}) {
+  if (!cues.length) return []
+  const ex = new Set((exclude || []).map((x) => String(x).slice(0, 40)))
+  const scored = []
+  for (const m of (memories || [])) {
+    if (!m || !m.text || m.archived || m.pinned) continue
+    if (ex.has(String(m.text).slice(0, 40))) continue
+    const text = String(m.text)
+    const hits = cues.filter((c) => text.includes(c))
+    if (!hits.length) continue
+    const imp = num(m.importance, 0.45)
+    const used = num(m.recallCount, 0)
+    const ageD = Math.max(0, (now - num(m.createdAt, now)) / 86_400_000)
+    const score = hits.length * 2 + imp * 3 + Math.min(1, ageD / 14) - used * 0.15
+    scored.push({ id: m.id || '', text, hits, score: +score.toFixed(3), imp, used })
+  }
+  scored.sort((a, b) => b.score - a.score)
+  // 去重（不同记忆可能文字高度重叠）
+  const out = []
+  const seen = new Set()
+  for (const x of scored) {
+    const key = x.text.slice(0, 20)
+    if (seen.has(key)) continue
+    seen.add(key)
+    out.push(x)
+    if (out.length >= limit) break
+  }
+  return out
+}
+
+/** 从模型回复里解析 [想起:N] 标记（返回去掉标记的文本 + 序号） */
+export function parseRecallDirective(text) {
+  const raw = String(text || '')
+  const m = raw.match(/\[想起\s*[:：]\s*(\d{1,2})\s*\]/)
+  let out = raw
+  let index = 0
+  if (m) {
+    index = Number(m[1])
+    out = raw.replace(m[0], '').replace(/\n{3,}/g, '\n\n').trim()
+  }
+  return { text: out, index }
+}
