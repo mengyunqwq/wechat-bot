@@ -3837,7 +3837,14 @@ let res = await callLlm(route, sys, usr, undefined)
           await client.call('sendText', { room, text: `刚发了个朋友圈：${text}` }, 15000)
         } catch { /* 吱声失败无所谓 */ }
       }
-      return { ok: r.ok, text, ret: r.ret, diag: r.diag }
+      return {
+        ok: r.ok, text, ret: r.ret, diag: r.diag,
+        // ★ 2026-10-28：配图可能失败后降级成纯文字，面板以前照样提示"已发布（带图）"。
+        //   这里把事实带出去，页面才能如实显示。
+        withImage: images.length > 0,
+        imageCount: images.length,
+        images,
+      }
     } catch (e) {
       momentState.lastErr = String(e?.message || e).slice(0, 200)
       planNextMoment(Date.now())
@@ -5607,11 +5614,13 @@ let res = await callLlm(route, sys, usr, undefined)
         if (text.length > 1500) return { ok: false, error: '内容太长（最多 1500 字）' }
         // 手动发布也支持配图（面板勾了「配图」才生成，避免白等 25 秒）
         let images = []
-        if (a.image === true) {
+        let imageError = ''
+        const wantedImage = a.image === true
+        if (wantedImage) {
           log(`[postMoment] 正在生成配图（图生图，锁角色）…`)
           const g = await pickMomentImg(text)
           if (g.ok) images = [g.file]
-          else log(`[postMoment] 配图失败（${g.error}），改发纯文字`)
+          else { imageError = String(g.error || '配图生成失败'); log(`[postMoment] 配图失败（${g.error}），改发纯文字`) }
         }
         const r = await postMomentNow(text, images)
         const verified = r.ok ? 1 : 0
@@ -5623,7 +5632,12 @@ let res = await callLlm(route, sys, usr, undefined)
         if (r.ok) { if (momentState.dayKey === momentDayKey()) momentState.dayCount += 1 }
         saveMomentState()
         log(`[postMoment] ret=${r.ret} verified=${momentState.lastVerified} len=${text.length}`)
-        return { ok: r.ok, ret: r.ret, diag: r.diag, text }
+        return {
+          ok: r.ok, ret: r.ret, diag: r.diag, text,
+          wantedImage,
+          withImage: images.length > 0,
+          imageError,          // 勾了配图但没成 → 面板要如实说"纯文字已发"
+        }
       }
       case 'momentEvalTest': {
         // 试评估：拿某个群最近的聊天让 AI 判断一次，**只返回结果，不发布**
@@ -6143,8 +6157,21 @@ let res = await callLlm(route, sys, usr, undefined)
       case 'memory.extract': {
         const room = await resolveRoom(a.room)
         const r = panelRoomView(room)
+        // ★ 2026-10-28：开关关着时 extractFacts 直接 return 0，面板却提示"提炼完成：新增 0 条"，
+        //   看起来像"提炼失败但没报错"。这里把原因带出去。
+        if (!config.memoryExtract) {
+          return {
+            ok: false,
+            added: 0,
+            count: (r.facts || []).length,
+            reason: 'memoryExtract 已关闭（面板「记忆」页的「自动提炼」开关 / 配置 memoryExtract）',
+          }
+        }
         const added = await extractFacts(r, { force: true })
-        return { ok: true, added, count: (r.facts || []).length }
+        return {
+          ok: true, added, count: (r.facts || []).length,
+          reason: added ? '' : '这次没有提炼出新内容（可能消息太少，或和已有记忆重复）',
+        }
       }
       case 'names.set': {
         const wxid = String(a.wxid || '').trim()

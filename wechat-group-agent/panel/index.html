@@ -335,6 +335,22 @@ async function api(path, opts) {
   if (!r.ok || j.ok === false) throw new Error(j.error || ('HTTP '+r.status));
   return j;
 }
+/**
+ * 发送类操作的成败判定。
+ * 为什么需要：不同 op 的返回字段不一样（sendText → rc；sayVoice → ok；sendSticker → rc+stickerId），
+ * 以前页面不看结果一律 toast「已执行/已发送」，失败也报成功（2026-10-28 修）。
+ */
+function sendVerdict(op, r) {
+  if (!r || typeof r !== 'object') return { ok: false, why: '没有返回结果' };
+  if (r.error) return { ok: false, why: String(r.error) };
+  if (op === 'sayVoice') return r.ok === true ? { ok: true } : { ok: false, why: '语音合成/发送失败' };
+  if (r.rc !== undefined && r.rc !== null) {
+    return Number(r.rc) === 0 ? { ok: true } : { ok: false, why: 'rc=' + r.rc };
+  }
+  if (r.ok === true) return { ok: true };
+  return { ok: false, why: '返回里没有 rc/ok：' + JSON.stringify(r).slice(0, 120) };
+}
+
 let toastTimer = null;
 function toast(msg, kind) {
   const el = $('#toast');
@@ -902,16 +918,21 @@ function renderHealthItems(h) {
 }
 
 async function runSelfcheck() {
-  const btn = $('#btn-check'); if (btn) { btn.disabled = true; btn.textContent = '检查中…'; }
+  // ★ 2026-10-28：总览页用 #btn-check/#health-list，运维页用 #btn-check2/#health-list2。
+  //   以前只更新总览那一套 → 在运维页点「立即自检」，后台真的在跑，页面却一动不动。
+  const btns = ['#btn-check', '#btn-check2'].map(sel => $(sel)).filter(Boolean);
+  btns.forEach(b => { b.disabled = true; b.textContent = '检查中…'; });
   try {
     const j = await api('/action', { method:'POST', body: JSON.stringify({ op:'selfcheck' }) });
     const h = j.result;
     App.S.health = h;
-    const box = $('#health-list'); if (box) box.innerHTML = renderHealthItems(h);
+    for (const sel of ['#health-list', '#health-list2']) {
+      const box = $(sel); if (box) box.innerHTML = renderHealthItems(h);
+    }
     toast('自检完成：' + (h.bad && h.bad.length ? h.bad.length + ' 项异常' : '关键项正常'), h.bad && h.bad.length ? 'err' : 'ok');
     renderHeader();
   } catch (e) { toast('自检失败：' + e.message, 'err'); }
-  finally { if (btn) { btn.disabled = false; btn.textContent = '立即自检'; } }
+  finally { btns.forEach(b => { b.disabled = false; b.textContent = '立即自检'; }); }
 }
 
 /* ── 功能开关 ─────────────────────────────────────────── */
@@ -1361,7 +1382,9 @@ async function loadStickers() {
       const room = prompt('发到哪个群？（群名或 roomId，留空=唯一群）') || '';
       try {
         const x = await api('/action', { method:'POST', body: JSON.stringify({ op:'sendSticker', args:{ room, stickerId:b.dataset.sendSticker } }) });
-        toast('已发送 rc=' + (x.result && x.result.rc), 'ok');
+        const v = sendVerdict('sendSticker', x.result);
+        if (v.ok) toast('已发送（' + b.dataset.sendSticker + '）', 'ok');
+        else toast('发送失败：' + v.why, 'err');
       } catch (e) { toast(e.message, 'err'); }
     });
   } catch (e) { box.textContent = '加载失败：' + e.message; }
@@ -1427,7 +1450,11 @@ async function renderMemoryExtra() {
     const room = roomFrom($('#mem-room'));
     try {
       const j = await api('/action', { method:'POST', body: JSON.stringify({ op:'memory.extract', args:{ room } }) });
-      toast('提炼完成：新增 ' + ((j.result && j.result.added) || 0) + ' 条', 'ok'); loadMemory();
+      const r = j.result || {};
+      if (r.ok === false) toast('没有提炼：' + (r.reason || '原因未知'), 'err');
+      else if ((r.added || 0) > 0) toast('提炼完成：新增 ' + r.added + ' 条', 'ok');
+      else toast('提炼完成：没有新增（' + (r.reason || '和已有记忆重复或消息太少') + '）', 'ok');
+      loadMemory();
     } catch (e) { toast(e.message, 'err'); }
   };
   $('#btn-mem-clear').onclick = async () => {
@@ -1606,6 +1633,9 @@ async function renderVoiceExtra() {
       ttsStateEl.textContent = '⚪ 已停止（模型未加载）';
       ttsStateEl.className = 'pill';
     }
+    // 启停会改 config.voiceModelOn → 勾选框必须跟着变，否则"意图"和界面对不上
+    const autoEl = $('#tts-autostart');
+    if (autoEl && typeof r.configOn === 'boolean' && autoEl.checked !== r.configOn) autoEl.checked = r.configOn;
     if (ttsConfigEl) {
       const L = r.last || {};
       let t = '配置：' + (r.configOn ? '开机自启（voiceModelOn=开）' : '不自动启动（voiceModelOn=关）');
@@ -2064,8 +2094,12 @@ async function renderMomentExtra() {
     btn.disabled = true; btn.textContent = '生图 + 发布中…（约 20 秒）';
     try {
       const r = await api('/action', { method: 'POST', body: JSON.stringify({ op: 'momentNow', args: { image: true } }) });
-      if (r.ok) toast('已发布（带图）：' + String(r.text || '').slice(0, 24), 'ok');
-      else toast('未发布：' + (r.error || ('ret=' + r.ret)), 'err');
+      if (r.ok) {
+        // 配图可能失败后降级成纯文字 —— 不能一律说"带图"
+        toast(r.withImage
+          ? ('已发布（带图）：' + String(r.text || '').slice(0, 24))
+          : ('已发布（纯文字，配图失败）：' + String(r.text || '').slice(0, 20)), r.withImage ? 'ok' : 'err');
+      } else toast('未发布：' + (r.error || ('ret=' + r.ret)), 'err');
     } catch (e) { toast('失败：' + e.message, 'err') }
     finally { btn.disabled = false; btn.textContent = '🖼 AI 写 + 配图发布'; refresh() }
   };
@@ -2078,8 +2112,14 @@ async function renderMomentExtra() {
     btn.disabled = true; btn.textContent = withImg ? '生成配图中…（约 25 秒）' : '发布中…';
     try {
       const r = await api('/action', { method: 'POST', body: JSON.stringify({ op: 'postMoment', args: { text, image: withImg } }) });
-      if (r.ok) { toast(withImg ? '已发布（带图）' : '已发布', 'ok'); ta.value = ''; cnt.textContent = '0 字' }
-      else toast('失败：' + (r.error || ('ret=' + r.ret)), 'err');
+      if (r.ok) {
+        if (withImg && !r.withImage) {
+          toast('已发布，但配图没生成（已按纯文字发出）：' + (r.imageError || '配图失败'), 'err');
+        } else {
+          toast(r.withImage ? '已发布（带图）' : '已发布', 'ok');
+        }
+        ta.value = ''; cnt.textContent = '0 字';
+      } else toast('失败：' + (r.error || ('ret=' + r.ret)), 'err');
     } catch (e) { toast('失败：' + e.message, 'err') }
     finally { btn.disabled = false; btn.textContent = '发布这条'; refresh() }
   };
@@ -2095,6 +2135,7 @@ function renderDiag() {
       <button class="btn" id="diag-reload" title="重新加载 lib/index.js —— 改完插件代码不用重启 DSH">热重载插件</button>
       <button class="btn" id="diag-wx-status" title="查询微信进程状态（wechatPower.status）">微信状态</button>
       <button class="btn" id="diag-wx-start" title="启动微信并自动点「进入微信」（wechatPower.start）">启动微信</button>
+      <button class="btn" id="diag-hires-clean" title="清空 hires 缓存目录（原图/整片视频，删了微信会重新下）">清空 hires 缓存</button>
       <span class="muted small" id="diag-wx-st"></span>
       <span class="muted small" id="diag-poll-st">轮询状态读取中…</span>
       <span class="muted small" id="diag-at">${App.diag ? esc(ago(App.diagAt)) : '加载中…'}</span>
@@ -2319,8 +2360,11 @@ function renderManual() {
       if (op === 'sendSticker') { args = { room }; if (/^\w{6,}$/.test(text.trim()) && text.trim().length < 40) args.stickerId = text.trim(); else args.text = text.trim(); }
       if (op === 'pat') args = { room, wxid: text.trim() };
       const j = await api('/action', { method:'POST', body: JSON.stringify({ op, args }) });
-      $('#op-result').textContent = JSON.stringify(j.result, null, 1);
-      toast('已执行', 'ok');
+      const r = j.result;
+      $('#op-result').textContent = JSON.stringify(r, null, 1);
+      const v = sendVerdict(op, r);
+      if (v.ok) toast('已发送' + (r && r.mentions ? '（@ ' + r.mentions + ' 人）' : ''), 'ok');
+      else toast('发送失败：' + v.why, 'err');
     } catch (e) { toast('失败：' + e.message, 'err'); $('#op-result').textContent = e.message; }
     finally { $('#btn-send').disabled = false; }
   };
