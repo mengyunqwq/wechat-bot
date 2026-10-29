@@ -277,3 +277,34 @@ node build-client.mjs
 ```bash
 node scripts/test-all.mjs --fast    # 跳过端到端与出站队列（省时间，但不能用于发布前）
 ```
+
+### R19 补充 — 发送类验证一律发「文件传输助手」
+
+**验证语音 / 表情 / 图片这些"发送类"功能时，只能发 `filehelper`（文件传输助手），不许拿真实的群当试验场。**
+
+```bash
+cd wx-bridge
+node scripts/verify-voice.mjs                 # 发一句默认测试语音
+node scripts/verify-voice.mjs "自定义文本"     # 指定文本
+```
+
+脚本里写死了：
+
+```js
+const ROOM = process.env.VOICE_TEST_ROOM || 'filehelper'
+if (ROOM !== 'filehelper') { console.error('❌ 只能发文件传输助手'); process.exit(1) }
+```
+
+输出示例：
+
+```
+发语音到「filehelper」：测试语音，只发文件传输助手
+✅ 发送成功（3.1s）：10324 字节 / 4100ms
+```
+
+**为什么**：真实的群是用户和群友在看，不能因为我们要验证链路就往群里丢测试语音/表情。
+文件传输助手只有自己看得见，失败也没人受影响。
+
+**顺带记一个协议坑**：桥的 WS 消息是**扁平参数**（`const { id, op, ...args } = msg`），
+不是 `{ id, op, args: {...} }`。写调试脚本时传错，参数全变 undefined，
+表现为"文本为空 / 用了默认值"（我今天就踩了：语音报"文本为空"，刷抖音 count 传 2 却刷了 8 条）。
