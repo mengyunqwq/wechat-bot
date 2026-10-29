@@ -10,7 +10,7 @@
  * 产出的事件结构与 hook 回调完全一致，所以桥和插件都不需要改。
  */
 import { createHash } from 'node:crypto'
-import { existsSync, statSync, readdirSync } from 'node:fs'
+import { existsSync, statSync, readdirSync, readFileSync, writeFileSync, mkdirSync, renameSync } from 'node:fs'
 import { join } from 'node:path'
 import { decompress as zstdDecompress } from 'fzstd'
 import { resolveDataRoot } from './wechat-image.mjs'
@@ -57,7 +57,7 @@ export class DbPoller {
    * @param {number} [o.intervalMs]
    * @param {(path:string,body:any,method?:string,timeout?:number)=>Promise<any>} [o.onReadFail] 读库失败回调（给上层进"禁止发送"窗口用）
    */
-  constructor({ api, emit, log, intervalMs = Number(process.env.WECHAT_POLL_MS) || 6000, onReady = null, onReadFail = null }) {
+  constructor({ api, emit, log, intervalMs = Number(process.env.WECHAT_POLL_MS) || 6000, onReady = null, onReadFail = null, dataDir = '' }) {
     this.api = api
     this.emit = emit
     this.log = log
@@ -69,6 +69,7 @@ export class DbPoller {
     this._timer = null
     this.onReady = onReady
     this.onReadFail = onReadFail
+    this.dataDir = dataDir
     this.selfWxid = ''       // 机器人自己的 wxid（自动从数据目录名推出来）
     this.stats = { polls: 0, msgs: 0, errors: 0, pauses: 0 }
     // ── 健康度 / 暂停（不健康时**停止轮询**，别拿失败的查询去压微信）──
@@ -191,6 +192,54 @@ export class DbPoller {
   pauseLeftSec() { return this.paused() ? Math.ceil((this._pauseUntil - Date.now()) / 1000) : 0 }
 
   /** 读库失败：连续 5 次 → 暂停 + 指数退避 */
+  // ── 游标持久化（2026-10-29，借 dsh-wechat-bridge 的 get_updates_buf 落盘思路）
+  //    重启后从磁盘恢复"每个表读到哪一条"，避免重启就重新扫一遍/漏消息。
+  _cursorFile() {
+    try {
+      return join(this.dataDir || join(process.cwd(), '..', 'data'), 'state', 'poll-cursor.json')
+    } catch { return '' }
+  }
+
+  _loadCursor() {
+    const f = this._cursorFile()
+    if (!f || !existsSync(f)) return 0
+    try {
+      const j = JSON.parse(readFileSync(f, 'utf8'))
+      let n = 0
+      for (const [table, info] of Object.entries(j.tables || {})) {
+        if (!table || !info) continue
+        const lastId = Number(info.lastId) || 0
+        if (lastId <= 0) continue
+        this.tables.set(table, { roomId: info.roomId || '', lastId })
+        n++
+      }
+      if (n) this.log(`轮询游标：从磁盘恢复 ${n} 个表的进度（${f}）`)
+      return n
+    } catch (e) {
+      this.log('轮询游标：读取失败（按新装处理）：' + String(e?.message || e).slice(0, 80))
+      return 0
+    }
+  }
+
+  _saveCursor() {
+    const f = this._cursorFile()
+    if (!f) return false
+    try {
+      mkdirSync(join(f, '..'), { recursive: true })
+      const tables = {}
+      for (const [t, info] of this.tables) {
+        if (info && Number(info.lastId) > 0) tables[t] = { roomId: info.roomId || '', lastId: Number(info.lastId) }
+      }
+      const tmp = f + '.tmp'
+      writeFileSync(tmp, JSON.stringify({ at: Date.now(), tables }, null, 0))
+      renameSync(tmp, f)
+      return true
+    } catch (e) {
+      this.log('轮询游标：写入失败：' + String(e?.message || e).slice(0, 80))
+      return false
+    }
+  }
+
   _noteReadFail(e) {
     // ★ 微信正在备份/重建库 → 这几秒读不到是预期的：不计入连续失败、不暂停、不告警。
     //   否则一次 30 秒的窗口会被放大成"暂停 60s + 插件自愈重启微信"。
@@ -389,9 +438,15 @@ export class DbPoller {
       } catch { /* ignore */ }
       // 必须保证是有限数字：坏值会让 pollTableOnce 的 SQL 直接 prepare 失败（见那里的注释）
       if (!Number.isFinite(lastId) || lastId < 0) lastId = 0
+      this._dirtyCursor = true
       this.tables.set(table, { roomId, lastId })
     }
     if (this.tables.size > 0) this._hadTablesOnce = true
+    // 建表/回补之后把游标落盘（重启不丢进度）
+    if (this._dirtyCursor) {
+      this._dirtyCursor = false
+      try { this._saveCursor() } catch { /* ignore */ }
+    }
     if (backfilled) this.log(`本次重扫：回补了 ${backfilled} 个新会话`)
 
     // 消息库分片可能被微信轮换（message_0 → message_1 …）：把实际在用的分片记下来，便于排查
@@ -557,6 +612,11 @@ export class DbPoller {
       if (typeof this.onReady === "function") { try { this.onReady(this.selfWxid) } catch { /* ignore */ } }
     }
     this.stats.polls++
+    // 读到新消息 → 游标落盘（最多 30 秒写一次，避免频繁 IO）
+    if (got > 0 && (!this._lastCursorSave || Date.now() - this._lastCursorSave > 30_000)) {
+      this._lastCursorSave = Date.now()
+      try { this._saveCursor() } catch { /* ignore */ }
+    }
     return got
   }
 
@@ -759,6 +819,7 @@ export class DbPoller {
   }
 
   start() {
+    try { this._loadCursor() } catch { /* 游标坏了就按新装走 */ }
     if (!this.stopped) return
     this.stopped = false
     const loop = async () => {

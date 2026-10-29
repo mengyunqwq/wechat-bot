@@ -125,6 +125,14 @@
   .card .k .muted{font-size:14px;font-weight:400;letter-spacing:0}
 
   .row{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+  /* ★ 好感度行：不换行 + 进度条永远占中间剩余宽度（原来用 .row 会被 flex-wrap 挤到下一行，
+     看起来像"有的没显示进度条"） */
+  .rel-row{display:flex;align-items:center;gap:8px;flex-wrap:nowrap;margin:3px 0}
+  .rel-row .rel-name{flex:0 0 128px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .rel-row .rel-bar{flex:1 1 auto;min-width:70px}
+  .rel-row .rel-pct{flex:0 0 44px;text-align:right;font-variant-numeric:tabular-nums}
+  .rel-row .rel-stage{flex:0 0 auto;white-space:nowrap}
+  .rel-row .chip.mini{padding:0 4px;font-size:10px;line-height:16px}
   .grow{flex:1}
   .muted{color:var(--muted)}
   .small{font-size:12px}
@@ -1335,7 +1343,7 @@ function stageMeter(v) {
   const bounds = [0.14, 0.29, 0.44, 0.55, 0.69, 0.85, 1.0];
   let cur = bounds.findIndex((b) => pctv <= b);
   if (cur < 0) cur = 6;
-  const colors = ['var(--bad)', '#d97a6c', 'var(--warn)', '#8a8f98', 'var(--a)', '#4fb286', 'var(--ok)'];
+  const colors = ['var(--bad)', '#d97a6c', 'var(--warn)', '#8a8f98', 'var(--accent)', '#4fb286', 'var(--ok)'];
   let out = '<div class="smeter" style="display:flex;gap:2px;flex:1;min-width:96px">';
   for (let i = 0; i < 7; i++) {
     const on = i === cur;
@@ -1349,8 +1357,9 @@ function stageMeter(v) {
 
 function bar(v, color) {
   const pct = Math.max(0, Math.min(100, Math.round((Number(v) || 0) * 100)));
-  return `<div style="background:var(--line-2);border-radius:6px;height:8px;flex:1;min-width:80px">
-    <div style="width:${pct}%;background:${color};height:8px;border-radius:6px"></div></div>`;
+  // ★ 轨道始终可见（0% 也有底），填充部分按百分比
+  return `<div style="background:var(--line-2);border-radius:6px;height:8px;width:100%;min-width:40px;overflow:hidden">
+    <div style="width:${pct}%;background:${color};height:8px;border-radius:6px;transition:width .2s"></div></div>`;
 }
 
 async function loadInner() {
@@ -1423,7 +1432,7 @@ async function loadInner() {
             { key: 'crush',  label: '心动',   hint: '唯一可亲密' },
           ];
           const colorOf = (v) => v < 0.30 ? 'var(--bad)' : v < 0.45 ? 'var(--warn)'
-            : v <= 0.55 ? '#8a8f98' : v <= 0.70 ? 'var(--a)' : v <= 0.85 ? '#4fb286' : 'var(--ok)';
+            : v <= 0.55 ? '#8a8f98' : v <= 0.70 ? 'var(--accent)' : v <= 0.85 ? '#4fb286' : 'var(--ok)';
           const filter = App.innerStageFilter || '';
           const filtered = filter ? rel.filter((x) => (x.stageKey || '') === filter) : rel;
           // ★ 折叠：默认只显示前 6 个（主人一定在前），其余收进"展开"
@@ -1435,20 +1444,17 @@ async function loadInner() {
             const n = rel.filter((x) => (x.stageKey || '') === st.key).length;
             const on = filter === st.key;
             return `<span class="chip s-chip${on ? ' on' : ''}" data-stage="${st.key}" title="${st.hint}｜${n} 人"
-              style="cursor:pointer;${on ? 'border-color:var(--a);font-weight:600' : ''}">${st.label} <span class="muted">${n}</span></span>`;
+              style="cursor:pointer;${on ? 'border-color:var(--accent);font-weight:600' : ''}">${st.label} <span class="muted">${n}</span></span>`;
           }).join('');
           if (!rel.length) return `<div class="empty">还没有对谁形成印象。</div>${chips}`;
           const rows = shown.map((x) => {
-            const pct = Math.round(x.value * 100);
-            return `<div class="row" style="margin:3px 0">
-              <span class="small" style="min-width:120px">${esc(x.name || x.who)}${
-                x.isMaster ? ' <span class="chip" style="padding:0 5px;font-size:11px;border-color:var(--ok)">主人·默认心动</span>'
-                : (x.isTop ? ' <b style="color:var(--ok)">★心动</b>' : '')}</span>
-              ${bar(x.value, colorOf(x.value))}
-              <span class="small muted" style="min-width:40px;text-align:right">${pct}%</span>
-              <span class="small" style="min-width:78px">${esc(x.stage || '')}${
-                x.isMaster && x.rawValue != null && Math.round(x.rawValue * 100) !== pct
-                  ? `<span class="muted" style="font-size:11px">（实际 ${Math.round(x.rawValue * 100)}%）</span>` : ''}</span></div>`;
+            const pct = Math.round((Number(x.value) || 0) * 100);
+            const fullName = String(x.name || x.who || '');
+            return `<div class="rel-row" title="${esc(fullName)}｜好感度 ${pct}%${x.stage ? '（' + esc(x.stage) + '）' : ''}${x.isMaster && x.rawValue != null && Math.round(x.rawValue * 100) !== pct ? '｜实际 ' + Math.round(x.rawValue * 100) + '%' : ''}">
+              <span class="small rel-name">${x.isMaster ? '<span class="chip mini" style="border-color:var(--ok)">主人</span> ' : (x.isTop ? '<b style="color:var(--ok)">★</b> ' : '')}${esc(fullName)}</span>
+              <div class="rel-bar">${bar(x.value, colorOf(x.value))}</div>
+              <span class="small muted rel-pct">${pct}%</span>
+              <span class="small rel-stage">${esc(x.stage || '')}</span></div>`;
           }).join('');
           return `<div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px">${chips}</div>
             ${filter ? `<div class="muted small" style="margin-bottom:4px">只看「${STAGES.find((x) => x.key === filter).label}」：${shown.length} 人（再点一次取消）</div>` : ''}

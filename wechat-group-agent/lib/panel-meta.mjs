@@ -421,6 +421,11 @@ export const CONFIG_META = {
     group: 'memory', label: '记忆 v2（遗忘曲线）', type: 'bool',
     help: '开=按艾宾浩斯遗忘曲线管理：越用越牢、情绪强的记得久、低权重自动归档。关=退回旧的"取最后 18 条"。',
   },
+  memoryCrossGroup: {
+    group: 'memory', label: '跨群边界', type: 'select',
+    options: [['safe', '安全（人事可跨群、事件只在本群）'], ['none', '严格（只用本群）'], ['all', '完全互通（会串群）']],
+    help: '记忆库是全局的，但"别的群发生的事"不该在本群说出来。safe=关于人的认知可跨群（群名会被抹掉），事件只在本群。',
+  },
   memoryBaseDays: {
     group: 'memory', label: '基准半衰天数', type: 'number', min: 0.5, max: 90, step: 0.5, unit: '天',
     help: '初始强度基准。越大越不容易忘（7 天 ≈ 第 7 天记起概率 37%，第 14 天 13%）。',
@@ -542,6 +547,26 @@ export const CONFIG_META = {
   persona: {
     group: 'model', label: '人设', type: 'textarea',
     help: '每次对话都会带上。改完立即生效。',
+  },
+  outboxMinGapMs: {
+    group: 'ops', label: '出站最小间隔（毫秒）', type: 'number', min: 0, max: 10000, step: 100,
+    help: '同一个群两条消息至少隔这么久。太小容易连发（连发语音曾把客户端送走过）。',
+  },
+  outboxMaxPerMin: {
+    group: 'ops', label: '每分钟最多发几条', type: 'number', min: 1, max: 120, step: 1,
+    help: '全局上限，防止刷屏。',
+  },
+  outboxMaxAttempts: {
+    group: 'ops', label: '失败重试次数', type: 'number', min: 1, max: 6, step: 1,
+    help: '发送失败后重试几次（指数退避）。',
+  },
+  personaExamples: {
+    group: 'model', label: '示例对话（学味道，最有效）', type: 'textarea',
+    help: '格式：一行"别人：…"一行"她：…"，空行分隔。模型模仿示例比遵守形容词有效得多。',
+  },
+  personaLore: {
+    group: 'model', label: '世界书（关键词→设定）', type: 'textarea',
+    help: '一行一条：「关键词1/关键词2 | 设定内容」。只有聊天里出现关键词时才注入，省 token。',
   },
   provider: {
     group: 'model', label: '模型 provider', type: 'text',

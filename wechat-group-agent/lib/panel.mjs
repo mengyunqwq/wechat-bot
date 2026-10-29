@@ -42,6 +42,7 @@ const ALLOWED_OPS = new Set([
   'persona.traits', 'persona.traitsReset', 'persona.load',   // ★ 方案⑥ 反馈驱动漂移 + 精力负荷
   'persona.selfReview',   // ★ G 自我复盘
   'persona.settleNow',    // ★ 反馈队列立即结算
+  'outbox.stats',          // ★ 出站队列状态
   'persona.addTerm',      // ★ 手动加群梗
   'persona.removeTerm',   // ★ 删群梗      // ★ 2026-10-27：TTS 服务（GPT-SoVITS）状态/启停/重启/试合成
 ])

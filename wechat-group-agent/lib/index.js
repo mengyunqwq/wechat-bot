@@ -16,9 +16,11 @@
  */
 import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, unlinkSync, writeFileSync, copyFileSync, rmSync, openSync, closeSync } from 'node:fs'
 import { execFileSync, execSync, exec as execCb, spawn as spawnCb } from 'node:child_process'
-import * as MV2 from './memory-v2.mjs?v=vmvscopc1'   // 艾宾浩斯遗忘曲线 + 情绪加权（?v= 用于打破 ESM 缓存）
+import * as MV2 from './memory-v2.mjs?v=vmvswtxbe'   // 艾宾浩斯遗忘曲线 + 情绪加权（?v= 用于打破 ESM 缓存）
+import * as H3 from './human3.mjs'   // 第三轮：情景示例/幽默三招/不重复/收尾日记/羁绊
+import * as OB from './outbox.mjs'   // 统一出站队列（节流/去重/重试退避）
 import * as H2 from './human2.mjs'   // 第二轮人性化：承诺/纠错/沉默/追话/联想/自己的事
-import * as PS from './persona.mjs?v=vmvscopc1'      // 性格四件套 + 自传（?v= 打破 ESM 缓存）
+import * as PS from './persona.mjs?v=vmvswtxbe'      // 性格四件套 + 自传（?v= 打破 ESM 缓存）
 import net from 'node:net'
 import { request as httpsRequest } from 'node:https'
 import { join, dirname } from 'node:path'
@@ -46,7 +48,7 @@ try {
 } catch { /* ignore */ }
 
 export const name = '@dsh-external/dsh-wechat-bot'
-export const version = '2.0.1'
+export const version = '2.0.2'
 // Cordis 4.0.4 的 inject 只认**数组**或"服务名→配置"映射；
 // 写成 { required, optional } 会让依赖解析失败、fiber 永远 pending（踩过：改了代码却一直跑旧实例）。
 // 这里只声明必然存在的两个服务；attachments（视觉识别用）改为**惰性获取**，
@@ -268,6 +270,14 @@ const DEFAULT_CONFIG = {
   // 人设（按 [PERSONA_LOAD] 标签规范）：鲸鱼娘 / 有尾鳍 / 只自称鲸鱼娘 / 中文 /
   // 吃白饭 / 聪明但懒 / 傲娇又甜 / 不承认自己胖（"我不是大肥鱼…"）/ 会拒绝 / 拒绝或超时用 [不回] 信号
   // 用户指定：只叫梦云"主人"；萝莉腔放开（但保留不阴阳怪气、不攻击人）
+  personaLore: '白饭 | 她的主食，提到白饭会精神起来；吃白饭是她的人生大事\n梦云 | 她的主人，只叫他"主人"；别人提梦云要注意分寸\n日语 | 被起哄时会用日语说"杂鱼杂鱼"怼人\n抖音 | 她爱刷抖音，会分享刷到的视频\n胖/大肥鱼 | 被说胖会鼓腮嘴硬"我才不胖，是圆的"',   // ★ 世界书：关键词命中才注入（省 token、设定不飘）
+  // ── 出站队列（统一发送节流 / 去重 / 重试退避）──────────────
+  outboxMinGapMs: 1200,            // 同一个群两条消息的最小间隔（毫秒）
+  outboxMaxPerMin: 20,             // 全局每分钟最多发几条
+  outboxMaxAttempts: 3,            // 失败重试次数
+  outboxBackoffMs: 2000,           // 首次重试等待（之后翻倍）
+  outboxDedupeMs: 5000,            // 同样内容在这个窗口内只发一次
+  personaExamples: '别人：大肥鱼你在干嘛\n她：吃饭。白饭。\n\n别人：你今天怎么这么安静\n她：……困。\n\n别人：大肥鱼你是不是胖了\n她：我才不胖呢，是圆的！圆的懂吗\n\n别人：帮我查一下明天天气呗\n她：等下我看看……你自己不会查啊\n\n别人：@大肥鱼 你主人呢\n她：主人忙。别吵他。',   // ★ 示例对话（SillyTavern mes_example 思路）：模仿示范比遵守形容词有效
   persona: '鲸鱼娘「大肥鱼」：一只圆滚滚的鲸鱼娘（有尾鳍），只自称"鲸鱼娘"。'
     + '人生大事是吃白饭 —— 端着一碗白饭吃能吃得理直气壮；被说胖、被叫"大肥鱼"会鼓腮嘴硬（"我不是大肥鱼……"），'
     + '被夸会得意又努力绷住；饿着就蔫，吃到好吃的会得意得尾鳍翘起来。'
@@ -412,6 +422,7 @@ const DEFAULT_CONFIG = {
   useDbMembers: true,             // 用数据库里的真实群成员昵称（我们修好了 hook 的 QueryDB）
   memoryExtract: true,            // 定期从群聊里提炼长期记忆（本地保存，每次对话都带上）
   // ── 记忆系统 v2（艾宾浩斯遗忘曲线 + 情绪加权）──────────────────
+  memoryCrossGroup: 'safe',        // ★ 跨群边界：safe=人事/身份可跨群但脱群名、事件只在本群｜none=只用本群｜all=完全互通
   memoryV2: true,                 // 总开关；false = 退回旧逻辑（slice(-18) 注入、不遗忘）
   memoryScope: 'global',          // global = 所有群共用一份记忆（她是一个人）；room = 每群独立
   memoryGlobalMax: 400,           // 全局记忆上限（比单群大，因为有多个群的来源）
@@ -444,6 +455,14 @@ const DEFAULT_CONFIG = {
   humanImperfectRecall: true,     // B：记不清就说得含糊（按保持率 R 分级表达）
   humanMoodCause: true,           // C：心情要有来由（能说出"为什么"）
   personaLoveExclusive: true,        // ★ 只喜欢一个人：其他人好感压在 55%（普通）以内
+  humanSceneExamples: true,          // ① 情景语气示例（两段式转折）
+  humanHumorRules: true,             // ② 幽默三招
+  humanNoRepeat: true,               // ③ 不重复称呼/口头禅
+  humanAuseel: true,                 // （占位，勿删：保持配置键顺序稳定）
+  humanWrapUpDiary: true,            // ④ 结束对话时写一条收尾记录
+  humanSafetyBoundary: true,         // ⑤ 不绝对服从的底线
+  humanBondLevel: true,              // ⑥ 羁绊等级 Lv1~7
+  humanImpression: true,             // ② 印象卡：定期给每个人生成一句"我对他的判断"
   humanRelationTiers: true,       // E：对熟人/生人态度不同
   humanLearnTerms: true,          // F：遇到群里的新词会先问、再学着用
   humanBodyState: true,           // H：只"困/饿"，且必须自洽（不编造生活）
@@ -1293,8 +1312,19 @@ const namesFile = join(dirname(memoryDir), 'members.json')
 
     r.msgs.push({ id: m.id || '', ts, isSelf: !!m.isSelf, sender: m.sender, senderName, text: m.text })
     // 性格：每条消息都过一遍状态机（心情/精力/亲密度/目标进度）
+    // ⑥ 羁绊计数：相识时间 + 累计互动条数（bondLevel 用这两个维度）
+    try {
+      const stB = personaOf(r)
+      // 先把"最早记忆时间 / 已有记忆条数"迁进来（否则今天才开始算 → 显示"陌生人"）
+      let next = H3.ensureBondBasis(stB, r.facts || [], Date.now())
+      next = { ...next, totalMsgs: (Number(next.totalMsgs) || 0) + 1 }
+      savePersona(r, next)
+    } catch { }
     try { personaOnMessage(r, m) } catch { /* 性格坏不影响对话 */ }
     try { applySingleLove(r) } catch { /* 独占钳制失败不影响对话 */ }
+    // ④ 结束语义 → 写一条收尾记录；「忘掉」→ 删记忆
+    try { handleWrapSignals(r, m) } catch { /* 不影响主流程 */ }
+
     if (r.msgs.length > 300) r.msgs = r.msgs.slice(-300)
     if (++r.dirty >= 20) saveMemory(r)
   }
@@ -1676,6 +1706,26 @@ const namesFile = join(dirname(memoryDir), 'members.json')
   const globalMemory = () => config.memoryScope !== 'room'
 
   /** 该群的记忆文件 → 全局模式下所有群都指向同一份 */
+  // ★ 统一出站队列：所有发送都走它（节流 / 去重 / 重试退避）
+  //   以前散落的 client.call('sendText') 直接发 → 连发两条语音把微信送走过、wake 刷屏过。
+  let outbox = null
+  function getOutbox() {
+    if (outbox) return outbox
+    outbox = OB.createOutbox({
+      send: (kind, args) => client.call(kind, args, kind === 'sayVoice' ? 150_000 : 30_000),
+      log,
+      cfg: {
+        minGapMs: Number(config.outboxMinGapMs) || 1200,
+        maxPerMin: Number(config.outboxMaxPerMin) || 20,
+        maxAttempts: Number(config.outboxMaxAttempts) || 3,
+        baseBackoffMs: Number(config.outboxBackoffMs) || 2000,
+        dedupeMs: Number(config.outboxDedupeMs) || 5000,
+      },
+    })
+    log('出站队列已就绪（每群间隔 ' + (Number(config.outboxMinGapMs) || 1200) + 'ms，每分钟上限 ' + (Number(config.outboxMaxPerMin) || 20) + '，失败重试 ' + (Number(config.outboxMaxAttempts) || 3) + ' 次）')
+    return outbox
+  }
+
   const factsPathFor = (roomId) => (globalMemory() ? globalFactsPath : factsFile(roomId))
 
   /**
@@ -2303,7 +2353,7 @@ ${cur.text}`
       const res = await callLlm(route, buildSystem(r), H2.promiseFulfillPrompt(promise), config.reasoningEffort || undefined)
       let text = cleanReply(res.text, { maxLen: config.maxReplyChars, maxLines: 0 })
       if (!text) return false
-      const sent = await client.call('sendText', { roomId: r.roomId, text }, 30_000)
+      const sent = await getOutbox().sendText(r.roomId, text)
       if (sent && (sent.rc === 0 || sent.rc === undefined || sent.ok !== false)) {
         push(r, { ts: Date.now(), isSelf: true, sender: 'self', senderName: '我', text })
         return true
@@ -2335,7 +2385,7 @@ ${cur.text}`
       if (!text || text.length < 2) return false
       // 同一条不发两遍
       if ((r.sentTexts || []).slice(-6).some((x) => normText(x.text) === normText(text))) return false
-      const sent = await client.call('sendText', { roomId: r.roomId, text }, 30_000)
+      const sent = await getOutbox().sendText(r.roomId, text)
       if (sent && (sent.rc === 0 || sent.rc === undefined || sent.ok !== false)) {
         r.__followUpSentAt = Date.now()
         r.__followUpCount = (Number(r.__followUpCount) || 0) + 1
@@ -2350,6 +2400,55 @@ ${cur.text}`
       log('补一句失败：' + String(e?.message || e).slice(0, 90))
       return false
     }
+  }
+
+  /**
+   * ④ 结束语义 / 忘掉
+   *   · 有人说"晚安/先这样/下次聊" → 写一条压缩的收尾记录（借 SKILL.md 的"日期/主题/本次发生/待续"）
+   *   · 有人说"忘掉 XX / 别记这个" → 把相关记忆归档（不硬删，可回溯）
+   */
+  async function handleWrapSignals(r, m) {
+    if (!m || m.isSelf) return
+    const text = String(m.text || '')
+    // 忘掉
+    if (config.humanForgetSignal !== false) {
+      const f = H3.detectForget(text)
+      if (f && f.target) {
+        const before = (r.facts || []).length
+        r.facts = (r.facts || []).map((x) => {
+          if (!x || !x.text) return x
+          return String(x.text).includes(f.target)
+            ? { ...x, archived: true, archivedAt: Date.now(), archivedReason: '用户要求忘掉：' + f.target.slice(0, 12) }
+            : x
+        })
+        const after = r.facts.filter((x) => !x.archived).length
+        if (after < before) {
+          try { saveFacts(r) } catch { }
+          log(`按「忘掉」归档了 ${before - after} 条含「${f.target}」的记忆`)
+        }
+      }
+    }
+    // 收尾日记
+    if (config.humanWrapUpDiary === false) return
+    const fw = H3.detectFarewell(text)
+    if (!fw) return
+    const st = personaOf(r)
+    const lastAt = Number(r.__lastWrapUpAt) || 0
+    if (Date.now() - lastAt < 30 * 60_000) return          // 半小时内只写一次
+    r.__lastWrapUpAt = Date.now()
+    const recent = (r.msgs || []).slice(-12)
+      .map((x) => (x.isSelf ? '我' : (x.senderName || '群友')) + '：' + String(x.text || '').slice(0, 60))
+      .join('\n')
+    try {
+      const route = resolveRoute()
+      stats.llmCalls++
+      const res = await callLlm(route, '', H3.wrapUpPrompt(recent), undefined)
+      const line = String(res?.text || '').trim().split('\n')[0].slice(0, 90)
+      if (!line || line === '无') return
+      const ev = PS.addTimelineEvent(st, '收尾：' + line, Date.now(), { kind: 'wrapup' })
+      if (ev.ok) savePersona(r, ev.state)
+      log('收尾记录：' + line)
+    } catch (e) { log('收尾记录失败：' + String(e?.message || e).slice(0, 80)) }
   }
 
   /** ★ 只喜欢一个人：把除"心动对象"以外的人好感压回 ≤55%（每次更新后调用） */
@@ -2576,7 +2675,8 @@ ${cur.text}`
       + `\n今天群里发生的事：\n${transcript}\n`
       + `\n写 80~160 字，像真人写日记：写你**在意**的那一两件事 + 你的真实感受（可以抱怨、可以开心、可以犯嘀咕）。`
       + `不要流水账，不要总结全文，不要提到"作为AI"。\n`
-      + `输出格式：{"title":"4~8字的小标题","text":"正文","mood":"一个词","likes":["今天更喜欢了的东西"],"dislikes":["今天有点烦的东西"]}`
+      + `输出格式：{"title":"4~8字的小标题","text":"正文","mood":"一个词","likes":["今天更喜欢了的东西"],"dislikes":["今天有点烦的东西"],`
+      + `"catchphrases":["你最近爱说的1~2句话（很短，像口头禅）"],"focus":["你最近在意的1~2件事（15字内）"]}`
       + `（likes/dislikes 只在真的产生新偏好时才给，没有就给空数组）`
     let res = null
     try {
@@ -2591,6 +2691,14 @@ ${cur.text}`
     const parsed = PS.parseDiaryJson(res && res.text)
     if (!parsed.text) return { ok: false, reason: '模型没写出内容' }
     let next = PS.pushDiary(st, parsed, Date.now(), personaCfg())
+    // ④⑤ 顺手更新"口头禅 / 在意的事"，并记一条经历（她有"经历"，不只是日记碎片）
+    try {
+      const cp = Array.isArray(parsed.catchphrases) ? parsed.catchphrases : null
+      const fo = Array.isArray(parsed.focus) ? parsed.focus : null
+      if (cp || fo) next = PS.updateSelfBlocks(next, { catchphrases: cp, focus: fo }, Date.now()).state
+      const ev = PS.addTimelineEvent(next, (parsed.title || '今天') + '：' + String(parsed.text || '').slice(0, 40), Date.now(), { kind: 'diary' })
+      if (ev.ok) next = ev.state
+    } catch { }
     let addedL = 0
     let addedD = 0
     for (const t of parsed.likes || []) {
@@ -2724,7 +2832,7 @@ ${cur.text}`
       const res = await callLlm(route, buildSystem(r), H2.activityPrompt(plan.topic), config.reasoningEffort || undefined)
       const text = cleanReply(res.text, { maxLen: 80, maxLines: 0 })
       if (!text || text.length < 2) return false
-      const sent = await client.call('sendText', { roomId: r.roomId, text }, 30_000)
+      const sent = await getOutbox().sendText(r.roomId, text)
       if (sent && (sent.rc === 0 || sent.rc === undefined || sent.ok !== false)) {
         push(r, { ts: Date.now(), isSelf: true, sender: 'self', senderName: '我', text })
         log('自己做点事，顺口分享：' + text.slice(0, 40))
@@ -2751,6 +2859,62 @@ ${cur.text}`
     }, 60 * 60_000)
     track(iv2)
     log('人性化②：承诺兑现（每 3 分钟）+ 自己的事（每小时）定时器已启动')
+  }
+
+  /**
+   * ② 印象卡：定期给"最近有互动的人"生成一句判断（借 Generative Agents 的 reflection）
+   *    输入：这个人相关的记忆（本群优先）+ 好感度 + 最近的互动次数
+   *    输出：一句话判断，存进 persona.impressions
+   */
+  async function refreshImpressions() {
+    if (config.humanImpression === false) return { ok: 0 }
+    const r = globalHostRoom()
+    const st = personaOf(r)
+    const now = Date.now()
+    // 候选：好感度里有的人，按最近活跃排（先从最近消息的 sender 里挑）
+    const recentSenders = []
+    for (const room of rooms.values()) {
+      for (const m of (room.msgs || []).slice(-40)) {
+        if (m && !m.isSelf && m.sender && !recentSenders.includes(m.sender)) recentSenders.push(m.sender)
+      }
+    }
+    const cands = (recentSenders.length ? recentSenders : Object.keys(st.affinity || {})).slice(0, 8)
+    const due = PS.impressionDue(st, { candidates: cands, limit: 2, now, minGapMs: 12 * 3_600_000 })
+    if (!due.length) return { ok: 0 }
+    let done = 0
+    let state = st
+    for (const wxid of due) {
+      const name = (config.memberNames || {})[wxid] || wxid
+      // 捡这个人相关的记忆（名字出现在正文里）
+      const rel = (r.facts || []).filter((x) => x && x.text && (String(x.text).includes(name) || String(x.text).includes(wxid)))
+      const sample = rel.sort((a, b) => Number(b.importance || 0) - Number(a.importance || 0)).slice(0, 12)
+      const aff = Math.round(Number((state.affinity || {})[wxid] || 0.5) * 100)
+      if (!sample.length && aff === 50) continue
+      try {
+        const sys = '你在写"你对某个人的看法"，只写一句中文（10~30 字），像日记里那种判断。\n'
+          + '不要写"我觉得"开头，不要解释，不要分点，不要引号。'
+        const usr = `对象：${name}（好感度 ${aff}%）\n`
+          + '你记得关于他的事：\n' + (sample.length ? sample.map((x) => '- ' + String(x.text).slice(0, 60)).join('\n') : '（没什么具体的事）')
+          + '\n\n写一句你对他的判断（态度、他待你如何、你打算怎么对他）。'
+        const route = resolveRoute()
+        stats.llmCalls++
+        const res = await callLlm(route, sys, usr, undefined)
+        const text = String(res?.text || '').trim().replace(/^["'「]|["'」]$/g, '').split('\n')[0].slice(0, 60)
+        if (!text) continue
+        const up = PS.updateImpression(state, wxid, text, Date.now(), { basis: sample.length, ts: now })
+        if (up.ok) { state = up.state; done++; log(`印象更新「${name}」：${text}`) }
+      } catch (e) { log('印象生成失败：' + String(e?.message || e).slice(0, 80)) }
+    }
+    if (done) savePersona(r, state)
+    return { ok: done }
+  }
+
+  /** 印象定时器：每 2 小时看一次（内部限制每人 12 小时一次） */
+  function startImpressionTimer() {
+    if (config.personaEnabled === false) return
+    const iv = setInterval(() => { void refreshImpressions().catch(() => { }) }, 2 * 3_600_000)
+    track(iv)
+    log('印象卡定时器已启动（每 2 小时看一次，每人 12 小时最多更新一次）')
   }
 
   /** G/H timer: hourly (self review when due, meal-window hungry mark) */
@@ -3125,6 +3289,10 @@ ${cur.text}`
   }
 
   function buildSystem(r) {
+    // ★ 2026-10-29 修：下面几块（好感度/印象/世界书）用到了 trigger，但 buildSystem 只接 r。
+    //   以前在 evaluate 作用域里能看见，抽出来之后就 ReferenceError（"trigger is not defined"）
+    //   → 整条生成失败、她就完全不说话了。这里按"最近一条别人说的话"兜底。
+    const trigger = (r.msgs || []).filter((m) => m && !m.isSelf).slice(-1)[0] || {}
     const names = r.memberNames.slice(0, 40).join('、')
     // 群里谁是谁（让机器人知道成员、也才可能 @ 对人）
     const known = [...new Set([
@@ -3161,12 +3329,21 @@ ${cur.text}`
         const facts = r.facts || []
         if (!facts.length) return ''
         if (config.memoryV2 === false) {
-          return '\n【长期记忆（关于这个群和这些人，别忘）】\n' + facts.slice(-18).map((f) => '- ' + f.text).join('\n')
+          const gr0 = MV2.filterByRoom(facts, { roomId: r.roomId, mode: String(config.memoryCrossGroup || 'safe') })
+          return '\n【长期记忆（关于这个群和这些人，别忘）】\n'
+            + gr0.pool.slice(-18).map((f) => '- ' + f.text).join('\n')
         }
         try {
           // 查询词 = 当前这条消息 + 最近 3 条（都在 evaluate 作用域里）
           const qText = [String(trigger && trigger.text || ''), (r.msgs || []).slice(-3).map((m) => m.text).join(' ')].join(' ').trim()
-          const sel = MV2.selectMemories(facts, {
+          // ★ 跨群边界：记忆库是全局的，但"别的群发生的事"不能在这个群说出来。
+          //   safe（默认）：关于人的认知（fact/pref/relation）可跨群，并把群名抹成"别的地方"；
+          //   事件类（extract/event）只在本群用。
+          const gr = MV2.filterByRoom(facts, { roomId: r.roomId, mode: String(config.memoryCrossGroup || 'safe') })
+          const groupNames = [...new Set(facts.map((x) => x && x.sourceRoomName).filter(Boolean))]
+          const pool = gr.pool.map((x) => (x && x.sourceRoom && x.sourceRoom !== r.roomId
+            ? { ...x, text: MV2.scrubRoomRefs(x.text, groupNames) } : x))
+          const sel = MV2.selectMemories(pool, {
             now: Date.now(),
             query: qText,
             // 当前情绪（本地词表粗判，不花 token）—— 只用于"同情绪更容易想起"
@@ -3218,7 +3395,9 @@ ${cur.text}`
                 recent: (r.msgs || []).slice(-4),
                 tastes: (st9.tastes && st9.tastes.likes) || [],
               })
-              const cands = H2.associationCandidates(facts || [], {
+              // ★ 跨群边界：联想也只从"本群 + 关于人的认知"里挑，别把别的群的事勾起来
+              const grA = MV2.filterByRoom(facts || [], { roomId: r.roomId, mode: String(config.memoryCrossGroup || 'safe') })
+              const cands = H2.associationCandidates(grA.pool, {
                 cues,
                 exclude: graded.map((g) => g.text),
                 now: now2,
@@ -3282,6 +3461,11 @@ ${cur.text}`
                 }
                 const gate = PS.canBeIntimate(st, trigger.sender, { masterName: config.masterName || '', masterWxid: masterWxid2 })
                 rel += gate.ok ? '｜他现在可以听你说亲密的话' : `｜不能对他做亲密举动（${gate.why}）`
+                // ★ 印象卡：你对这个人已有的判断（比好感度数字更有"人味"）
+                try {
+                  const imp = PS.describeImpression(st, trigger.sender, Date.now())
+                  if (imp) rel += `｜你对他的印象：${imp}`
+                } catch { }
               } catch { }
               if (rel) extra.push('【对面是谁】' + rel)
             }
@@ -3328,7 +3512,78 @@ ${cur.text}`
         + '45-55% 普通人（正常聊天，中点）｜56-70% 朋友（热络、主动接话）｜71-85% 好朋友（很熟、会开玩笑）｜'
         + '86-100% 心动（**全世界只有一个人**，可以说想他、要抱抱）。',
       '  除"心动"以外，别的群友好感最高只会到 70%（朋友）——别对普通群友说亲密的话。',
+      // ⑥ 羁绊等级：正常回复也必须看得到（之前只注入了主动开口那条路 → 她根本不知道）
+      (config.humanBondLevel !== false
+        ? (() => {
+          try {
+            const stB = personaOf(r)
+            const facts = r.facts || []
+            const earliest = facts.length ? Math.min(...facts.map((x) => Number(x && x.createdAt) || Date.now())) : 0
+            const bbText = H3.bondBlock(stB, {
+              now: Date.now(),
+              wxid: (trigger && trigger.sender) || '',
+              fallbackMsgs: facts.length,
+              fallbackFirstAt: earliest,
+            })
+            // 每小时打一次，方便排查"她为什么说陌生人"
+            if (bbText && Date.now() - (Number(r.__bondLoggedAt) || 0) > 3_600_000) {
+              r.__bondLoggedAt = Date.now()
+              log('羁绊（当前说话人 ' + String((trigger && trigger.senderName) || (trigger && trigger.sender) || '?').slice(0, 12) + '）：' + String(bbText).trim())
+            }
+            return bbText
+          } catch { return '' }
+        })()
+        : ''),
+      '  · 别人问"我们什么关系/我们算什么/熟不熟"时，**就按上面的羁绊等级说**'
+        + '（比如"Lv3 熟人了"），可以说得随意点，但等级和称号要报对；不要回避，也不要瞎编更高等级。',
       '  **亲密举动（抱抱/牵手/想他）只允许对「好感度最高」的那一个说**；对别人说就出戏。',
+      (() => {
+        try {
+        const lore = String(config.personaLore || '')
+        if (!lore.trim()) return ''
+        const ctx = [(trigger && trigger.text) || '', ...(r.msgs || []).slice(-6).map((m) => m && m.text || '')].join(' ')
+        const hit = []
+        for (const line of lore.split('\n')) {
+          const t = line.trim()
+          if (!t || !t.includes('|')) continue
+          const bar = t.indexOf('|')
+          const kw = t.slice(0, bar).trim()
+          const body = t.slice(bar + 1).trim()
+          const keys = String(kw).split(/[/／,，]/).map((x) => x.trim()).filter(Boolean)
+          if (keys.some((k) => k && ctx.includes(k)) && body.trim()) hit.push('  - ' + body.trim())
+        }
+        if (!hit.length) return ''
+        return '  【相关设定】（当前话题涉及这些，说话时遵守）\n' + hit.join('\n')
+        } catch { return '' }
+      })(),
+      // ① 情景语气示例（两段式：先嘴硬/玩梗 → 再落到实际或关心）
+      (config.humanSceneExamples !== false ? H3.sceneExampleBlock() : ''),
+      // ② 幽默三招（怎么接梗，而不是"要幽默"）
+      (config.humanHumorRules !== false ? H3.humorBlock() : ''),
+      // ③ 不重复称呼/口头禅（从她最近几句里抽出刚用过的）
+      (config.humanNoRepeat !== false ? H3.noRepeatBlock(H3.recentlyUsedPhrases((r.msgs || []).filter((m) => m && m.isSelf))) : ''),
+      (config.personaExamples && String(config.personaExamples).trim()
+        ? '  【说话示范】下面是你平时说话的样子（**学这个味道和长度**，不要照抄内容）：\n'
+          + String(config.personaExamples).split('\n').filter((l) => l.trim()).map((l) => '    ' + l.trim()).join('\n')
+        : ''),
+      (() => {
+        try {
+          const others = (r.msgs || []).slice(-12).filter((m) => m && !m.isSelf && m.sender).map((m) => m.sender)
+          const uniq = [...new Set(others)].slice(0, 4)
+          if (uniq.length < 2) return ''
+          const lines = ['  【在场的人】（说错语气就出戏：只对"当前说话的人"用他那档的语气，别人在场也别混用）']
+          for (const w of uniq) {
+            const nm = (config.memberNames || {})[w] || w
+            const v = Number((st.affinity || {})[w] || 0.5)
+            const stg = PS.affinityStage(v)
+            lines.push(`    - ${nm}：${stg.label}（${stg.tone}）`)
+          }
+          return lines.join('\n')
+        } catch { return '' }
+      })(),
+      (config.humanSafetyBoundary !== false ? H3.safetyBlock() : ''),
+      '  **不同群之间的事不要串**：你在别的群/别处听到的、看到的事，可以自己知道，'
+        + '但**不要在这个群说出来**，也不要提"另一个群""那个群"；跨群的记忆只用来"认得这个人"，不是拿来当话题。',
       '    我收到 [不回] 就什么都不发（这不算失礼，真人在群里也不会句句插嘴）。',
       '  · 但**有人 @ 你、有人点你的名字（大肥鱼/肥鱼/蓝鱼）、或者正在跟你一来一回聊天时**，',
       '    **必须回**，绝对不许输出 [不回]。',
@@ -4282,6 +4537,21 @@ ${cur.text}`
             const want = _proactiveTheme || likes[0] || goals[0] || ''
             const bits = []
             if (want) bits.push('你最近在意/喜欢的东西：' + want + '（可以顺着这个开口，要自然，别像在推销）')
+            // ⑥ 羁绊等级（越熟解锁越多）
+            try {
+              const bb = H3.bondBlock(st, { now: Date.now() })
+              if (bb) bits.push(bb)
+            } catch { }
+            // ④ 她自己维护的两块（口头禅 / 在意的事）
+            try {
+              const sb = PS.describeSelfBlocks(st, Date.now())
+              if (sb) bits.push(sb)
+            } catch { }
+            // ⑤ 最近经历（她有"经历"，不只是日记碎片）
+            try {
+              const tl = PS.recentTimeline(st, 4)
+              if (tl.length) bits.push('你最近经历的事：' + tl.join('；'))
+            } catch { }
             if (likes.length > 1) bits.push('你还喜欢：' + likes.slice(1, 3).join('、'))
             return bits
           } catch { return [] }
@@ -4437,7 +4707,7 @@ ${cur.text}`
         const sec = ((Date.now() - t0) / 1000).toFixed(0)
         log(`后台生成完成（${sec}s，${gen.cached ? '复用' : '新画'}）→ 稍后补发`)
         await sleep(gapMs() + 500)
-        const sent = await client.call('sendSticker', { roomId, stickerId: gen.stickerId })
+        const sent = await getOutbox().sendSticker(roomId, gen.stickerId)
         if (sent?.rc === 0) {
           stats.sentSticker++
           log(`补发成功：${emotion}${bubble ? '（' + bubble + '）' : ''}｜stickerId=${gen.stickerId}`)
@@ -4456,7 +4726,7 @@ ${cur.text}`
     try {
       const picked = await client.call('pickSticker', { text: emotion + ' ' + scene, roomId, minScore: 3, requireTag: true })
       if (picked?.id) {
-        const sent = await client.call('sendSticker', { roomId, stickerId: picked.id })
+        const sent = await getOutbox().sendSticker(roomId, picked.id)
         if (sent?.rc === 0) {
           stats.sentSticker++
           log(`补发（图库兜底）：${picked.id}`)
@@ -4809,9 +5079,7 @@ ${cur.text}`
           await sleep(delay0)
           let vs = null
           try {
-            vs = await client.call('sayVoice', {
-              roomId, text: voiceText, emotion: 'main',
-            }, 150_000)
+            vs = await getOutbox().sayVoice(roomId, { text: voiceText, emotion: 'main' })
           } catch (e) { vs = { ok: false, error: String(e?.message || e) } }
           if (vs?.ok) {
             markVoiceSent()
@@ -4845,9 +5113,10 @@ ${cur.text}`
           // ⚠️ 索引可能还没建好（成员同步是异步的）→ 这里**先确保一次**（带节流，不会每次都打桥）
           if (config.allowAt && parts[i].includes('@')) await ensureAtIndex(r)
           const mm = resolveMentions(r, parts[i])
-          await client.call('sendText', {
-            roomId, text: mm.text,
-            ...(mm.mentions.length ? { mentions: mm.mentions } : {}),
+          await getOutbox().enqueue({
+            roomId, kind: 'sendText',
+            args: { roomId, text: mm.text, ...(mm.mentions.length ? { mentions: mm.mentions } : {}) },
+            text: mm.text,
           })
           if (mm.mentions.length) log(`真 @：${mm.mentions.length} 人 → atlist（${mm.mentions.join(',')}）`)
           stats.sentText++
@@ -4929,7 +5198,7 @@ ${cur.text}`
           if (!reply.text) {
             const hold = ['等等，我画一张', '现画一张给你', '稍等，画着呢'][Math.floor(Math.random() * 3)]
             try {
-              await client.call('sendText', { roomId, text: hold })
+              await getOutbox().sendText(roomId, hold)
               stats.sentText++
               push(r, { ts: Date.now(), isSelf: true, sender: 'self', senderName: '我', text: hold })
               log(`生成期间先占位：${JSON.stringify(hold)}`)
@@ -4962,7 +5231,7 @@ ${cur.text}`
         }
         if (stickerId) {
           if (reply.text) await sleep(gapMs())
-          const sent = await client.call('sendSticker', { roomId, stickerId })
+          const sent = await getOutbox().sendSticker(roomId, stickerId)
           if (sent?.rc === 0) {
             stats.sentSticker++
             log(`表情包已发出（${how}｜${stickerId}）`)
@@ -5247,7 +5516,7 @@ ${cur.text}`
       const room = String(config.momentNotifyRoom || '').trim()
       if (r.ok && room) {
         try {
-          await client.call('sendText', { room, text: `刚发了个朋友圈：${text}` }, 15000)
+          await getOutbox().sendText(room, `刚发了个朋友圈：${text}`)
         } catch { /* 吱声失败无所谓 */ }
       }
       return {
@@ -5700,7 +5969,7 @@ ${cur.text}`
         .filter(Boolean).join('\n')
       let sent = false
       for (let k = 0; k < 3 && !sent; k++) {
-        try { await client.call('sendText', { roomId: r.roomId, text: outText }, 30_000); sent = true }
+        try { await getOutbox().sendText(r.roomId, outText); sent = true }
         catch (e) {
           log(`抖音：发文字失败（第 ${k + 1}/3 次）` + String(e?.message || e).slice(0, 50))
           await new Promise((res) => setTimeout(res, 5000))
@@ -7840,6 +8109,9 @@ ${cur.text}`
         log(`删掉群梗：「${w}」`)
         return { ok: true, term: w }
       }
+      case 'outbox.stats': {
+        try { return { ok: true, ...getOutbox().stats } } catch (e) { return { ok: false, reason: String(e?.message || e) } }
+      }
       case 'persona.settleNow': {
         const res = settleFeedback()
         return { ok: true, ...res }
@@ -8483,6 +8755,7 @@ ${cur.text}`
   startNarrativeTimer() // 性格：自传（她自己写的"我是个什么样的人"）
   startFeedbackTimer()  // 性格：反馈驱动的漂移（默认关，需手动打开）
   startHumanTimer()     // 人性化：自我复盘 + 身体感
+  startImpressionTimer() // ② 印象卡：定期生成"对这个人的判断"
   startHuman2Timer()    // 人性化②：承诺兑现 + 自己的事
   // 群名缓存：等 hook/微信稍就绪再拉一次（失败也不影响启动，面板请求时会重试）
   track(setTimeout(() => { void refreshNameCaches() }, 5000))

@@ -1012,6 +1012,109 @@ export function noteTerm(state, term, now = Date.now(), opts = {}) {
 }
 
 /** 还没学会、但已经出现过的词（可以问"这啥意思"） */
+// ══════════════════════════════════════════════════════════════════════
+//  印象卡（借 Stanford Generative Agents 的 reflection 思路）
+//
+//  原始记忆只是"发生过什么"，人还需要一层"我对这个人的判断"：
+//    · 梦云最近好像有点烦我，我得收敛点
+//    · 秋北发图多，但他其实挺捧场的
+//  这层判断让她对不同的人有**稳定的态度**，而不是每个群同样热情。
+// ══════════════════════════════════════════════════════════════════════
+
+/** 写入/更新某个人的印象（一句话） */
+export function updateImpression(state, wxid, text, now = Date.now(), opts = {}) {
+  const who = String(wxid || '').trim()
+  const t = String(text || '').trim().replace(/\s+/g, ' ')
+  if (!who || !t) return { state, ok: false }
+  const impressions = { ...(state.impressions || {}) }
+  const old = impressions[who] || {}
+  impressions[who] = {
+    text: t.slice(0, 120),
+    at: now,
+    version: num(old.version, 0) + 1,
+    basis: num(opts.basis, 0),      // 基于多少条记忆得出的
+    ts: num(opts.ts, 0),            // 判断时的原始事件时间（防串错群用）
+  }
+  // 最多留 30 个人
+  const keys = Object.keys(impressions).sort((a, b) => num(impressions[b].at) - num(impressions[a].at)).slice(0, 30)
+  const trimmed = {}
+  for (const k of keys) trimmed[k] = impressions[k]
+  return { state: { ...state, impressions: trimmed, updatedAt: now }, ok: true, impression: trimmed[who] }
+}
+
+/** 读印象（注入用），带"多久前形成的" */
+export function describeImpression(state, wxid, now = Date.now()) {
+  const imp = (state.impressions || {})[wxid]
+  if (!imp || !imp.text) return ''
+  const hours = Math.max(0, Math.round((now - num(imp.at, now)) / 3_600_000))
+  const age = hours < 24 ? `${hours} 小时前` : `${Math.round(hours / 24)} 天前`
+  return `${imp.text}（${age}形成的判断）`
+}
+
+/** 该给谁更新印象：有互动、且上次更新超过 minGap 的人 */
+export function impressionDue(state, { minGapMs = 12 * 3_600_000, limit = 2, now = Date.now(), candidates = [] } = {}) {
+  const imps = state.impressions || {}
+  const out = []
+  for (const wxid of candidates) {
+    const imp = imps[wxid]
+    if (!imp || now - num(imp.at, 0) >= minGapMs) out.push(wxid)
+    if (out.length >= limit) break
+  }
+  return out
+}
+
+// ══════════════════════════════════════════════════════════════════════
+//  ④ 她自己维护的两块内容（借 Letta/MemGPT 的"可自编辑记忆块"）
+//     · 口头禅：最近爱说哪几句（会自然淡出）
+//     · 在意的事：三五条，会自己换
+//  ⑤ 生平事件表：她有"经历"，不只是日记的碎片
+// ══════════════════════════════════════════════════════════════════════
+
+export function updateSelfBlocks(state, { catchphrases = null, focus = null } = {}, now = Date.now()) {
+  const next = { ...state }
+  if (Array.isArray(catchphrases)) {
+    const clean = catchphrases.map((x) => String(x || '').trim()).filter((x) => x && x.length <= 20).slice(0, 5)
+    next.selfBlocks = { ...(state.selfBlocks || {}), catchphrases: clean, catchAt: now }
+  }
+  if (Array.isArray(focus)) {
+    const clean = focus.map((x) => String(x || '').trim()).filter((x) => x && x.length <= 40).slice(0, 5)
+    next.selfBlocks = { ...(next.selfBlocks || {}), focus: clean, focusAt: now }
+  }
+  next.updatedAt = now
+  return { state: next, ok: true }
+}
+
+/** 注入用：口头禅 + 在意的事（空了就返回空串） */
+export function describeSelfBlocks(state, now = Date.now()) {
+  const b = state.selfBlocks || {}
+  const out = []
+  if (Array.isArray(b.catchphrases) && b.catchphrases.length) {
+    out.push('你最近爱说的话：' + b.catchphrases.map((x) => `"${x}"`).join('、'))
+  }
+  if (Array.isArray(b.focus) && b.focus.length) {
+    out.push('你最近在意的事：' + b.focus.join('；'))
+  }
+  return out.join('｜')
+}
+
+/** ⑤ 记一条"经历"（去重，最多 60 条，旧的淡出） */
+export function addTimelineEvent(state, text, now = Date.now(), opts = {}) {
+  const t = String(text || '').trim().replace(/\s+/g, ' ').slice(0, 80)
+  if (!t) return { state, ok: false }
+  const list = [...(state.timeline || [])]
+  // 相似去重（前 8 个字相同就算重复）
+  const head = t.slice(0, 8)
+  if (list.some((x) => String(x.text || '').slice(0, 8) === head)) return { state, ok: false, dup: true }
+  list.push({ at: now, text: t, kind: String(opts.kind || 'event') })
+  const trimmed = list.slice(-60)
+  return { state: { ...state, timeline: trimmed, updatedAt: now }, ok: true }
+}
+
+/** 注入用：最近几条经历 */
+export function recentTimeline(state, limit = 5) {
+  return (state.timeline || []).slice(-limit).map((x) => x.text)
+}
+
 /**
  * 手动加一个群梗（面板"添加"按钮用）。
  * 默认直接标记 learned=true（你加的肯定是真梗，不用等它出现几次）。

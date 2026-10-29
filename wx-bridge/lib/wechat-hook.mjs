@@ -638,6 +638,8 @@ export class WeChatHookBridge {
           roomId: m.roomId,
           context: (this._recentText.get(roomid) || []).slice(-3).join(' '),
           log: (s) => this.log(s),
+        // ★ 2026-10-29：游标落盘目录（重启后从磁盘恢复"每个表读到哪一条"）
+        dataDir: process.env.WECHAT_DATA_DIR || join(process.cwd(), '..', 'data'),
         })
     }
     return m

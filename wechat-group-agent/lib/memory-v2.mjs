@@ -566,3 +566,62 @@ export function findForgettable(items, opts = {}, now = Date.now()) {
   out.sort((a, b) => a._weight - b._weight)
   return out
 }
+
+// ══════════════════════════════════════════════════════════════════════
+//  跨群记忆边界（2026-10-29 用户要求）
+//
+//  她记忆是互通的（一份全局库），但**不能在 A 群说 B 群的事**。
+//  做法不是把跨群记忆删掉，而是在"注入提示词"这一步做两道处理：
+//    ① 分类放行：关于"人/身份/好恶"的认知可以跨群（不带群名）；
+//       而"某个群里发生的事、谁说了什么"只在那个群用。
+//    ② 脱敏：跨群可用的记忆里，把群名替换成"别的地方"，避免她顺口说出来。
+// ══════════════════════════════════════════════════════════════════════
+
+/** 哪些 kind 允许跨群使用（她对这个人的认知，不是某个群的八卦） */
+export const CROSS_GROUP_KINDS = new Set(['fact', 'pref', 'relation'])
+
+export function crossGroupAllowed(mem) {
+  if (!mem) return false
+  const kind = String(mem.kind || 'extract')
+  return CROSS_GROUP_KINDS.has(kind)
+}
+
+/** 把跨群记忆里的群名抹掉（宁可含糊，也不能报出别的群名） */
+export function scrubRoomRefs(text, roomNames = []) {
+  let t = String(text || '')
+  for (const n of roomNames) {
+    const name = String(n || '').trim()
+    if (name.length >= 2) {
+      t = t.split(name).join('别的地方')
+      t = t.split('在' + name).join('在外面')
+    }
+  }
+  // 常见说法统一成含糊表达
+  t = t.replace(/那个群/g, '别的地方').replace(/群里/g, '那边')
+  return t
+}
+
+/**
+ * 按"当前群"过滤记忆池：
+ *   · 无来源（全局事实，比如她是条鲸鱼娘）→ 保留
+ *   · 本群的 → 保留
+ *   · 别的群 + kind 安全 → 保留（但调用方应 scrub）
+ *   · 别的群 + 事件类 → 剔除
+ * @returns {{pool: Array, crossCount: number}}
+ */
+export function filterByRoom(memories, { roomId = '', mode = 'safe' } = {}) {
+  const list = Array.isArray(memories) ? memories : []
+  if (mode === 'all') return { pool: list, crossCount: 0 }
+  if (mode === 'none') {
+    const pool = list.filter((m) => m && (!m.sourceRoom || m.sourceRoom === roomId))
+    return { pool, crossCount: 0 }
+  }
+  let crossCount = 0
+  const pool = list.filter((m) => {
+    if (!m) return false
+    if (!m.sourceRoom || m.sourceRoom === roomId) return true
+    if (crossGroupAllowed(m)) { crossCount++; return true }
+    return false
+  })
+  return { pool, crossCount }
+}

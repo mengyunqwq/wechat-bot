@@ -225,3 +225,55 @@
 
 踩坑特征：日志正常、但面板/DSH 卡住几十秒；`curl /wechat-bot` 超时；
 CPU 不高（是在等而不是在算）。
+
+## R19 — 每次改完代码，必须过 `node scripts/test-all.mjs`
+
+**这不是建议，是硬性规则。**（2026-10-29 用户明确要求写入底层）
+
+任何改动（哪怕只是加一行日志、改一个常量）之后，必须：
+
+```bash
+cd wechat-group-agent
+node scripts/test-all.mjs        # 全绿才算改完
+```
+
+它一次跑完 7 类检查：
+
+| # | 检查 | 拦住什么 |
+|---|---|---|
+| ① | 语法 | `node --check` 全部 js/mjs + 面板内联脚本 |
+| ② | **提示词作用域** | 函数里引用了"别处的变量"（今天 `trigger is not defined` 那种，只在运行时炸） |
+| ③ | 面板操作白名单 | 面板点了没反应 / 被 403 |
+| ④ | 面板产物一致 | 改了 HTML 忘记 `node build-client.mjs` |
+| ⑤ | 单元测试 | 逻辑回归（persona/memory/human2/outbox/traits/load…） |
+| ⑥ | 端到端 | 假 hook → 真轮询 → 游标（接线类问题） |
+| ⑦ | 汇总 | 任何一项红 → 退出码 1 |
+
+**没有全绿就不许提交、不许推送、不许说"改好了"。**
+
+### 为什么会有这条规则
+
+2026-10-29 凌晨的真实事故：把"好感度/印象卡/世界书"塞进 `buildSystem(r)` 时用了
+`trigger.sender`，但 `buildSystem` 只接收 `r` —— 每次要回话都 `ReferenceError`，
+她**完全不说话**，而我当时认为"单测全过了"。
+
+教训：纯函数单测覆盖不到"接线/作用域"，所以必须有 ② 和 ⑥ 这两类检查。
+
+### 改完的完整流程
+
+```bash
+# 1) 改代码
+# 2) 跑检查（必须全绿）
+node scripts/test-all.mjs
+# 3) 重新打包面板（改了 panel/index.html 时）
+node build-client.mjs
+# 4) 重载插件（改了 lib/*.js 时）
+#    → dev_reload_package dsh-wechat-bot
+# 5) 看日志确认真的起来了
+```
+
+### 快速模式
+
+```bash
+node scripts/test-all.mjs --fast    # 跳过端到端与出站队列（省时间，但不能用于发布前）
+```
