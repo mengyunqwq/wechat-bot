@@ -16,11 +16,11 @@
  */
 import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, unlinkSync, writeFileSync, copyFileSync, rmSync, openSync, closeSync } from 'node:fs'
 import { execFileSync, execSync, exec as execCb, spawn as spawnCb } from 'node:child_process'
-import * as MV2 from './memory-v2.mjs?v=vmvswtxbe'   // 艾宾浩斯遗忘曲线 + 情绪加权（?v= 用于打破 ESM 缓存）
+import * as MV2 from './memory-v2.mjs?v=vmvsxeymu'   // 艾宾浩斯遗忘曲线 + 情绪加权（?v= 用于打破 ESM 缓存）
 import * as H3 from './human3.mjs'   // 第三轮：情景示例/幽默三招/不重复/收尾日记/羁绊
 import * as OB from './outbox.mjs'   // 统一出站队列（节流/去重/重试退避）
 import * as H2 from './human2.mjs'   // 第二轮人性化：承诺/纠错/沉默/追话/联想/自己的事
-import * as PS from './persona.mjs?v=vmvswtxbe'      // 性格四件套 + 自传（?v= 打破 ESM 缓存）
+import * as PS from './persona.mjs?v=vmvsxeymu'      // 性格四件套 + 自传（?v= 打破 ESM 缓存）
 import net from 'node:net'
 import { request as httpsRequest } from 'node:https'
 import { join, dirname } from 'node:path'
@@ -2541,16 +2541,22 @@ ${cur.text}`
           }
           const known = r.__knownText || ''
           const cands = new Set()
+          // ★ 2026-10-29：更严的候选过滤 —— 之前"什么关系/帮我安装/我们现在"都进表了
+          const BAD_TAIL = /[的了吗呢吧啊呀哦嘛哈]$/          // 结尾是助词 → 不像梗
+          const BAD_INNER = /[你我他她它们的了吗呢吧啊是在不都很太就才又还也把被给让对从向于]/
           for (const seg of String(text).split(/[\s，。！？,.!?、~～]+/)) {
-            const segs = seg.match(/[\u4e00-\u9fa5]{2,4}/g) || []
+            const segs = seg.match(/[\u4e00-\u9fa5]{2,6}/g) || []
             for (const t of segs) {
               if (STOP.has(t)) continue
-              if (known.includes(t)) continue          // 她本来就会 → 不是新梗
+              if (BAD_TAIL.test(t)) continue                     // "什么关系"→ 不，是"关系"结尾但含"什么"
+              if (BAD_INNER.test(t) && t.length <= 3) continue    // 短词里混虚词 → 多半是普通短语
+              if (known.includes(t)) continue                    // 她本来就会 → 不是新梗
               cands.add(t)
             }
           }
           for (const t of cands) {
-            const res = PS.noteTerm(next, t, Date.now())
+            // ★ 带上 sender：入表要求「2 个人用过」或「同一人 4 次」
+            const res = PS.noteTerm(next, t, Date.now(), { sender: m.sender })
             if (res.changed) next = res.state
           }
         }
@@ -3554,6 +3560,17 @@ ${cur.text}`
         }
         if (!hit.length) return ''
         return '  【相关设定】（当前话题涉及这些，说话时遵守）\n' + hit.join('\n')
+        } catch { return '' }
+      })(),
+      // 群梗：她学会的（多人用过的才算）→ 主提示词里明确"可以用"
+      (() => {
+        try {
+          if (config.humanLearnTerms === false) return ''
+          const st = personaOf(r)
+          const ld = PS.learnedTerms(st, 4)
+          if (!ld || !ld.length) return ''
+          return '  【你学会的群梗】' + ld.join('、')
+            + '（合适的时候可以自然用上，一次最多用一个；不懂就别说，别硬凹）'
         } catch { return '' }
       })(),
       // ① 情景语气示例（两段式：先嘴硬/玩梗 → 再落到实际或关心）

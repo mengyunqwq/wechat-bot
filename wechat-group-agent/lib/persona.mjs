@@ -973,10 +973,13 @@ export function noteTerm(state, term, now = Date.now(), opts = {}) {
   const lex = { ...(state.lexicon || {}) }
   const minCount = Math.max(2, num(opts.minCount, 2))
   const seen = { ...(state.termSeen || {}) }
+  const sender = String(opts.sender || '').trim()
 
-  // 已经在表里 → 累加
+  // 已经在表里 → 累加（并记录"谁用过"）
   if (lex[t]) {
-    const next = { ...lex[t], count: num(lex[t].count, 0) + 1, lastAt: now }
+    const usedBy = Array.isArray(lex[t].usedBy) ? [...lex[t].usedBy] : []
+    if (sender && !usedBy.includes(sender)) usedBy.push(sender)
+    const next = { ...lex[t], count: num(lex[t].count, 0) + 1, lastAt: now, usedBy }
     if (next.count >= num(opts.learnAfter, 3) && !next.learned) {
       next.learned = true
       next.learnedAt = now
@@ -988,12 +991,20 @@ export function noteTerm(state, term, now = Date.now(), opts = {}) {
     return { state: { ...state, lexicon: trimmed, updatedAt: now }, changed: true, info: next }
   }
 
-  // 还没入表 → 只在 termSeen 里计数，够次数才入表
-  const cur = seen[t] || { count: 0, firstAt: now }
+  // 还没入表 → 在 termSeen 里计数
+  const cur = seen[t] || { count: 0, firstAt: now, senders: [] }
   const n = num(cur.count, 0) + 1
-  if (n < minCount) {
-    seen[t] = { count: n, firstAt: cur.firstAt || now, lastAt: now }
-    // termSeen 不无限增长：只留最近 200 个
+  const senders = Array.isArray(cur.senders) ? [...cur.senders] : []
+  if (sender && !senders.includes(sender)) senders.push(sender)
+
+  // ★ 2026-10-29：入表门槛提高 —— 必须是「多个人都在用」或「同一个人说了很多次」
+  //   否则普通短语（"什么关系""帮我安装""我们现在"）会把梗表塞满，
+  //   而真正的群梗反而挤不进去。
+  const multi = senders.length >= 2
+  const repeated = n >= Math.max(4, minCount)
+
+  if (!multi && !repeated) {
+    seen[t] = { count: n, firstAt: cur.firstAt || now, lastAt: now, senders }
     const sk = Object.keys(seen).sort((a, b) => num(seen[b].lastAt) - num(seen[a].lastAt)).slice(0, 200)
     const trimmedSeen = {}
     for (const k of sk) trimmedSeen[k] = seen[k]
@@ -1001,10 +1012,12 @@ export function noteTerm(state, term, now = Date.now(), opts = {}) {
   }
 
   delete seen[t]
-  const entry = { count: n, firstAt: cur.firstAt || now, lastAt: now, learned: false }
-  if (n >= num(opts.learnAfter, 3)) { entry.learned = true; entry.learnedAt = now }
+  const entry = { count: n, firstAt: cur.firstAt || now, lastAt: now, learned: false, usedBy: senders }
+  if (n >= num(opts.learnAfter, 3) || multi) {
+    entry.learned = true
+    entry.learnedAt = now
+  }
   lex[t] = entry
-  // 只留最近 40 个词
   const keys = Object.keys(lex).sort((a, b) => num(lex[b].lastAt) - num(lex[a].lastAt)).slice(0, 40)
   const trimmed = {}
   for (const k of keys) trimmed[k] = lex[k]
