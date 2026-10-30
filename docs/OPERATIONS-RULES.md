@@ -308,3 +308,66 @@ if (ROOM !== 'filehelper') { console.error('❌ 只能发文件传输助手'); p
 **顺带记一个协议坑**：桥的 WS 消息是**扁平参数**（`const { id, op, ...args } = msg`），
 不是 `{ id, op, args: {...} }`。写调试脚本时传错，参数全变 undefined，
 表现为"文本为空 / 用了默认值"（我今天就踩了：语音报"文本为空"，刷抖音 count 传 2 却刷了 8 条）。
+
+### R21 — 单元测试必须无副作用（R19 的前置红线）
+
+**2026-10-29 真实事故**：`data/test-sendvoice.mjs` 是很久以前的手工探针，里面直接 POST hook 的
+`/SendVoiceMsg` 到真实群（`47390425951@chatroom`，durationMs=2220）。而 R19 的 `test-all.mjs`
+会跑 `data/test-*.mjs` —— **于是每跑一次 R19，群里就多一条一模一样的 2.2 秒语音**。
+用户听到的就是"莫名其妙的语音"，排查了半天以为是自检在发。
+
+现在的两道闸（`scripts/test-all.mjs`）：
+
+```js
+// ① 跑之前扫危险调用，命中就拒绝执行并让 R19 红
+const DANGER = /(30001|SendVoiceMsg|SendTextMsg|SendStickerMsg|SendImageMsg|\/Send|sayVoice\()/
+// ② 只用假 sender 的测试（test-outbox / test-e2e）在白名单里，允许出现 sayVoice 字样
+```
+
+规矩：
+
+| 类别 | 放哪 | 说明 |
+|---|---|---|
+| 纯函数单测 | `data/test-*.mjs` | 只算逻辑、不碰网络/微信 |
+| 需要发消息的验证 | `data/_debug/` 或 `wx-bridge/scripts/` | 手工跑，**不进 R19** |
+| 发消息的目标 | **只能 filehelper** | `verify-voice.mjs` 已写死校验 |
+
+**发现一个脚本里有 `30001` / `Send*` / 真实 `sayVoice` → 它就不是单测，挪出 `data/`。**
+
+### R19 补充（语音）— 已核实：自检本身不发语音
+
+- `healthCheck()` 里 `sendText / sayVoice / sendVoice` 调用次数 = 0
+- 受控实验：重载插件后 40 秒内无任何新语音
+- 真正原因是上面那个旧的 `test-sendvoice.mjs` 被 R19 带跑了
+
+### R22 — 视觉/识图必须先声明模型图像能力
+
+**2026-10-30 实测**：识图一直"看着能用"其实是**缓存命中**（缓存 277 条），真调用从没成功过。
+
+原因在 DSH 的 `dsh-llm-pi-ai`：
+
+```js
+const DEFAULT_INPUT = ["text"];          // 没声明 input 的模型 = 只收文字
+if (containsImage && !model.input.includes("image"))
+  throw new LlmError(`pi-ai model "${model.id}" does not support image input`, "UNSUPPORTED_CONTENT");
+```
+
+所以 `~/.dsh/profiles/web/cordis.patch.yml` 里**每个要用来识图的模型都必须写**：
+
+```yaml
+          - id: deepseek-v4-flash-vision-exp
+            name: deepseek-v4-flash-vision-exp
+            input:
+              - text
+              - image
+```
+
+表现特征（遇到直接照这个查）：
+- 模型回复「我这边没收到图片内容」「没看到图」
+- 或返回空（只有 usage/finish，没有 text-delta）
+- 插件日志：`视觉返回空：provider/model｜chunk 类型={"usage":1,"finish":1}`
+
+改完 `cordis.patch.yml` **要重启 DSH 才生效**（不是热重载）。
+
+视频链路（抽帧 + 音轨）不依赖这个：`video-probe.py --selftest` 应该 6 项全过；
+但"看懂画面"这一步走的就是视觉模型，所以视频的最终描述同样受这条约束。

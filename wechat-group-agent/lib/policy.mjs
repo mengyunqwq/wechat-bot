@@ -306,7 +306,16 @@ export class RoomPolicy {
    * 决策：这条消息要不要回。
    * @returns {{reply:boolean, reason:string, priority:string}}
    */
-  decide({ priority, now = Date.now(), rand = Math.random(), quiet = false, text = '' }) {
+  /**
+   * 精力对"想说话程度"的缩放（2026-10-29 用户要求：低精力少说、高精力多说）
+   *   精力 0.2 → ×0.53（明显少插嘴）｜0.5 → ×0.8｜0.8 → ×1.07｜1.0 → ×1.25（上限 1）
+   */
+  static energyFactor(energy) {
+    const e = Number.isFinite(Number(energy)) ? Math.max(0, Math.min(1, Number(energy))) : 0.7
+    return Math.max(0.35, Math.min(1.25, 0.35 + 0.9 * e))
+  }
+
+  decide({ priority, now = Date.now(), rand = Math.random(), quiet = false, text = '', energy = 0.7 }) {
     // 睡觉时段（默认 23:00-08:00）：**不主动插话**，但被叫到还是要回。
     // 用户要求："睡觉时@依旧回复，只是不主动插话了" → 允许清单默认 ['at','name']。
     if (quiet) {
@@ -363,23 +372,25 @@ export class RoomPolicy {
     }
 
     // 识别出内容的图片/表情包：比纯闲聊更值得接一句
+    const ef = RoomPolicy.energyFactor(energy)
     if (priority === 'image') {
-      const p = Math.min(1, this.cfg.imageReplyProbability ?? 0.5)
+      const p = Math.min(1, (this.cfg.imageReplyProbability ?? 0.5) * ef)
       return rand < p
         ? { reply: true, reason: `图片命中（p=${p}）`, priority }
         : { reply: false, reason: `图片未命中（p=${p}）`, priority }
     }
 
     if (priority === 'question') {
-      const p = Math.min(0.85, this.cfg.replyProbability * 2.2)
+      const p = Math.min(0.9, this.cfg.replyProbability * 2.2 * ef)
       return rand < p
         ? { reply: true, reason: `问句命中（p=${p.toFixed(2)}）`, priority }
         : { reply: false, reason: `问句未命中（p=${p.toFixed(2)}）`, priority }
     }
 
-    return rand < this.cfg.replyProbability
-      ? { reply: true, reason: `闲聊命中（p=${this.cfg.replyProbability}）`, priority }
-      : { reply: false, reason: `闲聊未命中（p=${this.cfg.replyProbability}）`, priority }
+    const pAmb = Math.max(0.02, Math.min(0.95, this.cfg.replyProbability * ef))
+    return rand < pAmb
+      ? { reply: true, reason: `闲聊命中（p=${pAmb.toFixed(2)}，精力${energy}）`, priority }
+      : { reply: false, reason: `闲聊未命中（p=${pAmb.toFixed(2)}，精力${energy}）`, priority }
   }
 
   noteReplied(now = Date.now(), sender = '') {

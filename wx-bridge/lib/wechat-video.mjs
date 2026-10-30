@@ -13,6 +13,7 @@
  *  ④ 找不到封面 → 返回 null（插件优雅降级成 `[视频]`，不抛错）。
  */
 import { execFileSync } from 'node:child_process'
+import { pythonExe, ffmpegExe, wechatExe, wechatClientDir, wxhookDir, hookFile } from './paths.mjs'
 import { copyFileSync, existsSync, mkdirSync, readdirSync, rmSync, statSync, unlinkSync } from 'node:fs'
 import { dirname, extname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -21,7 +22,7 @@ import { paths as imagePaths, md5 } from './wechat-image.mjs'   // 临时目录/
 const TMP_DIR = imagePaths.TMP_DIR
 const HERE = dirname(fileURLToPath(import.meta.url))
 const BRIDGE_DIR = join(HERE, '..')
-const PY = process.env.PYTHON_EXE || 'D:\\Python311\\python.exe'
+const PY = pythonExe()   // 自动探测（PYTHON_EXE 可覆盖）
 const SCRIPT = join(BRIDGE_DIR, 'video-probe.py')
 const VIDEO_TMP = join(TMP_DIR, 'video')          // 抽帧/联系表/音轨都放这里
 const PY_ENV = { ...process.env, PYTHONIOENCODING: 'utf-8' }

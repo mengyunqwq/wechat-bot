@@ -18,6 +18,7 @@
  * 开关：环境变量 WECHAT_VOICE=0 关闭（默认开）。
  */
 import { execFileSync } from 'node:child_process'
+import { pythonExe, ffmpegExe, wechatExe, wechatClientDir, wxhookDir, hookFile } from './paths.mjs'
 import { closeSync, existsSync, mkdirSync, openSync, readSync, readdirSync, rmSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { dirname, extname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -25,7 +26,7 @@ import { md5 } from './wechat-image.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const BRIDGE_DIR = join(HERE, '..')
-const PY = process.env.PYTHON_EXE || 'D:\\Python311\\python.exe'
+const PY = pythonExe()   // 自动探测（PYTHON_EXE 可覆盖）
 const SCRIPT = join(BRIDGE_DIR, 'decode-wechat-voice.py')
 const IMAGE_SCRIPT = join(BRIDGE_DIR, 'decode-wechat-image.py')
 const TMP_DIR = join(BRIDGE_DIR, '..', 'data', 'voice')

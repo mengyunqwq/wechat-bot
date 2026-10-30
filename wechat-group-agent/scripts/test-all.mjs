@@ -49,7 +49,7 @@ function sh(cmd, args, opts = {}) {
 run('语法检查', () => {
   const files = [
     'lib/index.js', 'lib/persona.mjs', 'lib/memory-v2.mjs', 'lib/human2.mjs',
-    'lib/outbox.mjs', 'lib/panel.mjs', 'lib/panel-meta.mjs',
+    'lib/outbox.mjs', 'lib/style.mjs', 'lib/panel.mjs', 'lib/panel-meta.mjs',
   ]
   const bad = []
   for (const f of files) {
@@ -85,8 +85,24 @@ run('面板产物一致', () => {
 })
 
 // ⑤ 单元测试
+// ★ 2026-10-29 事故：data/test-sendvoice.mjs 是老的手工探针，直接 POST hook 的 /SendVoiceMsg
+//   到真实群（呆萌范范粉丝团，2220ms）。R19 每跑一次就往群里发一条语音 —— 用户听到"莫名其妙的语音"。
+//   现在两道闸：① 只跑 data/ 下的 test-*.mjs ② 跑之前扫危险调用，命中就拒绝执行并报错。
+const DANGER = /(30001|SendVoiceMsg|SendTextMsg|SendStickerMsg|SendImageMsg|\/Send|sayVoice\()/
+const SAFE_SELF_TEST = new Set(['test-outbox.mjs', 'test-e2e.mjs'])   // 这两个用假 sender，允许出现 sayVoice 字样
 const testFiles = existsSync(DATA)
-  ? readdirSync(DATA).filter((f) => /^test-.*\.mjs$/.test(f)).sort()
+  ? readdirSync(DATA).filter((f) => /^test-.*\.mjs$/.test(f)).sort().filter((f) => {
+    try {
+      const src = readFileSync(join(DATA, f), 'utf8')
+      if (!SAFE_SELF_TEST.has(f) && DANGER.test(src)) {
+        console.log(`  ⛔ 拒绝运行 ${f}：里面有真实发送/ hook 调用（请挪到 data/_debug/）`)
+        failed++
+        results.push({ label: '单测 ' + f.replace(/^test-|\.mjs$/g, ''), ok: false, out: '含真实发送调用，已拒绝' })
+        return false
+      }
+      return true
+    } catch { return true }
+  })
   : []
 const skip = new Set(FAST ? ['test-e2e.mjs', 'test-outbox.mjs'] : [])
 for (const f of testFiles) {

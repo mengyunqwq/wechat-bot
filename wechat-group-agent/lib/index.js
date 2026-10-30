@@ -16,11 +16,12 @@
  */
 import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, unlinkSync, writeFileSync, copyFileSync, rmSync, openSync, closeSync } from 'node:fs'
 import { execFileSync, execSync, exec as execCb, spawn as spawnCb } from 'node:child_process'
-import * as MV2 from './memory-v2.mjs?v=vmvsxeymu'   // 艾宾浩斯遗忘曲线 + 情绪加权（?v= 用于打破 ESM 缓存）
+import * as MV2 from './memory-v2.mjs?v=vmvv9tsvt'   // 艾宾浩斯遗忘曲线 + 情绪加权（?v= 用于打破 ESM 缓存）
+import * as ST from './style.mjs'   // 口气：标点规约 / 口语碎片 / 情绪→语气
 import * as H3 from './human3.mjs'   // 第三轮：情景示例/幽默三招/不重复/收尾日记/羁绊
 import * as OB from './outbox.mjs'   // 统一出站队列（节流/去重/重试退避）
 import * as H2 from './human2.mjs'   // 第二轮人性化：承诺/纠错/沉默/追话/联想/自己的事
-import * as PS from './persona.mjs?v=vmvsxeymu'      // 性格四件套 + 自传（?v= 打破 ESM 缓存）
+import * as PS from './persona.mjs?v=vmvv9tsvt'      // 性格四件套 + 自传（?v= 打破 ESM 缓存）
 import net from 'node:net'
 import { request as httpsRequest } from 'node:https'
 import { join, dirname } from 'node:path'
@@ -48,7 +49,7 @@ try {
 } catch { /* ignore */ }
 
 export const name = '@dsh-external/dsh-wechat-bot'
-export const version = '2.0.2'
+export const version = '2.0.3'
 // Cordis 4.0.4 的 inject 只认**数组**或"服务名→配置"映射；
 // 写成 { required, optional } 会让依赖解析失败、fiber 永远 pending（踩过：改了代码却一直跑旧实例）。
 // 这里只声明必然存在的两个服务；attachments（视觉识别用）改为**惰性获取**，
@@ -300,6 +301,8 @@ const DEFAULT_CONFIG = {
   // 所以默认不传最稳；需要时可设成 low/medium/high。
   reasoningEffort: '',
   // ── 图像识别（群里发图 → 看懂 → 回一句）──────────────────
+  visionDirect: true,            // DSH 视觉链路没传图时，插件直连上游兜底（2026-10-30）
+  visionBaseUrl: 'https://opencode.ai/zen/go/v1',
   visionOnImage: true,           // 收到图片/表情包时尝试取图并识别
   visionOnEmoticon: true,        // 表情包也识别（想省调用可设 false：表情包含义通常固定）
   // 视频（type 43）：**主路**是从视频文件里均匀抽 N 帧拼成一张联系表给视觉模型（一次调用 ✓ 省钱），
@@ -363,8 +366,10 @@ const DEFAULT_CONFIG = {
   voiceSayProbability: 0.2,        // 普通回复改成语音的概率
   voiceSayOnVoiceProbability: 0.5, // 收到**语音**消息时用语音回的概率（对称，最像真人）
   voiceSayMaxChars: 60,            // 超过这么多字就发文字（语音太长很怪）
-  voiceMinGapSec: 90,              // ★ 两条语音最小间隔（秒）。连发语音会让微信退出（2026-10-28 事故）
-  voiceMaxPer10Min: 3,             // ★ 10 分钟内最多发几条语音（同上，防对象所有权撞车）
+  voiceMinGapSec: 180,             // ★ 崩溃防护：两条语音最少隔 3 分钟（原 90s）
+  voiceMaxPer10Min: 2,             // ★ 崩溃防护：10 分钟最多 2 条（原 3）
+  voiceMaxPerHour: 4,              // ★ 崩溃防护：每小时最多 4 条
+  voiceMediaGuardSec: 5,           // ★ 语音发出后 N 秒内不发表情/图片（避免连续碰媒体管线）
   visionCacheMax: 500,           // 识图结果缓存条数（同一张图只识别一次；超出丢最早的）
   visionProvider: 'opencodego-extra',
   visionModel: 'deepseek-v4-flash-vision-exp',
@@ -426,9 +431,9 @@ const DEFAULT_CONFIG = {
   memoryV2: true,                 // 总开关；false = 退回旧逻辑（slice(-18) 注入、不遗忘）
   memoryScope: 'global',          // global = 所有群共用一份记忆（她是一个人）；room = 每群独立
   memoryGlobalMax: 400,           // 全局记忆上限（比单群大，因为有多个群的来源）
-  memoryBaseDays: 7,              // S0 基准天数（越大越不容易忘）
-  memoryForgetWeight: 0.06,       // 遗忘判据：R × 重要度 低于此值 → 归档
-  memoryMinAgeDays: 2,            // 不到这个天数的记忆不归档（给新记忆机会）
+  memoryBaseDays: 3.5,             // ★ 平凡记忆的基准寿命（天）：3.5 → 约 5~6 天就淡出
+  memoryForgetWeight: 0.08,       // 遗忘判据：R × 重要度 低于此值 → 归档
+  memoryMinAgeDays: 1,            // 不到这个天数的记忆不归档（给新记忆机会）
   memoryKeepImportance: 0.85,     // 重要度 ≥ 此值 = 铁律记忆，永不自动归档
   memoryArchiveGraceDays: 30,     // 归档后保留多少天才真删
   memoryMaxActive: 120,           // 每群生效记忆上限（超了按 R×重要度 淘汰）
@@ -455,6 +460,9 @@ const DEFAULT_CONFIG = {
   humanImperfectRecall: true,     // B：记不清就说得含糊（按保持率 R 分级表达）
   humanMoodCause: true,           // C：心情要有来由（能说出"为什么"）
   personaLoveExclusive: true,        // ★ 只喜欢一个人：其他人好感压在 55%（普通）以内
+  humanPunctStyle: true,             // ② 标点规约（句号多、感叹号少）+ 长句切分
+  humanFiller: true,                 // ③ 口语碎片（低频"呃…/那个…"）
+  humanMoodTone: true,               // ⑥ 情绪→语气（心情/精力影响句子长短）
   humanSceneExamples: true,          // ① 情景语气示例（两段式转折）
   humanHumorRules: true,             // ② 幽默三招
   humanNoRepeat: true,               // ③ 不重复称呼/口头禅
@@ -462,6 +470,8 @@ const DEFAULT_CONFIG = {
   humanWrapUpDiary: true,            // ④ 结束对话时写一条收尾记录
   humanSafetyBoundary: true,         // ⑤ 不绝对服从的底线
   humanBondLevel: true,              // ⑥ 羁绊等级 Lv1~7
+  humanEnergyTalk: true,             // 精力影响说话量（低精力少说+说困，高精力多说）
+  humanRecallOnCueOnly: true,        // 旧事只在被提到时接（别人不提，她不主动翻）
   humanImpression: true,             // ② 印象卡：定期给每个人生成一句"我对他的判断"
   humanRelationTiers: true,       // E：对熟人/生人态度不同
   humanLearnTerms: true,          // F：遇到群里的新词会先问、再学着用
@@ -772,7 +782,7 @@ const BUILD_VER = '2026-10-23.4'   // 抬版本：让新实例压过热重载残
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify(body),
-        signal: AbortSignal.timeout(90_000),
+        signal: AbortSignal.timeout(45_000),
       })
       const ms = Date.now() - t0
       if (!r.ok) {
@@ -1324,6 +1334,8 @@ const namesFile = join(dirname(memoryDir), 'members.json')
     try { applySingleLove(r) } catch { /* 独占钳制失败不影响对话 */ }
     // ④ 结束语义 → 写一条收尾记录；「忘掉」→ 删记忆
     try { handleWrapSignals(r, m) } catch { /* 不影响主流程 */ }
+    // push() 是同步函数 → 这里 fire-and-forget（handleLowEnergy 自己吞异常）
+    try { void handleLowEnergy(r, m).catch(() => {}) } catch { /* 不影响主流程 */ }
 
     if (r.msgs.length > 300) r.msgs = r.msgs.slice(-300)
     if (++r.dirty >= 20) saveMemory(r)
@@ -1773,9 +1785,9 @@ const namesFile = join(dirname(memoryDir), 'members.json')
   /** 记忆 v2 的参数（每次现算，面板改了立即生效） */
   function memCfg() {
     return {
-      baseDays: Number(config.memoryBaseDays) || 7,
-      forgetWeight: config.memoryForgetWeight === undefined ? 0.06 : Number(config.memoryForgetWeight),
-      minAgeDays: config.memoryMinAgeDays === undefined ? 2 : Number(config.memoryMinAgeDays),
+      baseDays: Number(config.memoryBaseDays) || 3.5,   // ★ 2026-10-29：7 → 3.5（原来平凡记忆要 14 天才忘）
+      forgetWeight: config.memoryForgetWeight === undefined ? 0.08 : Number(config.memoryForgetWeight),
+      minAgeDays: config.memoryMinAgeDays === undefined ? 1 : Number(config.memoryMinAgeDays),
       keepImportance: config.memoryKeepImportance === undefined ? 0.85 : Number(config.memoryKeepImportance),
       archiveGraceDays: Number(config.memoryArchiveGraceDays) || 30,
       maxActive: Number(config.memoryMaxActive) || 120,
@@ -2399,6 +2411,50 @@ ${cur.text}`
     } catch (e) {
       log('补一句失败：' + String(e?.message || e).slice(0, 90))
       return false
+    }
+  }
+
+  /**
+   * 精力→说话量（2026-10-29 用户要求）
+   *   · 低精力：回得少（policy 已按精力缩概率）、回得短（style 档位）
+   *   · 聊了一会儿就说"困" → 然后进入 20~40 分钟的"困了"静默（被@仍然回）
+   *   · 高精力：概率放大（policy 侧 ×1.07~1.25）
+   */
+  const SLEEPY_LINES = ['……困了。', '好困，我先趴一会儿。', '眼皮沉了……晚点再说。', '唔……有点困。']
+  function isSleepy(r, now = Date.now()) {
+    return Number(r.__sleepyUntil || 0) > now
+  }
+  function noteLowEnergyChatter(r) {
+    try {
+      if (config.humanEnergyTalk === false) return
+      const st = personaOf(r)
+      const e = Number(st.energy) || 0.7
+      if (e >= 0.42) { r.__lowEnergyReplies = 0; return }     // 精力够 → 不数
+      const now = Date.now()
+      if (now - (Number(r.__lowEnergyAt) || 0) > 10 * 60_000) r.__lowEnergyReplies = 0
+      r.__lowEnergyAt = now
+      r.__lowEnergyReplies = (Number(r.__lowEnergyReplies) || 0) + 1
+      // 连着回了两条、精力又低 → 说困，然后安静
+      if (r.__lowEnergyReplies >= 2 && !isSleepy(r, now)) {
+        const line = SLEEPY_LINES[Math.floor(Math.random() * SLEEPY_LINES.length)]
+        r.__sleepyUntil = now + (20 + Math.floor(Math.random() * 20)) * 60_000
+        r.__sleepyLine = line
+        log(`精力低（${e.toFixed(2)}）且已连回 ${r.__lowEnergyReplies} 条 → 说一句困，并安静到 ${new Date(r.__sleepyUntil).toLocaleTimeString()}`)
+      }
+    } catch { /* ignore */ }
+  }
+  async function handleLowEnergy(r, m) {
+    if (!m || m.isSelf) return
+    noteLowEnergyChatter(r)
+    // 到点了 → 现在就发一句"困了"（走统一出站队列）
+    const line = r.__sleepyLine
+    if (line) {
+      r.__sleepyLine = ''
+      try {
+        await getOutbox().sendText(r.roomId, line)
+        push(r, { ts: Date.now(), isSelf: true, sender: 'self', senderName: '我', text: line })
+        log('（低精力）说了一句：' + line)
+      } catch (e) { log('说困失败：' + String(e?.message || e).slice(0, 60)) }
     }
   }
 
@@ -3196,7 +3252,16 @@ ${cur.text}`
       ? 'continuation'
       : (trigger.imageDesc ? 'image' : detectTrigger(trigger, { aliases: config.aliases, selfNames: r.selfNames }))
     const quiet = isQuiet(quietWindows)
-    const d = r.policy.decide({ priority, quiet, text: trigger.text || '' })
+    const energyNow = (() => { try { return Number(personaOf(r).energy) || 0.7 } catch { return 0.7 } })()
+    // 精力低 → 说过"困了"之后的静默期：不主动接话（被@/点名仍回）
+    try {
+      if (isSleepy(r) && !['at', 'name'].includes(String(priority || ''))) {
+        stats.skipped++
+        log(`困了（精力低静默期，还剩 ${Math.round((r.__sleepyUntil - Date.now()) / 60000)} 分钟）→ 这条不回`)
+        return
+      }
+    } catch { /* ignore */ }
+    const d = r.policy.decide({ priority, quiet, text: trigger.text || '', energy: energyNow })
     fMark('decide', { room: r.roomId, priority, reply: d.reply, reason: String(d.reason || '').slice(0, 60) })
     if (!d.reply) {
       // 闲聊概率没命中 → **不再直接跳过**，继续交给模型判断
@@ -3377,9 +3442,11 @@ ${cur.text}`
             for (const x of graded) lines.push('- ' + x.text)
             return lines.join('\n')
           }
-          lines.push('\n【长期记忆】以下是你"记得"的事，按清晰度分了三档：')
+          lines.push('\n【长期记忆】以下是你"记得"的事，按清晰度分了三档。'
+            + '**这些只供你心里有数：对方没提到，就不要主动说出来**（不翻旧账、不主动回忆）；'
+            + '只有对方问起或提到同一件事，才用它来接话。')
           if (sure.length) {
-            lines.push('· 记得很清楚（可以直接说）：')
+            lines.push('· 记得很清楚（对方问起时可以说）：')
             for (const x of sure) lines.push('  - ' + x.text)
           }
           if (fuzzy.length) {
@@ -3403,19 +3470,26 @@ ${cur.text}`
               })
               // ★ 跨群边界：联想也只从"本群 + 关于人的认知"里挑，别把别的群的事勾起来
               const grA = MV2.filterByRoom(facts || [], { roomId: r.roomId, mode: String(config.memoryCrossGroup || 'safe') })
-              const cands = H2.associationCandidates(grA.pool, {
-                cues,
-                exclude: graded.map((g) => g.text),
-                now: now2,
-                limit: 5,
-              })
+              // ★ 2026-10-29（用户要求）：**别人不提，她不要主动提旧事**
+              //   所以线索必须来自"当前这条消息"（不是最近几条拼起来），且必须是实词；
+              //   候选只在被提到时才给，并且措辞改成"被问到才说"。
+              const curText = String((trigger && trigger.text) || '')
+              const hitCue = cues.filter((c) => c && c.length >= 2 && curText.includes(c))
+              const cands = hitCue.length
+                ? H2.associationCandidates(grA.pool, {
+                  cues: hitCue,
+                  exclude: graded.map((g) => g.text),
+                  now: now2,
+                  limit: 3,
+                })
+                : []
               if (cands.length) {
                 r.__recallCandidates = cands.map((x) => ({ id: x.id, text: x.text }))
                 lines.push('')
-                lines.push('【可能忽然想起的旧事】（候选，不必都用；自己判断这条回复里提不提、提哪条）')
+                lines.push('【可引用的旧事】（**只在对方提到这件事时才接**；对方没提就不要主动说）')
                 cands.forEach((x, i) => lines.push(`  ${i + 1}. ${x.text}`))
-                lines.push('用法：如果确实想在回复里带一句，就在**回复最后**加上 [想起:N]（N=上面的序号，只写一个）；'
-                  + '如果这条不适合提旧事，就不要加这个标记。**不要解释这个标记，也不要提"候选"两个字**。')
+                lines.push('用法：如果对方的这句话正好提到/问起上面的旧事，可以顺着接一句（回复最后加 [想起:N]）；'
+                  + '**否则一个字都不要提**。不要主动翻旧账，也不要提"想起""候选"这类词。')
               }
             } catch { /* ignore */ }
           }
@@ -3540,6 +3614,9 @@ ${cur.text}`
           } catch { return '' }
         })()
         : ''),
+      (config.humanMoodTone !== false
+        ? (() => { try { return ST.moodToneBlock(ST.moodProfile(personaOf(r), { now: Date.now() })) } catch { return '' } })()
+        : ''),
       '  · 别人问"我们什么关系/我们算什么/熟不熟"时，**就按上面的羁绊等级说**'
         + '（比如"Lv3 熟人了"），可以说得随意点，但等级和称号要报对；不要回避，也不要瞎编更高等级。',
       '  **亲密举动（抱抱/牵手/想他）只允许对「好感度最高」的那一个说**；对别人说就出戏。',
@@ -3599,6 +3676,8 @@ ${cur.text}`
         } catch { return '' }
       })(),
       (config.humanSafetyBoundary !== false ? H3.safetyBlock() : ''),
+      '  【旧事规矩】**不要主动提起过去的事**（昨天谁说了什么、以前聊过什么、你记得的旧账）。'
+        + '只有一个例外：**对方这句话里提到了**，你才可以顺着接一句。没提就只当自己知道，别说出来。',
       '  **不同群之间的事不要串**：你在别的群/别处听到的、看到的事，可以自己知道，'
         + '但**不要在这个群说出来**，也不要提"另一个群""那个群"；跨群的记忆只用来"认得这个人"，不是拿来当话题。',
       '    我收到 [不回] 就什么都不发（这不算失礼，真人在群里也不会句句插嘴）。',
@@ -3798,6 +3877,14 @@ ${cur.text}`
     join(dirname(config.memoryDir || join(homedir(), '.dsh', 'data', 'wechat-bot', 'memory')), 'vision-cache.json')
   let visionCache = null
 
+  // 这条缓存一旦写进"模型其实没看到图"的敷衍描述，就会一直命中缓存 → 永远认不出图。
+  // 所以：**看着像没看到图的结果不写缓存**。
+  function looksBlindDesc(t) {
+    const v = String(t || '')
+    if (!v || [...v].length < 6) return true
+    return /没(有)?收到|看不到|看不清|被省略|省略了|哈希|附件|没有图片|图片未成功|没有成功传|没看到|无法|没法|重新发|只能处理文字/.test(v)
+  }
+
   function loadVisionCache() {
     if (visionCache) return visionCache
     try { visionCache = JSON.parse(readFileSync(visionCacheFile(), 'utf8')) || {} } catch { visionCache = {} }
@@ -3829,10 +3916,18 @@ ${cur.text}`
     const key = (h && kind !== 'image') ? kind + ':' + h : h     // 兼容旧缓存（图片仍用纯 hash 键）
     if (key) {
       const c = loadVisionCache()
-      if (c[key]?.desc) { log('识图命中缓存（跳过模型调用）'); return c[key].desc }
+      if (c[key]?.desc) {
+        if (looksBlindDesc(c[key].desc)) {
+          log('识图缓存是"没看到图"的废结果 → 忽略，重新识别')
+          try { delete c[key]; saveVisionCache() } catch { }
+        } else {
+          log('识图命中缓存（跳过模型调用）')
+          return c[key].desc
+        }
+      }
     }
     const desc = await describeImage(file, kind)
-    if (key && desc) {
+    if (key && desc && !looksBlindDesc(desc)) {
       const c = loadVisionCache()
       c[key] = { desc, at: Date.now() }
       saveVisionCache()
@@ -3841,12 +3936,83 @@ ${cur.text}`
   }
 
   /**
+   * 直连兜底（2026-10-30）：DSH 的 attachments→模型 这条链路有时**根本没把图传过去**
+   *   （模型会回"我这边没收到图片/看不到图"，或返回空），而同样的图直连上游是好的（实测 glm-5.3-flash 答对了颜色）。
+   * 所以：DSH 那条路拿不到结果时，插件自己 POST 一次（openai-completions 的 image_url 格式）。
+   *
+   * 密钥来源（按顺序）：环境变量 → ~/.dsh/.credentials.yaml
+   * 只在本机用，不外发、不打印。
+   */
+  function visionApiKeyFor(provider) {
+    const envMap = {
+      'opencodego': 'OPENCODE_GO_API_KEY', 'opencodego-extra': 'OPENCODE_GO_API_KEY',
+    }
+    for (const k of [envMap[provider], 'OPENCODE_GO_API_KEY', 'OPENCODE_GO_API_KEY']) {
+      if (k && process.env[k]) return process.env[k]
+    }
+    try {
+      const p = join(homedir(), '.dsh', '.credentials.yaml')
+      const raw = readFileSync(p, 'utf8')
+      const m = raw.match(/"OPENCODE_GO_API_KEY"\s*:\s*"([^"]+)"/) || raw.match(/OPENCODE_GO_API_KEY:\s*(\S+)/)
+      if (m) return String(m[1]).trim()
+    } catch { /* 没有凭据文件 */ }
+    return ''
+  }
+
+  async function describeImageDirect(file, kind, prompt, mediaType) {
+    const key = visionApiKeyFor(String(config.visionProvider || ''))
+    if (!key) { log('直连视觉：没有 API key（设 OPENCODE_GO_API_KEY 或检查 ~/.dsh/.credentials.yaml）'); return '' }
+    let buf
+    try { buf = readFileSync(file) } catch { return '' }
+    const base = String(config.visionBaseUrl || 'https://opencode.ai/zen/go/v1').replace(/\/+$/, '')
+    const body = {
+      model: config.visionModel,
+      max_tokens: 400,
+      messages: [{
+        role: 'user',
+        content: [
+          { type: 'text', text: prompt },
+          { type: 'image_url', image_url: { url: `data:${mediaType};base64,${buf.toString('base64')}` } },
+        ],
+      }],
+    }
+    log(`直连视觉：POST ${base}/chat/completions model=${config.visionModel} 图片 ${Math.round(buf.length/1024)}KB`)
+    try {
+      const r = await fetch(base + '/chat/completions', {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          authorization: 'Bearer ' + key,
+          'x-opencode-session': 'dsh-ocgo-extra',
+        },
+        body: JSON.stringify(body),
+        signal: AbortSignal.timeout(90_000),
+      })
+      const txt = await r.text()
+      if (!r.ok) { log(`直连视觉失败：HTTP ${r.status} ${txt.slice(0, 120)}`); return '' }
+      let out = ''
+      try {
+        const j = JSON.parse(txt)
+        out = j.choices?.[0]?.message?.content || ''
+      } catch { log('直连视觉：返回不是 JSON'); return '' }
+      out = String(out).trim()
+      if (out) log('直连视觉成功：' + out.slice(0, 40))
+      return out
+    } catch (e) {
+      log('直连视觉异常：' + String(e?.message || e).slice(0, 120))
+      return ''
+    }
+  }
+
+  /**
    * 用视觉模型描述一张图 —— "群里发图能识别并回复"的核心。
    * 走 ctx.attachments 把图片入库成引用，再以 { type:'image', attachment } 送进视觉模型。
    * @param {string} [kind] 'image'（默认）或 'videoCover'（视频封面帧：提示词必须如实说明只有封面）
    */
-  async function describeImage(file, kind = 'image') {
-    if (!config.visionModel) return ''
+  async function describeImage(file, kind = 'image', override = null) {
+    const vProvider = override?.provider || config.visionProvider || config.provider || undefined
+    const vModel = override?.model || config.visionModel
+    if (!vModel) return ''
     let buf
     try { buf = readFileSync(file) } catch { return '' }
     const mediaType = /\.png$/i.test(file) ? 'image/png'
@@ -3855,10 +4021,11 @@ ${cur.text}`
     const att = (typeof ctx.get === 'function' ? ctx.get('attachments') : null) ?? ctx.attachments
     if (!att?.saveImages) { log('没有 attachments 服务，无法把图送给视觉模型'); return '' }
     let content
+    let prompt = ''          // ★ 提到函数级：直连兜底要用
     try {
       const refs = await att.saveImages([{ data: buf, mediaType }])
       // 视频必须**如实**告诉模型拿到了什么：抽的几帧画面 + 音轨转写（或只有封面帧）
-      const prompt = kind === 'videoCover'
+      prompt = kind === 'videoCover'
         ? '这是别人在微信群里发的一条视频的**封面画面**（只有封面这一帧，不是视频的全部内容，你也看不到声音和过程）。'
           + '用一到两句话描述这个画面：主体是什么、在做什么、什么场景、氛围如何。中文，直接描述，不要客套话，'
           + '不要说你看了整个视频。'
@@ -3887,22 +4054,48 @@ ${cur.text}`
     let text = ''
     try {
       const stream = llmStreamTracked({
-        provider: config.visionProvider || config.provider || undefined,
-        model: config.visionModel,
+        provider: vProvider,
+        model: vModel,
         messages: [createUserMessage({ source: { kind: 'user' }, content })],
-        maxTokens: 400,
+        // ★ 2026-10-30：原来 400 太小。deepseek-v4.1-flash 会先推理（实测 reasoning-delta 130 段），
+        //   400 全被推理吃掉 → 正文为空，表现为"识图返回空"。给足空间。
+        maxTokens: 2000,
         signal: ac.signal,
       })
+      const kinds = {}
       for await (const chunk of stream) {
+        kinds[chunk.type] = (kinds[chunk.type] || 0) + 1
         if (chunk.type === 'text-delta') text += chunk.text
         else if (chunk.type === 'block-end' && !text && chunk.block?.type === 'text') text = chunk.block.text || ''
+      }
+      // ★ 2026-10-30：模型返回空时原来**不打日志**，导致"识图失败"完全没线索。
+      if (!String(text).trim()) {
+        log(`视觉返回空：${vProvider}/${vModel}｜chunk 类型=${JSON.stringify(kinds)}｜`
+          + '可能该模型不接受图像输入，或 provider 没配视觉能力')
       }
     } catch (e) {
       log('视觉调用失败：' + String(e?.message || e))
     } finally {
       untrack(killer)
     }
-    return String(text).trim().slice(0, 200)
+    let out = String(text).trim().slice(0, 200)
+    // ★ 2026-10-30：DSH 这条链路"没把图传过去"时（返回空 / 模型说没收到图），直连兜底一次
+    if (config.visionDirect !== false) {
+      // 判定"模型其实没看到图"：空返回 / 说没收到图 / 说被省略或只给了哈希 / 只回了敷衍的一句
+      const BLIND = /没(有)?收到|看不到|看不清|被省略|省略了|哈希|附件|没有图片|图片未成功|没有成功传|没看到|无法|没法|重新发|只能处理文字/
+      const looksBlind = !out || [...out].length < 6 || BLIND.test(out)
+      if (looksBlind) {
+        log('视觉：DSH 没把图送到模型 → 走直连兜底')
+        // ★ 双保险：DSH 进程里访问外网可能卡住（实测 45s 都没返回），
+        //   用 Promise.race 硬超时，绝不让识图把整条回复流程拖死。
+        const direct = await Promise.race([
+          describeImageDirect(file, kind, prompt, mediaType),
+          new Promise((resolve) => setTimeout(() => { log('直连视觉：8s 未返回，放弃（不拖住回复）'); resolve('') }, 8_000)),
+        ])
+        if (direct) out = direct.slice(0, 200)
+      }
+    }
+    return out
   }
 
   // ── 语音转写：DSH 的 speechToText 服务（本地 SenseVoice，无需 API key）────────
@@ -4425,6 +4618,18 @@ ${cur.text}`
     }
 
     let cleaned = cleanReply(text, { maxLen: config.maxReplyChars, maxLines: 0 })
+    // ②⑥ 标点规约（按当前情绪档）：句号多、感叹号少
+    try {
+      if (config.humanPunctStyle !== false && cleaned) {
+        const prof = ST.moodProfile(personaOf(r), { now: Date.now() })
+        cleaned = ST.normalizePunct(cleaned, prof)
+        // ③ 口语碎片：只在允许的档位、低频
+        if (config.humanFiller !== false && prof.filler) {
+          cleaned = ST.maybeFiller(cleaned, { chance: 0.12 })
+        }
+        r.__styleProfile = prof
+      }
+    } catch { /* 样式失败按原文发 */ }
 
     // ── 联网搜索：模型自己判断要不要查 ──
     // 它输出 [搜索:关键词] 就说明它觉得需要最新信息；我们替它搜，再把结果喂回去让它用平时口气说。
@@ -4505,7 +4710,21 @@ ${cur.text}`
    *  ① 模型自己用换行分条（"哈哈哈哈\n笑死我了"）→ 尊重它，逐条发
    *  ② 单行但够长 → 按概率在句末标点处拆开（真人常这样）
    */
-  function toMessageParts(text) {
+  function toMessageParts(text, profile = null) {
+    // ② 情绪档规定的句子长度上限：明显过长就按标点切开（短句不动）
+    try {
+      if (config.humanPunctStyle !== false && profile?.maxLen) {
+        const cap = Number(profile.maxLen) || 18
+        const flat = String(text)
+        if ([...flat].length > cap * 1.8) {
+          const chunks = ST.splitByLength(flat, cap)
+          if (chunks.length > 1) {
+            const maxParts = Math.min(Number(config.maxPartsLimit) || 8, 6)
+            return chunks.slice(0, maxParts)
+          }
+        }
+      }
+    } catch { /* 退原逻辑 */ }
     const lines = String(text).split(/\n+/).map((s) => s.trim()).filter(Boolean)
     // 长文本不裁字数：按「目标段长」自动算段数（maxPartsLimit 防失控）；短文本行为不变
     const len = [...String(text)].length
@@ -4724,6 +4943,7 @@ ${cur.text}`
         const sec = ((Date.now() - t0) / 1000).toFixed(0)
         log(`后台生成完成（${sec}s，${gen.cached ? '复用' : '新画'}）→ 稍后补发`)
         await sleep(gapMs() + 500)
+        if (mediaBlocked(r)) { log('语音后 5 秒内不发媒体 → 跳过表情包'); return false }
         const sent = await getOutbox().sendSticker(roomId, gen.stickerId)
         if (sent?.rc === 0) {
           stats.sentSticker++
@@ -4743,6 +4963,7 @@ ${cur.text}`
     try {
       const picked = await client.call('pickSticker', { text: emotion + ' ' + scene, roomId, minScore: 3, requireTag: true })
       if (picked?.id) {
+        if (mediaBlocked(r)) { log('语音后 5 秒内不发媒体 → 跳过表情包'); return false }
         const sent = await getOutbox().sendSticker(roomId, picked.id)
         if (sent?.rc === 0) {
           stats.sentSticker++
@@ -4929,8 +5150,11 @@ ${cur.text}`
   let voiceSentTimes = []
   function voiceCooldownOk() {
     const now = Date.now()
-    const gapSec = config.voiceMinGapSec === undefined ? 90 : Number(config.voiceMinGapSec)
-    const maxPer10 = config.voiceMaxPer10Min === undefined ? 3 : Number(config.voiceMaxPer10Min)
+    // ★ 2026-10-30：连续两次崩溃（10-28 17:25 / 10-30 08:55）都与"发语音"时间强相关，
+    //   异常签名一致（Weixin.dll 读 0xFFFF...FF）。先把节奏收紧，降低触发概率。
+    const gapSec = config.voiceMinGapSec === undefined ? 180 : Number(config.voiceMinGapSec)
+    const maxPer10 = config.voiceMaxPer10Min === undefined ? 2 : Number(config.voiceMaxPer10Min)
+    const maxPerHour = config.voiceMaxPerHour === undefined ? 4 : Number(config.voiceMaxPerHour)
     if (gapSec > 0 && lastVoiceAt && now - lastVoiceAt < gapSec * 1000) {
       return { ok: false, why: 'voice cooldown: ' + Math.round((now - lastVoiceAt) / 1000) + 's < ' + gapSec + 's' }
     }
@@ -4938,10 +5162,27 @@ ${cur.text}`
     if (maxPer10 > 0 && voiceSentTimes.length >= maxPer10) {
       return { ok: false, why: 'voice rate limit: already ' + voiceSentTimes.length + ' in 10min (max ' + maxPer10 + ')' }
     }
+    // 每小时上限（崩溃防护：单小时别太密）
+    const inHour = voiceSentTimes.filter((t) => now - t < 60 * 60_000).length
+    if (maxPerHour > 0 && inHour >= maxPerHour) {
+      return { ok: false, why: 'voice hourly limit: already ' + inHour + ' in 1h (max ' + maxPerHour + ')' }
+    }
     return { ok: true }
   }
-  function markVoiceSent() {
+  /**
+   * ① 语音发出后的一小段时间内**不要再发任何媒体**（表情/图片/视频）。
+   *    为什么：语音要构造微信内部对象（SILK→VoiceInfo），紧接着再动表情/图片，
+   *    等于在它还没稳定时又去碰媒体管线 —— 两次崩溃都在这附近。
+   */
+  function markNoMediaWindow(r, sec = 5) {
+    try { if (r) r.__noMediaUntil = Date.now() + Math.max(0, sec) * 1000 } catch { }
+  }
+  function mediaBlocked(r) {
+    try { return Number(r && r.__noMediaUntil || 0) > Date.now() } catch { return false }
+  }
+  function markVoiceSent(r) {
     lastVoiceAt = Date.now()
+    markNoMediaWindow(r, Number(config.voiceMediaGuardSec ?? 5))
     voiceSentTimes.push(lastVoiceAt)
     if (voiceSentTimes.length > 20) voiceSentTimes = voiceSentTimes.slice(-20)
   }
@@ -5053,7 +5294,7 @@ ${cur.text}`
       // ★ 2026-10-27：模型有时把占位符当正文发出来（实测群里出现一条纯 "[语音]" 的文本消息，
       //   因为语音合成失败、模型又在上下文里看到 [语音] 这个占位符）。占位符永远不是"要发的话"。
       const PLACEHOLDER_ONLY = /^[\[【(（]?(语音|图片|表情|表情包|视频|文件|链接|拍一拍)[\]】)）]?$/i
-      const rawParts = toMessageParts(reply.text).map(stripStickerDirective).filter(Boolean)
+      const rawParts = toMessageParts(reply.text, r.__styleProfile || null).map(stripStickerDirective).filter(Boolean)
       const parts = rawParts.filter((x) => {
         const t = String(x).trim()
         if (!PLACEHOLDER_ONLY.test(t)) return true
@@ -5099,7 +5340,7 @@ ${cur.text}`
             vs = await getOutbox().sayVoice(roomId, { text: voiceText, emotion: 'main' })
           } catch (e) { vs = { ok: false, error: String(e?.message || e) } }
           if (vs?.ok) {
-            markVoiceSent()
+            markVoiceSent(r)
             sentVoiceThisReply = true
             log(`发语音气泡成功：${vs.bytes} 字节 / ${vs.durationMs}ms（main）`)
             stats.sentVoice = (stats.sentVoice || 0) + 1
@@ -5965,6 +6206,7 @@ ${cur.text}`
       if (item.shot && typeof item.shot === 'string') {
         let ok = false
         for (let k = 0; k < 3 && !ok; k++) {
+          if (mediaBlocked(r)) { log('语音后几秒内不发媒体 → 跳过这张图'); continue }
           try { await client.call('sendImage', { roomId: r.roomId, path: item.shot }, 60_000); ok = true }
           catch (e) {
             log(`抖音：发截图失败（第 ${k + 1}/3 次）` + String(e?.message || e).slice(0, 50))
@@ -8531,15 +8773,24 @@ ${cur.text}`
     description: '用视觉模型识别一张本地图片并返回描述（调试"群里发图能识别"这条链路，也可手动识图）。',
     parameters: {
       type: 'object',
-      properties: { path: { type: 'string', description: '图片的绝对路径' } },
+      properties: {
+        path: { type: 'string', description: '图片的绝对路径' },
+        model: { type: 'string', description: '（排查用）临时换视觉模型，比如 glm-5.3-flash' },
+        provider: { type: 'string', description: '（排查用）临时换 provider，比如 opencodego-extra' },
+      },
       required: ['path'],
     },
     output: textOut,
     async execute(args) {
       const p = String(args?.path || '').trim()
       if (!p) return '需要 path'
-      log('手动识图：' + p)
-      const desc = await describeImageCached(p)
+      const override = (args?.model || args?.provider)
+        ? { model: args?.model ? String(args.model) : '', provider: args?.provider ? String(args.provider) : '' }
+        : null
+      log('手动识图：' + p + (override ? `（临时模型 ${override.provider || '-'} / ${override.model || '-'}）` : ''))
+      const desc = override
+        ? await describeImage(p, 'image', override)
+        : await describeImageCached(p)
       return desc
         ? `识别结果：${desc}`
         : '识别失败：看插件日志（可能没有 attachments 服务，或视觉模型 ' + config.visionModel + ' 不可用）'

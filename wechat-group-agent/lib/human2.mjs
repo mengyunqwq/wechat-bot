@@ -223,21 +223,29 @@ export function activityPrompt(topic) {
 //  9. 联想浮现 —— 被线索勾起来的回忆（不是抽奖）
 // ══════════════════════════════════════════════════════════════════════
 /** 从最近聊天里抽"线索词"：人名/好恶里的词/较长的中文片段 */
-export function cueWords({ recent = [], tastes = [], limit = 6 } = {}) {
+export function cueWords({ recent = [], tastes = [], limit = 12 } = {}) {
   const out = []
   const push = (w) => {
     const v = String(w || '').trim()
-    if (v.length < 2 || v.length > 8) return
+    if (v.length < 2 || v.length > 6) return
     if (!out.includes(v)) out.push(v)
   }
   const text = (recent || []).slice(-4).map((m) => String(m && m.text || '')).join(' ')
   // 好恶词优先（她敏感的东西最容易勾起回忆）
   for (const t of tastes || []) if (text.includes(String(t && t.text || ''))) push(t.text)
-  // 常见人名（群里出现过的 2~4 字中文片段里，取在 tastes/成员里出现过的）
-  for (const mm of text.match(/[\u4e00-\u9fa5]{2,4}/g) || []) {
-    if (/^(因为|所以|就是|这个|那个|什么|怎么|可以|不是|没有|现在|时候|一个|知道)/.test(mm)) continue
-    push(mm)
-    if (out.length >= limit) break
+  // 中文 2~4 字滑窗（"上次秋北发的图" 要能切出"秋北"）
+  const FUNC = /[的了是把被给让对从向在于和与等吗呢吧啊呀哦嘛]/
+  const STOP2 = new Set(['我们', '你们', '他们', '这个', '那个', '什么', '怎么', '可以', '就是'])
+  for (const run of (text.match(/[一-龥]+/g) || [])) {
+    const chars = [...run]
+    for (let n = 4; n >= 2; n--) {
+      for (let i = 0; i + n <= chars.length; i++) {
+        const g = chars.slice(i, i + n).join('')
+        if (STOP2.has(g) || FUNC.test(g)) continue
+        push(g)
+        if (out.length >= limit * 2) break
+      }
+    }
   }
   return out.slice(0, limit)
 }

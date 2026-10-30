@@ -13,6 +13,7 @@
  * 本模块负责：定位 .dat → 调 Python 解密到临时目录 → 返回路径（用完由调用方删）。
  */
 import { execFileSync } from 'node:child_process'
+import { pythonExe, ffmpegExe, wechatExe, wechatClientDir, wxhookDir, hookFile } from './paths.mjs'
 import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, unlinkSync } from 'node:fs'
 import { createHash } from 'node:crypto'
 import { dirname, join } from 'node:path'
@@ -20,7 +21,7 @@ import { fileURLToPath } from 'node:url'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const BRIDGE_DIR = join(HERE, '..')
-const PY = process.env.PYTHON_EXE || 'D:\\Python311\\python.exe'
+const PY = pythonExe()   // 自动探测（PYTHON_EXE 可覆盖）
 const SCRIPT = join(BRIDGE_DIR, 'decode-wechat-image.py')
 const KEY_CACHE = join(BRIDGE_DIR, '..', 'data', 'wechat-image-key.json')
 const TMP_DIR = join(BRIDGE_DIR, '..', 'data', 'wechat-image-tmp')

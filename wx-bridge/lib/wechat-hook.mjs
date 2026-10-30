@@ -16,6 +16,7 @@
  *   - 发送：/SendTextMsg、/SendImgMsg、/ForwardXMLMsg（发表情包用 XML 转发）
  */
 import http from 'node:http'
+import { pythonExe, ffmpegExe, wechatExe, wechatClientDir, wxhookDir, hookFile } from './paths.mjs'
 import { execFileSync, spawn } from 'node:child_process'
 import { copyFileSync, existsSync, mkdirSync, writeFileSync, readFileSync, readdirSync, renameSync, rmSync, unlinkSync, statSync } from 'node:fs'
 import { join, dirname } from 'node:path'
@@ -30,8 +31,8 @@ import { tmpdir } from 'node:os'
 // ── 眼睛（hires provider）目录：**动态解析**，面板改了就生效 ──────
 //  优先级：① 环境变量 WECHAT_HIRES_DIR  ② DLL 写的 hook-cdn-replay.dir  ③ 默认 D:\cdndl-replay
 //  为什么不缓存成常量：面板里"选个文件夹就想立马能用"，缓存了就得重启桥。
-const REPLAY_DIR_FILE = process.env.WECHAT_REPLAY_DIR_FILE || 'D:\\wxhook\\wx4110\\hook-cdn-replay.dir'
-const REPLAY_SWITCH_FILE = process.env.WECHAT_REPLAY_SWITCH_FILE || 'D:\\wxhook\\wx4110\\hook-cdn-replay.on'
+const REPLAY_DIR_FILE = process.env.WECHAT_REPLAY_DIR_FILE || hookFile('hook-cdn-replay.dir', 'WECHAT_REPLAY_DIR_FILE')
+const REPLAY_SWITCH_FILE = process.env.WECHAT_REPLAY_SWITCH_FILE || hookFile('hook-cdn-replay.on', 'WECHAT_REPLAY_SWITCH_FILE')
 function hiresDir() {
   const env = process.env.WECHAT_HIRES_DIR
   if (env) return env
@@ -258,7 +259,7 @@ export class WeChatHookBridge {
     this.emit = opts.emit || (() => {})
     this.stickers = opts.stickers || null
     this.dataDir = opts.dataDir || process.cwd()
-    this.wechatExe = opts.wechatExe || 'D:\\wxhook\\wx4110\\Weixin.exe'
+    this.wechatExe = opts.wechatExe || wechatExe()
     this.clientDir = this.wechatExe.replace(/[\\/][^\\/]+$/, '')
     this.log = opts.log || (() => {})
 
@@ -1105,7 +1106,12 @@ export class WeChatHookBridge {
       this.log('语音：调 /SendVoiceMsg 失败：' + String(e?.message || e).slice(0, 160) + ' | cause=' + (e?.cause ? String(e.cause) : 'none'))
       return { ret: -1, retmsg: String(e?.message || e), diag: null }
     } finally {
-      if (asciiCopy) { try { unlinkSync(asciiCopy) } catch { /* ignore */ } }
+      // ★ 2026-10-30（崩溃防护 A）：**不要发完就删**
+      //   三次崩溃（10-28 17:25 / 10-30 08:55 / 10-30 21:42）都发生在"发完语音 10~47 秒"，
+      //   崩在微信自己的后台线程（读 0xFFFF...FF）。最可疑的一步就是这里：hook 一返回我们就
+      //   删文件，而微信的转码/上传线程是**异步**的，可能还在读。
+      //   改成延迟删除（默认 300 秒），并把"清理旧文件"交给定时器。
+      if (asciiCopy) this.#deferUnlink(asciiCopy, 'ASCII 语音副本')
     }
     const ret = Number(r?.ret ?? -1)
     if (ret === -1001) {
@@ -1125,6 +1131,23 @@ export class WeChatHookBridge {
    * 优先系统临时目录；它本身含非 ASCII 时退回微信客户端目录（hook 本来就在那里写日志）。
    * @returns {string} 目标文件绝对路径；找不到可用目录返回 ''
    */
+  /**
+   * 延迟删除一个临时文件（崩溃防护 A）。
+   * 为什么：三次崩溃都紧跟"发完语音"，而 hook 调完 /SendVoiceMsg 就返回 ——
+   *   微信那边的转码/上传线程是异步的，可能还在读这个 SILK。
+   *   立刻删 = 抽走它正在读的文件。改成 N 秒后再删（默认 300s，可配 WECHAT_SILK_KEEP_SEC）。
+   */
+  #deferUnlink(file, why = '临时文件') {
+    if (!file) return
+    const keepSec = Number(process.env.WECHAT_SILK_KEEP_SEC ?? 300)
+    if (!Number.isFinite(keepSec) || keepSec < 0) return
+    const doIt = () => { try { unlinkSync(file); this.log(`清理${why}：${file}`) } catch { /* 已经没了 */ } }
+    if (keepSec === 0) { doIt(); return }
+    const t = setTimeout(doIt, keepSec * 1000)
+    if (typeof t.unref === 'function') t.unref()
+    this.log(`语音：${why}保留 ${keepSec}s 后再删（防止微信异步线程还在读）：${file}`)
+  }
+
   #asciiSafeVoicePath(src) {
     const isAscii = (p) => !/[^\x20-\x7E]/.test(String(p || ''))
     const base = src.replace(/[\\/][^\\/]*$/, '')          // 只为取个文件名前缀，不用于输出
@@ -1192,7 +1215,8 @@ export class WeChatHookBridge {
     try {
       sent = await this.sendVoice(roomId, v.file, v.durationMs)
     } finally {
-      try { unlinkSync(v.file) } catch { /* ignore */ }   // 发完删临时 SILK
+      // ★ 同上：延迟删除，别在微信异步转码/上传还没结束时把文件抽走
+      this.#deferUnlink(v.file, '合成 SILK')
     }
     if (sent?.ret !== 0) {
       return { ok: false, error: `发送失败 ret=${sent?.ret}（${sent?.retmsg || ''}）`, bytes: v.bytes, durationMs: v.durationMs }
@@ -1387,7 +1411,7 @@ export class WeChatHookBridge {
             if (!r) {
               this.log(`解密失败（${c.label}），尝试重扫图片密钥…`)
               try {
-                execFileSync(process.env.PYTHON_EXE || 'D:\\Python311\\python.exe',
+                execFileSync(pythonExe(),
                   [join(dirname(fileURLToPath(import.meta.url)), 'decode-wechat-image.py'), '--find-key'],
                   { windowsHide: true, timeout: 300_000, stdio: 'ignore' })
               } catch { /* ignore */ }
@@ -1447,7 +1471,7 @@ export class WeChatHookBridge {
   gifToPng(gifPath) {
     try {
       const ff = process.env.FFMPEG_EXE
-        || 'D:\\Python311\\Lib\\site-packages\\imageio_ffmpeg\\binaries\\ffmpeg-win-x86_64-v7.1.exe'
+        || ffmpegExe()
       if (!existsSync(ff)) return ''
       const out = gifPath.replace(/\.gif$/i, '') + '-frame0.png'
       execFileSync(ff, ['-hide_banner', '-loglevel', 'error', '-y', '-i', gifPath,

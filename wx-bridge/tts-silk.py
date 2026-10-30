@@ -57,8 +57,41 @@ DEFAULT_VOICE = 'zh-CN-XiaoyiNeural'
 DEFAULT_RATE = '+8%'
 DEFAULT_PITCH = '+18Hz'
 TMP_KEEP_SEC = 3600        # 陈年临时文件阈值
+# 音色后处理（P4 档，御姐/抖音专用）：先统一到 24k → 升 1 半音（F0 168→178）→ 提亮 EQ。
+# ★ 2026-10-27 23:02 用户要求「换回雌小鬼」→ **默认关闭**：雌小鬼要原声，
+#   升 1 半音 + 提亮 EQ 会把人声搞尖、变味（那是给御姐调好的）。
+#   想再试 P4：设 GPT_SOVITS_FX='aresample=24000,asetrate=24000*1.0595,aresample=24000,atempo=0.9438,'
+#   'highpass=f=150,equalizer=f=280:t=q:w=1.2:g=-7,equalizer=f=1800:t=q:w=1:g=4,'
+#   'equalizer=f=3400:t=q:w=1:g=12,equalizer=f=5000:t=q:w=1:g=12,'
+#   'equalizer=f=6500:t=q:w=1:g=9,equalizer=f=7800:t=q:w=1:g=6'
+VOICE_FX = os.environ.get('GPT_SOVITS_FX', '')
 BRIDGE_DIR = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_TMP_DIR = os.path.join(os.path.dirname(BRIDGE_DIR), 'data', 'tts-tmp')
+
+# ── 音色：默认雌小鬼（面板没给 ref 时用这两行兜底）─────────────────────
+DEFAULT_REF = (r'D:\微信deepseek\data\sexy-loli-cn\separated\htdemucs'
+               r'\【中文音声】许久未见的雌小鬼，向你表达爱意\cn-a.wav')
+DEFAULT_PROMPT = '就像是一根被流酸泡过的麻辣秋衣一样这么久不见，大哥哥有没有想我呀'
+# 面板文件由 dsh-voice-panel 插件写（voice / ref / prompt / weights / fx）
+VOICE_PANEL = os.environ.get('VOICE_PANEL_JSON', r'D:\微信deepseek\data\voice-panel.json')
+
+
+def panel_voice():
+    """读面板 → (ref, prompt, fx)；读不到/文件没 ref 返回 None。
+
+    ★ 2026-10-28 事故复盘：面板以前只写 voice-panel.json，**合成链路根本没读它**
+      （所以「面板显示御姐·B、实际发出去是别的音色」谁也说不清、来回丢音色）。
+      现在这里真读：面板点哪个音色，这里就用哪个 ref/prompt/fx。
+    """
+    try:
+        with open(VOICE_PANEL, encoding='utf-8') as f:
+            c = json.load(f)
+        ref = str(c.get('ref') or '')
+        if not ref or not os.path.exists(ref):
+            return None
+        return ref, str(c.get('prompt') or ''), str(c.get('fx') or '')
+    except Exception:
+        return None
 
 RATE_RE = re.compile(r'^[+-]\d{1,3}%$')
 PITCH_RE = re.compile(r'^[+-]\d{1,3}Hz$')
@@ -210,18 +243,30 @@ def synth_mp3(text, voice, rate, pitch, out_mp3, timeout=SYNTH_TIMEOUT):
     import urllib.request
     import json as _json
     api = os.environ.get('GPT_SOVITS_API', 'http://127.0.0.1:9880/tts')
-    # ★ 2026-10-27 还原：此前被改成"御姐"参考音（data\voice\yujie-ref.wav + 威廉…句子），
-    #   大肥鱼的声音变成别人了。这里改回"雌小鬼"原始参考音。
-    #   要换音色请改这两个默认值（或设环境变量 GPT_SOVITS_REF / GPT_SOVITS_PROMPT），
-    #   别再直接改 api_v2 的模型配置 —— 那会连样本外音色一起变。
-    ref = os.environ.get('GPT_SOVITS_REF',
-        r'D:\微信deepseek\data\sexy-loli-cn\separated\htdemucs\【中文音声】许久未见的雌小鬼，向你表达爱意\cn-a.wav')
-    prompt = os.environ.get('GPT_SOVITS_PROMPT',
-        '就像是一根被流酸泡过的麻辣秋衣一样这么久不见，大哥哥有没有想我呀')
-    # 记下来给 JSON 输出用：音色改没改，一眼可见（实测踩过：被别人把参考音换成"御姐"，没人发现）
+    # 音色解析顺序：环境变量 > 面板 voice-panel.json > 本文件默认（雌小鬼 cn-a）
+    #   （2026-10-27 22:4x 曾硬切「抖音·P4」；现在交回面板控制，默认永远是雌小鬼）
     global LAST_VOICE
+    ref = os.environ.get('GPT_SOVITS_REF') or ''
+    prompt = os.environ.get('GPT_SOVITS_PROMPT') or ''
+    fx = os.environ.get('GPT_SOVITS_FX')
+    ref_from = 'env' if ref else ''
+    if not ref:
+        pv = panel_voice()
+        if pv:
+            ref, prompt = pv[0], prompt or pv[1]
+            ref_from = 'panel'
+            if fx is None and pv[2]:
+                fx = pv[2]
+    if not ref:
+        ref, ref_from = DEFAULT_REF, 'default'
+    if not prompt:
+        prompt = DEFAULT_PROMPT
+    if fx and os.environ.get('GPT_SOVITS_FX') is None:
+        # 面板带的音色后处理（御姐 P4 那套升调+提亮）；雌小鬼预设不带 fx
+        globals()['VOICE_FX'] = fx
+    # 记下来给 JSON 输出用：音色改没改，一眼可见（实测踩过：被换成"御姐"，没人发现）
     LAST_VOICE = {'ref': ref, 'refName': os.path.basename(ref), 'prompt': prompt[:24],
-                  'refFrom': ('env' if os.environ.get('GPT_SOVITS_REF') else 'default')}
+                  'refFrom': ref_from}
     body = {
         'text': text,
         'text_lang': 'zh',
@@ -256,10 +301,17 @@ def probe_duration(ff, src):
 
 
 def to_pcm24(ff, src, out_pcm):
-    """mp3 → **24kHz/单声道/PCM16 裸流**（`-f s16le`，不给 ffmpeg 写 wav，避免它加 LIST 块）"""
-    rc, log = run([ff, '-hide_banner', '-loglevel', 'error', '-i', src, '-vn',
-                   '-ac', str(PCM_CHANNELS), '-ar', str(PCM_RATE), '-acodec', 'pcm_s16le',
-                   '-f', 's16le', '-y', out_pcm], timeout=FFMPEG_TIMEOUT)
+    """mp3 → **24kHz/单声道/PCM16 裸流**（`-f s16le`，不给 ffmpeg 写 wav，避免它加 LIST 块）
+
+    VOICE_FX：音色后处理（P4 档）——先统一到 24k，再升 1 个半音 + 提亮 EQ。
+    顺序很重要：asetrate 必须在固定采样率之后，否则输入 32k wav 和 24k mp3 出来的调不一样。
+    """
+    args = [ff, '-hide_banner', '-loglevel', 'error', '-i', src, '-vn']
+    if VOICE_FX:
+        args += ['-af', VOICE_FX]
+    args += ['-ac', str(PCM_CHANNELS), '-ar', str(PCM_RATE), '-acodec', 'pcm_s16le',
+             '-f', 's16le', '-y', out_pcm]
+    rc, log = run(args, timeout=FFMPEG_TIMEOUT)
     if rc != 0 or not os.path.exists(out_pcm):
         raise StageError('ffmpeg', 'mp3→PCM 失败（rc=%s）：%s' % (rc, log.strip()[:200]))
     size = os.path.getsize(out_pcm)

@@ -20,6 +20,7 @@
  * ⚠️ 音色预设的数值是**用户实测挑好的**，别顺手改（改了声音就不对了）。
  */
 import { execFileSync } from 'node:child_process'
+import { pythonExe, ffmpegExe, wechatExe, wechatClientDir, wxhookDir, hookFile } from './paths.mjs'
 import { existsSync, mkdirSync, readdirSync, rmSync, statSync, unlinkSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -35,7 +36,7 @@ const PY_ENV = { ...process.env, PYTHONIOENCODING: 'utf-8' }
  * 为什么不做成 import 时的常量（video/voice 那两个模块是常量）：常量会把"import 之后再改
  * 环境变量"变成静默无效（实测踩到：测试里改 PYTHON_EXE 完全没生效，还以为护栏坏了）。
  */
-function pyExe() { return process.env.PYTHON_EXE || 'D:\\Python311\\python.exe' }
+function pyExe() { return pythonExe() }
 const PY = pyExe()   // 仅用于 paths 展示
 
 /**

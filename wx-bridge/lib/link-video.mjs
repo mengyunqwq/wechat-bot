@@ -18,6 +18,7 @@
  *     删的时候整目录 `rmSync` 一次干净（**不会漏下 yt-dlp 的 .part/.info.json/.fNNN.m4a 残留**）。
  */
 import { execFile, execFileSync } from 'node:child_process'
+import { pythonExe, ffmpegExe as resolveFfmpeg, wechatExe, wechatClientDir, wxhookDir, hookFile } from './paths.mjs'
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { dirname, extname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -26,7 +27,7 @@ import { probeVideo } from './wechat-video.mjs'
 const HERE = dirname(fileURLToPath(import.meta.url))
 const BRIDGE_DIR = join(HERE, '..')
 const LINK_TMP = join(BRIDGE_DIR, '..', 'data', 'link-video')   // 与 wechat-image.mjs 的 data/ 同级
-const PY = process.env.PYTHON_EXE || 'D:\\Python311\\python.exe'
+const PY = pythonExe()   // 自动探测（PYTHON_EXE 可覆盖）
 const PY_ENV = { ...process.env, PYTHONIOENCODING: 'utf-8' }
 
 export const paths = { LINK_TMP, PY }
@@ -165,6 +166,9 @@ let ffmpegPath = ''
  * 顺序：env FFMPEG_EXE / FFMPEG_LOCATION → imageio_ffmpeg.get_ffmpeg_exe() → ''（交给 yt-dlp 自己找 PATH）
  */
 export function ffmpegExe() {
+  // ★ 统一解析（环境变量 FFMPEG_EXE → imageio-ffmpeg → PATH），找不到再走下面的本地逻辑
+  try { const r = resolveFfmpeg(); if (r) return r } catch { }
+
   if (ffmpegProbed) return ffmpegPath
   ffmpegProbed = true
   for (const k of ['FFMPEG_EXE', 'FFMPEG_LOCATION']) {

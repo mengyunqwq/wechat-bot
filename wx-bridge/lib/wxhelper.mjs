@@ -18,6 +18,7 @@
  *   - DLL 与微信版本强相关（特征扫描）：4.1.15.53 实测可加载。
  */
 import http from 'node:http'
+import { pythonExe, ffmpegExe, wechatExe, wechatClientDir, wxhookDir, hookFile } from './paths.mjs'
 import net from 'node:net'
 import { spawn, execFileSync } from 'node:child_process'
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
@@ -41,7 +42,7 @@ export class WxhelperBridge {
     this.emit = opts.emit || (() => {})
     this.stickers = opts.stickers || null
     this.dataDir = opts.dataDir || process.cwd()
-    this.dllPath = opts.dllPath || 'D:\\wxhook\\wxhook.dll'
+    this.dllPath = opts.dllPath || join(wxhookDir() || '', 'wxhook.dll')
     this.pythonExe = opts.pythonExe || 'D:\\Python311\\python.exe'
     this.injector = opts.injector || 'D:\\wxhook\\inject_ctypes.py'
     this.wechatExe = opts.wechatExe || 'D:\\wxhook\\weixin-run\\Weixin.exe'
