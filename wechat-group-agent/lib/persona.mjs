@@ -1223,13 +1223,130 @@ export function nagLevel(state, now = Date.now(), windowMs = 10 * 60_000) {
   return 0
 }
 
-// ── G. 自我复盘：结论存起来，下次写进自传 ─────────────────────────
-export function saveSelfReview(state, findings, now = Date.now()) {
-  const list = (Array.isArray(findings) ? findings : []).map((x) => String(x).slice(0, 80)).filter(Boolean).slice(0, 5)
-  if (!list.length) return state
+// ── G. 自我复盘：结论要**落地**（2026-11-01 重做）────────────────────
+//
+// 老实现的问题（用户实测）：
+//   ① 结论存了但 buildSystem 从来不读 → 复盘完照样犯，纯装饰
+//   ② 提示词是英文 → 结论也是英文，跟中文人设打架
+//   ③ 不看上次结论 → 同一句"太凶/句子太短"被反复"发现"
+//   ④ 没有过期 → 三周前的毛病还背着
+//
+// 新模型：findings 是**有生命周期的条目** { text, at, hits }
+//   · 本次复盘仍提到 → at 刷新、hits+1（说明没改好）
+//   · 本次没提到 → at 不变，7 天后自动淡出（说明改好了）
+//   · 提示词只读 activeFindings()
+
+const REVIEW_TTL_MS = 7 * 86_400_000
+
+/** 归一化：去标点/空白/大小写，用来判断"是不是同一个毛病" */
+function normFinding(t) {
+  return String(t || '')
+    .toLowerCase()
+    .replace(/[\s\p{P}\p{S}]/gu, '')
+}
+
+/** 两条结论是不是在说同一件事（包含关系 或 2-gram 重合够高） */
+export function sameFinding(a, b) {
+  const x = normFinding(a)
+  const y = normFinding(b)
+  if (!x || !y) return false
+  if (x.includes(y) || y.includes(x)) return true
+  const grams = (s) => {
+    const g = new Set()
+    for (let i = 0; i + 2 <= s.length; i++) g.add(s.slice(i, i + 2))
+    return g
+  }
+  const ga = grams(x)
+  const gb = grams(y)
+  if (!ga.size || !gb.size) return false
+  let inter = 0
+  for (const k of ga) if (gb.has(k)) inter++
+  return inter / Math.min(ga.size, gb.size) >= 0.5
+}
+
+/** 把历史数据（可能是老格式的纯字符串数组）统一成条目 */
+function normalizeEntries(raw, now = Date.now()) {
+  const arr = Array.isArray(raw) ? raw : []
+  return arr
+    .map((x) => {
+      if (typeof x === 'string') return { text: String(x).slice(0, 80), at: now, hits: 1 }
+      if (x && typeof x === 'object') {
+        return {
+          text: String(x.text || '').slice(0, 80),
+          at: num(x.at, now),
+          hits: Math.max(1, num(x.hits, 1)),
+        }
+      }
+      return null
+    })
+    .filter((x) => x && x.text)
+}
+
+/**
+ * 当前还算数的自省条目（默认 7 天内）。
+ * @returns {{text:string, at:number, hits:number, ageDays:number}[]}
+ */
+export function activeFindings(state, now = Date.now(), ttlMs = REVIEW_TTL_MS) {
+  const sr = state && state.selfReview
+  const entries = normalizeEntries(sr && sr.findings, num(sr && sr.at, now))
+  return entries
+    .filter((e) => now - e.at < ttlMs)
+    .sort((a, b) => b.at - a.at)
+    .map((e) => ({ ...e, ageDays: Math.max(0, (now - e.at) / 86_400_000) }))
+}
+
+/** 写进提示词的一段（没有可说的返回 ''） */
+export function describeFindings(state, now = Date.now(), ttlMs = REVIEW_TTL_MS) {
+  const list = activeFindings(state, now, ttlMs).slice(0, 3)
+  if (!list.length) return ''
+  const lines = list.map((e) => `  · ${e.text}`)
+  return '【我最近在改的】（自己心里有数就行，不用说出来，也别为了避嫌把话说得不自然）\n' + lines.join('\n')
+}
+
+/**
+ * 复盘结论入库：和上次的在改条目对账。
+ *   · 仍然提到 → 刷新时间、hits+1（没改好，继续盯着）
+ *   · 新问题   → 新增
+ *   · 没提到   → 保留但不再刷新，到期自动淡出（等于改好了）
+ */
+export function saveSelfReview(state, findings, now = Date.now(), ttlMs = REVIEW_TTL_MS) {
+  const incoming = (Array.isArray(findings) ? findings : [])
+    .map((x) => String(x || '').trim().slice(0, 80))
+    .filter(Boolean)
+    .slice(0, 5)
+  if (!incoming.length) return state
+
+  const prev = activeFindings(state, now, ttlMs)
+  const merged = []
+  const used = new Set()
+
+  for (const text of incoming) {
+    const hit = prev.find((p) => !used.has(p.text) && sameFinding(p.text, text))
+    if (hit) {
+      used.add(hit.text)
+      merged.push({ text, at: now, hits: (hit.hits || 1) + 1 })   // 还在犯 → 刷新
+    } else {
+      merged.push({ text, at: now, hits: 1 })                     // 新问题
+    }
+  }
+  // 没被提到的老条目：保留（不刷新时间），让它自然过期
+  for (const p of prev) {
+    if (used.has(p.text)) continue
+    if (merged.some((m) => sameFinding(m.text, p.text))) continue
+    merged.push({ text: p.text, at: p.at, hits: p.hits || 1 })
+  }
+
+  const trimmed = merged
+    .sort((a, b) => b.at - a.at)
+    .slice(0, 6)
+
   return {
     ...state,
-    selfReview: { at: now, findings: list, history: [{ at: now, findings: list }, ...((state.selfReview && state.selfReview.history) || [])].slice(0, 6) },
+    selfReview: {
+      at: now,
+      findings: trimmed,
+      history: [{ at: now, findings: trimmed.map((x) => x.text) }, ...((state.selfReview && state.selfReview.history) || [])].slice(0, 6),
+    },
     updatedAt: now,
   }
 }
@@ -1237,5 +1354,5 @@ export function saveSelfReview(state, findings, now = Date.now()) {
 /** 该复盘了吗（默认 7 天一次） */
 export function shouldSelfReview(state, now = Date.now(), everyMs = 7 * 86_400_000) {
   const last = num(state.selfReview && state.selfReview.at, 0)
-  return { ok: now - last >= everyMs, lastAt: last }
+  return { ok: now - last >= everyMs, lastAt: last, dueInMs: Math.max(0, everyMs - (now - last)) }
 }

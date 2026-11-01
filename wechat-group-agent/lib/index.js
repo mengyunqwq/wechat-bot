@@ -16,12 +16,12 @@
  */
 import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, unlinkSync, writeFileSync, copyFileSync, rmSync, openSync, closeSync } from 'node:fs'
 import { execFileSync, execSync, exec as execCb, spawn as spawnCb } from 'node:child_process'
-import * as MV2 from './memory-v2.mjs?v=vmvv9tsvt'   // 艾宾浩斯遗忘曲线 + 情绪加权（?v= 用于打破 ESM 缓存）
+import * as MV2 from './memory-v2.mjs?v=vmvxgvfr8'   // 艾宾浩斯遗忘曲线 + 情绪加权（?v= 用于打破 ESM 缓存）
 import * as ST from './style.mjs'   // 口气：标点规约 / 口语碎片 / 情绪→语气
 import * as H3 from './human3.mjs'   // 第三轮：情景示例/幽默三招/不重复/收尾日记/羁绊
 import * as OB from './outbox.mjs'   // 统一出站队列（节流/去重/重试退避）
 import * as H2 from './human2.mjs'   // 第二轮人性化：承诺/纠错/沉默/追话/联想/自己的事
-import * as PS from './persona.mjs?v=vmvv9tsvt'      // 性格四件套 + 自传（?v= 打破 ESM 缓存）
+import * as PS from './persona.mjs?v=vmvxgvfr8'      // 性格四件套 + 自传（?v= 打破 ESM 缓存）
 import net from 'node:net'
 import { request as httpsRequest } from 'node:https'
 import { join, dirname } from 'node:path'
@@ -49,7 +49,7 @@ try {
 } catch { /* ignore */ }
 
 export const name = '@dsh-external/dsh-wechat-bot'
-export const version = '2.0.3'
+export const version = '2.0.4'
 // Cordis 4.0.4 的 inject 只认**数组**或"服务名→配置"映射；
 // 写成 { required, optional } 会让依赖解析失败、fiber 永远 pending（踩过：改了代码却一直跑旧实例）。
 // 这里只声明必然存在的两个服务；attachments（视觉识别用）改为**惰性获取**，
@@ -477,7 +477,8 @@ const DEFAULT_CONFIG = {
   humanLearnTerms: true,          // F：遇到群里的新词会先问、再学着用
   humanBodyState: true,           // H：只"困/饿"，且必须自洽（不编造生活）
   humanPatience: true,            // I：被连续追问会不耐烦（但不拒答）
-  humanSelfReviewDays: 7,         // G：每几天做一次自我复盘（0=不做）
+  humanSelfReviewDays: 1,         // G：每几天做一次自我复盘（0=不做）★2026-11-01 用户要求：每天一次
+  humanReviewTtlDays: 7,          // 复盘结论的有效期（这些天里没再被提到就淡出）
   humanProactiveTopic: true,      // D：闲置时主动抛自己喜欢的话题
   humanProactiveChance: 0.08,     //     每次检查时主动开话题的概率
   humanProactiveIdleMin: 40,      //     群里安静多少分钟后才考虑
@@ -2811,22 +2812,79 @@ ${cur.text}`
   }
 
   /** G: self review - read her own recent lines and find what is off */
+  let selfReviewBusy = false
+  let selfReviewLastAt = 0
   async function selfReview(r, { force = false } = {}) {
     if (config.personaEnabled === false) return { ok: false, reason: 'persona disabled' }
     const everyMs = (Number(config.humanSelfReviewDays) || 7) * 86400000
     if (!everyMs && !force) return { ok: false, reason: 'self review disabled' }
+    // ★ 2026-11-01：原来两个触发（小时定时 + 启动后 12 秒）会撞在一起，1 分钟内跑两次复盘。
     const st = personaOf(r)
     const gate = PS.shouldSelfReview(st, Date.now(), everyMs || 7 * 86400000)
-    if (!force && !gate.ok) return { ok: false, reason: 'not due yet' }
-    const mine = (r.msgs || []).filter((m) => m && m.isSelf && m.text).slice(-40).map((m) => '- ' + String(m.text).slice(0, 80))
-    if (mine.length < 5) return { ok: false, reason: 'too few recent lines' }
+    if (!force && !gate.ok) { log(`复盘跳过：还没到时间（还有 ${Math.round(gate.dueInMs / 3600000)} 小时）`); return { ok: false, reason: 'not due yet' } }
+    if (selfReviewBusy) { log('复盘跳过：上一轮还没结束'); return { ok: false, reason: '上一轮复盘还没结束' } }
+    if (Date.now() - selfReviewLastAt < 5 * 60_000) { log('复盘跳过：5 分钟内刚复盘过'); return { ok: false, reason: '刚复盘过（5 分钟内）' } }
+    // ★ 2026-11-01 修：原来只读内存 r.msgs —— 插件重启后是空的，
+    //   于是"自我复盘"必定返回「too few recent lines」，日志里连一句都不留。
+    //   现在优先从数据库翻她最近说过的话，内存只做兜底。
+    // ★ 2026-11-01 二次修：globalHostRoom() 在"还没收到过消息"时返回的是脱壳对象
+    //   （roomId = '_global'），拿它去查库当然 0 条。这里改成**跨真实群**取素材：
+    //   先问桥要群列表，再取前几个群里她自己说过的话。
+    let mine = []
+    let picked = []
+    try {
+      const realRooms = [...rooms.values()].filter((x) => x && x.roomId && !String(x.roomId).startsWith('_'))
+      picked = realRooms.map((x) => x.roomId)
+      if (!picked.length) {
+        const rs = await client.call('rooms', {}, 15_000)
+        const list = Array.isArray(rs) ? rs : ((rs && rs.rooms) || [])
+        picked = list
+          .map((x) => String((x && (x.roomId || x.wxid)) || ''))
+          .filter((id) => id.endsWith('@chatroom'))
+          .slice(0, 3)
+      }
+      const collected = []
+      for (const rid of picked.slice(0, 3)) {
+        try {
+          const res = await client.call('searchMessages', { roomId: rid, query: '', limit: 160, scan: 600 }, 30_000)
+          const items = (res && res.items) || []
+          for (const m of items) {
+            if (!m || !m.isSelf || !m.text) continue
+            if (/^<\?xml/i.test(String(m.text))) continue
+            if (/^https?:\/\//i.test(String(m.text).trim())) continue   // 纯链接不是"说话方式"
+            collected.push({ ts: Number(m.ts) || 0, text: String(m.text).slice(0, 80) })
+          }
+        } catch (e) { log(`复盘取「${rid}」失败：` + String(e?.message || e).slice(0, 60)) }
+      }
+      collected.sort((a, b) => a.ts - b.ts)
+      mine = collected.slice(-40).map((x) => '- ' + x.text)
+      log(`复盘素材：从 ${picked.slice(0, 3).length} 个群取到 ${mine.length} 条她自己说的话`)
+    } catch (e) {
+      log('复盘取历史失败（改用内存里的）：' + String(e?.message || e).slice(0, 80))
+    }
+    if (mine.length < 5) {
+      mine = (r.msgs || []).filter((m) => m && m.isSelf && m.text).slice(-40).map((m) => '- ' + String(m.text).slice(0, 80))
+    }
+    if (mine.length < 5) {
+      log(`复盘跳过：素材不足（数据库 + 内存一共 ${mine.length} 条她自己的话，至少要 5 条）`)
+      return { ok: false, reason: `素材不足（只找到 ${mine.length} 条她说过的话）` }
+    }
     const diary = (st.diary || []).slice(0, 3).map((d) => '- ' + String(d.text).slice(0, 60))
-    const sys = 'You are reviewing your own chat style honestly. Output JSON only, no prose, no code fence.'
-    const usr = 'Your recent lines in the group:\n' + mine.join('\n') + '\n\n'
-      + (diary.length ? 'Your recent diary:\n' + diary.join('\n') + '\n\n' : '')
-      + 'Find 1-3 real problems (no compliments). Look for: too much like customer service, over-explaining,'
-      + ' too long, too clingy, too harsh, too stiff.\n'
-      + 'Format: {"findings":["problem1","problem2"]}'
+    // 上次在改的（对账用）：让模型判断"改了没"，而不是每次把老毛病当新发现
+    const ttlMs = (Number(config.humanReviewTtlDays) || 7) * 86400000
+    const prevList = PS.activeFindings(st, Date.now(), ttlMs).slice(0, 5).map((x) => '- ' + x.text)
+    const sys = '你在复盘自己（一个群聊机器人）最近说话的方式。只输出 JSON，不要解释、不要代码块。'
+    const usr = '你最近在群里说的话：\n' + mine.join('\n') + '\n\n'
+      + (diary.length ? '你最近写的日记：\n' + diary.join('\n') + '\n\n' : '')
+      + '你上次复盘记下的、说要在改的：\n' + (prevList.length ? prevList.join('\n') : '（没有）') + '\n\n'
+      + '要求：\n'
+      + '1) 找出 2~3 条**现在仍然存在**的毛病；上次已经改好的不要重复提。\n'
+      + '2) 每条必须是**具体改法**，能直接指导下一句话怎么写；不要"太凶""太长"这种空话。\n'
+      + '   反例：太像客服\n'
+      + '   正例：别用"有什么可以帮你"这种句式，直接说事\n'
+      + '3) 全用中文，每条不超过 25 字，不许夸奖，不许说"整体不错"。\n'
+      + '格式：{"findings":["第一条","第二条"]}'
+    selfReviewBusy = true
     try {
       const route = resolveRoute()
       stats.llmCalls++
@@ -2835,12 +2893,16 @@ ${cur.text}`
       const m = raw.match(/\{[\s\S]*\}/)
       let findings = []
       if (m) { try { findings = JSON.parse(m[0]).findings || [] } catch { findings = [] } }
-      if (!findings.length) return { ok: false, reason: 'model gave nothing' }
-      savePersona(r, PS.saveSelfReview(personaOf(r), findings, Date.now()))
+      if (!findings.length) { log('复盘失败：模型没给结论'); return { ok: false, reason: '模型没给结论（看日志）' } }
+      selfReviewLastAt = Date.now()   // 只有成功才记时间
+      savePersona(r, PS.saveSelfReview(personaOf(r), findings, Date.now(), ttlMs))
       log('self review: ' + findings.join(' | '))
       return { ok: true, findings }
     } catch (e) {
+      log('复盘失败：' + String(e?.message || e).slice(0, 120))
       return { ok: false, reason: String(e?.message || e).slice(0, 120) }
+    } finally {
+      selfReviewBusy = false
     }
   }
 
@@ -3617,6 +3679,8 @@ ${cur.text}`
       (config.humanMoodTone !== false
         ? (() => { try { return ST.moodToneBlock(ST.moodProfile(personaOf(r), { now: Date.now() })) } catch { return '' } })()
         : ''),
+      // ★ 2026-11-01：自我复盘原来只存不用。现在把"仍在改的"写进提示词（7 天有效期，说了不算就自动淡出）
+      (() => { try { return PS.describeFindings(personaOf(r), Date.now(), (Number(config.humanReviewTtlDays) || 7) * 86400000) } catch { return '' } })(),
       '  · 别人问"我们什么关系/我们算什么/熟不熟"时，**就按上面的羁绊等级说**'
         + '（比如"Lv3 熟人了"），可以说得随意点，但等级和称号要报对；不要回避，也不要瞎编更高等级。',
       '  **亲密举动（抱抱/牵手/想他）只允许对「好感度最高」的那一个说**；对别人说就出戏。',
