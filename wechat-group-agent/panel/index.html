@@ -1545,12 +1545,29 @@ async function loadInner() {
         })()}
       </div>
 
-<div class="section"><div class="hd">🪞 自我复盘 <span class="muted small">（每周一次，她会反省自己说话的样子）</span></div>
+<div class="section"><div class="hd">🪞 自我复盘 <span class="muted small">（每天一次，她会反省自己说话的样子，结论会写进提示词）</span></div>
         ${(() => {
           const sr = (hum && hum.selfReview) || null;
-          if (!sr || !(sr.findings || []).length) return '<div class="small muted">还没复盘过。点上面「自我复盘」。</div>';
+          const list = (sr && sr.findings) || [];
+          if (!list.length) return '<div class="small muted">还没复盘过。点上面「自我复盘」。</div>';
+          // ★ 2026-11-01：findings 从「字符串数组」改成了「{text,at,hits} 条目」，
+          //   原来直接 esc(f) 会渲染成 [object Object]（页面上看着就是空白/乱码）。
+          const rows = list.map((f) => {
+            if (typeof f === 'string') return `<li>${esc(f)}</li>`;
+            const text = String((f && f.text) || '');
+            if (!text) return '';
+            const hits = Number((f && f.hits) || 1);
+            const at = Number((f && f.at) || 0);
+            const ageDays = at ? Math.max(0, Math.round((Date.now() - at) / 86400000)) : 0;
+            const badge = hits > 1
+              ? ` <span class="pill warn" title="连续 ${hits} 次复盘都在犯 → 说明还没改好">仍在犯 ×${hits}</span>`
+              : '';
+            const age = ageDays >= 1 ? ` <span class="small muted">（${ageDays} 天前提出）</span>` : '';
+            return `<li>${esc(text)}${badge}${age}</li>`;
+          }).filter(Boolean).join('');
           return `<div class="small muted">${esc(fmtTime(sr.at))} · 她发现自己：</div>
-            <ul class="small" style="margin:6px 0 0 18px">${sr.findings.map(f => `<li>${esc(f)}</li>`).join('')}</ul>`;
+            <ul class="small" style="margin:6px 0 0 18px">${rows}</ul>
+            <div class="small muted" style="margin-top:6px">这些会进提示词；7 天内没再被提到就自动淡出（等于改好了）。</div>`;
         })()}
       </div>
 

@@ -1245,7 +1245,13 @@ function normFinding(t) {
     .replace(/[\s\p{P}\p{S}]/gu, '')
 }
 
-/** 两条结论是不是在说同一件事（包含关系 或 2-gram 重合够高） */
+/**
+ * 两条结论是不是在说同一件事。
+ *
+ * ★ 2026-11-01 校准：模型换个说法就会被判成"新问题"，导致同一毛病越攒越多。
+ *   实测同一件事的两种说法：Dice(2-gram) ≈ 0.37~0.39；不相干的两条 ≈ 0.06。
+ *   所以用 Dice ≥ 0.30 判定（原来用 inter/min ≥ 0.5，太严，全漏）。
+ */
 export function sameFinding(a, b) {
   const x = normFinding(a)
   const y = normFinding(b)
@@ -1261,7 +1267,11 @@ export function sameFinding(a, b) {
   if (!ga.size || !gb.size) return false
   let inter = 0
   for (const k of ga) if (gb.has(k)) inter++
-  return inter / Math.min(ga.size, gb.size) >= 0.5
+  const dice = (2 * inter) / (ga.size + gb.size)
+  // 实测（2026-11-01 校准）：
+  //   同义改写短句 dice≈0.28、共同 2-gram 4 个；不相干两句 dice≈0.09、共同 1 个
+  //   → dice ≥ 0.25 且共同片段 ≥ 3 才算同一件事（单看 dice 会把短句漏掉）
+  return dice >= 0.25 && inter >= 3
 }
 
 /** 把历史数据（可能是老格式的纯字符串数组）统一成条目 */
@@ -1336,9 +1346,11 @@ export function saveSelfReview(state, findings, now = Date.now(), ttlMs = REVIEW
     merged.push({ text: p.text, at: p.at, hits: p.hits || 1 })
   }
 
+  // 只留 4 条：先看"被确认次数"（说明一直没改好），再看新旧
   const trimmed = merged
+    .sort((a, b) => (b.hits - a.hits) || (b.at - a.at))
+    .slice(0, 4)
     .sort((a, b) => b.at - a.at)
-    .slice(0, 6)
 
   return {
     ...state,

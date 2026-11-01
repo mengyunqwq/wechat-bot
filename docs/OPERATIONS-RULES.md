@@ -371,3 +371,33 @@ if (containsImage && !model.input.includes("image"))
 
 视频链路（抽帧 + 音轨）不依赖这个：`video-probe.py --selftest` 应该 6 项全过；
 但"看懂画面"这一步走的就是视觉模型，所以视频的最终描述同样受这条约束。
+
+### R23 — 任何外部进程调用都必须「解析路径 + 挂 error 监听」
+
+**2026-11-01 真实事故（DSH 宿主直接崩掉）**：
+
+```
+DeepSeek Harness 无法使用｜应用无法启动或已意外停止
+errno: -4058, code: 'ENOENT',
+syscall: 'spawn D:\Python311\python.exe',
+spawnargs: ['D:\微信deepseek\data\GPT-SoVITSpi_v2.py']
+```
+
+原因：插件里启动 TTS（GPT-SoVITS）的那段代码把 python 路径**写死**成 `D:\Python311\python.exe`，
+而 `spawn()` 返回的 child 上**没有挂 `error` 监听**。换台电脑没有这个路径 → spawn 抛 ENOENT →
+没有监听 → 变成 uncaughtException → **整个 DSH 宿主进程被带崩**（不是插件崩，是宿主崩）。
+
+实测复现（同一台机器）：
+
+| 写法 | 结果 |
+|---|---|
+| `spawn(badPath)` 不挂 error | 退出码 1，`node:events:505` 未捕获异常 |
+| `spawn(badPath).on('error', ...)` | 退出码 0，打印「已捕获 spawn 错误：ENOENT」，进程存活 |
+
+规矩：
+
+1. **路径不许写死**：先环境变量（`PYTHON_EXE` / `FFMPEG_EXE` / `TTS_API_PY`），
+   再常见位置探测（各盘符），再 PATH，最后返回空并优雅降级。
+2. **每个 `spawn()` / `execFile()` 必须挂 `error`**（execFile 的 callback 里判断 `err` 也算）。
+3. spawn 之前先 `existsSync()` 检查，失败就**返回明确错误**给调用方，别让它自己抛。
+4. 启动时把解析结果打日志：`TTS 依赖：python=…｜api_v2=…`，换机排查一眼就能看出缺什么。

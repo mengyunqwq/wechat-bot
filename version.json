@@ -1,5 +1,5 @@
 {
- "version": "2.0.4",
- "notes": "2.0.4：自我复盘从\"装饰\"变成闭环 + 每天一次。① 复盘结论以前只存不读（buildSystem 从不引用）→ 现在写进提示词「我最近在改的」，7 天有效期，只做倾向性提醒、不做逐字禁令。② 复盘提示词中文化，要求每条必须是能直接指导下一句话的**具体改法**（反例：太像客服；正例：别用\"有什么可以帮你\"这种句式）。③ 复核对账上次结论：换个说法也能认出是同一个毛病（2-gram 重合），仍提到 → hits+1 继续盯；没提到 → 时间不刷新，到期自动淡出。④ 素材跨真实群取（原来只读内存 r.msgs，插件一重启就 0 条；globalHostRoom 在没消息时返回 _global 假房间，查库当然查不到）。⑤ 复盘失败可诊断：素材不足/未到时间/并发冲突/模型没给结论 全部写日志；失败不占用 5 分钟冷却。⑥ 复盘频率改为每天一次（humanSelfReviewDays=1），结论有效期 humanReviewTtlDays=7 可调。",
+ "version": "2.0.5",
+ "notes": "2.0.5：修 DSH 宿主崩溃（关键）+ 面板自我复盘显示 + 复盘去重。① 插件启动 TTS 时把 python 路径写死成 D:\\Python311\\python.exe，且 spawn 后没挂 error 监听——换台电脑没有该路径时 spawn 抛 ENOENT，没人接 → uncaughtException → 整个 DSH 宿主进程崩掉（报错原文：spawn D:\\Python311\\python.exe / errno -4058）。现在 python 与 api_v2.py 统一解析（环境变量 PYTHON_EXE / TTS_API_PY → 各盘符常见位置 → PATH），找不到就返回明确错误不 spawn；所有 spawn 都挂 error 监听；启动时打印「TTS 依赖：python=…｜api_v2=…」。② 面板「自我复盘」一直显示空白：findings 从字符串数组改成 {text,at,hits} 条目后，面板还在 esc(f) → 渲染成 [object Object]。现在兼容两种格式，并显示「仍在犯 ×N」「N 天前提出」。③ 复盘去重：sameFinding 原来用 inter/min ≥ 0.5 太严，模型换个说法就当新毛病 → 同一件事越攒越多。实测同义改写 dice≈0.28、共同 2-gram 4 个；不相干 dice≈0.09、共同 1 个 → 改为 dice ≥ 0.25 且共同片段 ≥ 3；条目上限 6 → 4，优先保留被确认次数多的。④ 新增 R23 规矩：任何外部进程调用必须「解析路径 + 挂 error 监听」。",
  "releasedAt": "2026-10-29"
 }

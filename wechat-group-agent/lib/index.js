@@ -16,12 +16,12 @@
  */
 import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, unlinkSync, writeFileSync, copyFileSync, rmSync, openSync, closeSync } from 'node:fs'
 import { execFileSync, execSync, exec as execCb, spawn as spawnCb } from 'node:child_process'
-import * as MV2 from './memory-v2.mjs?v=vmvxgvfr8'   // 艾宾浩斯遗忘曲线 + 情绪加权（?v= 用于打破 ESM 缓存）
+import * as MV2 from './memory-v2.mjs?v=vmvxt92lr'   // 艾宾浩斯遗忘曲线 + 情绪加权（?v= 用于打破 ESM 缓存）
 import * as ST from './style.mjs'   // 口气：标点规约 / 口语碎片 / 情绪→语气
 import * as H3 from './human3.mjs'   // 第三轮：情景示例/幽默三招/不重复/收尾日记/羁绊
 import * as OB from './outbox.mjs'   // 统一出站队列（节流/去重/重试退避）
 import * as H2 from './human2.mjs'   // 第二轮人性化：承诺/纠错/沉默/追话/联想/自己的事
-import * as PS from './persona.mjs?v=vmvxgvfr8'      // 性格四件套 + 自传（?v= 打破 ESM 缓存）
+import * as PS from './persona.mjs?v=vmvxt92lr'      // 性格四件套 + 自传（?v= 打破 ESM 缓存）
 import net from 'node:net'
 import { request as httpsRequest } from 'node:https'
 import { join, dirname } from 'node:path'
@@ -49,7 +49,7 @@ try {
 } catch { /* ignore */ }
 
 export const name = '@dsh-external/dsh-wechat-bot'
-export const version = '2.0.4'
+export const version = '2.0.5'
 // Cordis 4.0.4 的 inject 只认**数组**或"服务名→配置"映射；
 // 写成 { required, optional } 会让依赖解析失败、fiber 永远 pending（踩过：改了代码却一直跑旧实例）。
 // 这里只声明必然存在的两个服务；attachments（视觉识别用）改为**惰性获取**，
@@ -809,29 +809,107 @@ const BUILD_VER = '2026-10-23.4'   // 抬版本：让新实例压过热重载残
    * ★ 把服务端 stdout/stderr 落到 data\logs\tts-api.log —— 上次"进程活着但合成全 400"
    *   就是因为 stdio 丢掉，看不到 traceback，只能靠猜。
    */
+  /**
+   * 解析 python.exe：环境变量 → 常见安装位置（各盘符）→ PATH → 找不到返回 ''。
+   * 和 wx-bridge/lib/paths.mjs 同一套策略；插件里不能依赖桥的模块，所以这里自带一份。
+   */
+  function resolvePythonExe() {
+    const env = String(process.env.PYTHON_EXE || '').trim()
+    if (env && existsSync(env)) return env
+    const exts = ['', '.exe']
+    const cands = []
+    for (const drive of ['C', 'D', 'E', 'F']) {
+      for (const ver of ['311', '312', '313', '310']) {
+        for (const ext of exts) {
+          cands.push(`${drive}:\\Python${ver}\\python${ext}`)
+          cands.push(`${drive}:\\Program Files\\Python${ver}\\python${ext}`)
+        }
+        cands.push(`${drive}:\\Users\\${process.env.USERNAME || ''}\\AppData\\Local\\Programs\\Python\\Python${ver}\\python.exe`)
+      }
+    }
+    for (const p of cands) { try { if (p && existsSync(p)) return p } catch { /* ignore */ } }
+    try {
+      const which = execSync('where python', { encoding: 'utf8', timeout: 4000, windowsHide: true })
+      const first = String(which || '').split(/\r?\n/).map((x) => x.trim()).filter(Boolean)[0]
+      if (first && existsSync(first)) return first
+    } catch { /* 没有 python */ }
+    return ''
+  }
+
+  /** 解析 GPT-SoVITS 的 api_v2.py：配置 ttsApiPath → 环境变量 → 常见位置 */
+  function resolveTtsApiPy() {
+    const tried = []
+    const push = (p) => {
+      const v = String(p || '').trim()
+      if (!v) return ''
+      tried.push(v)
+      try { return existsSync(v) ? v : '' } catch { return '' }
+    }
+    let hit = push(config.ttsApiPath) || push(process.env.TTS_API_PY)
+    if (hit) return hit
+    const dataRoot = dirname(memoryDir)          // …\data\wechat-bot → 上一级的上一级通常是项目 data
+    const guesses = [
+      join(dataRoot, '..', 'GPT-SoVITS', 'api_v2.py'),
+      join(dataRoot, '..', 'data', 'GPT-SoVITS', 'api_v2.py'),
+      join(dataRoot, 'GPT-SoVITS', 'api_v2.py'),
+      'D:\\微信deepseek\\data\\GPT-SoVITS\\api_v2.py',
+    ]
+    for (const g of guesses) { hit = push(g); if (hit) return hit }
+    log('TTS：找不到 api_v2.py（试过：' + tried.join(' | ') + '）')
+    return ''
+  }
+
   function ttsSpawn() {
     const logDir = join(dirname(memoryDir), 'logs')
     try { mkdirSync(logDir, { recursive: true }) } catch { /* ignore */ }
     const outLog = join(logDir, 'tts-api.log')
     const errLog = join(logDir, 'tts-api.log.err')
+
+    // ★ 2026-11-01 事故：这里原来写死 'D:\Python311\python.exe'，
+    //   换台电脑（没有 D 盘 / Python 装在别处）时 spawn 立刻 ENOENT，
+    //   而 child 上**没有 error 监听** → 未捕获异常 → **整个 DSH 宿主崩掉**。
+    //   现在：① 路径统一解析 ② 先检查存在 ③ 一定挂 error 处理（只记日志，绝不外抛）
+    const py = resolvePythonExe()
+    const apiPy = resolveTtsApiPy()
+    if (!py) {
+      const msg = '找不到 Python（设 PYTHON_EXE 环境变量，或把 python 加到 PATH）→ TTS 不启动'
+      log('TTS：' + msg)
+      return { ok: false, error: msg }
+    }
+    if (!apiPy) {
+      const msg = '找不到 GPT-SoVITS 的 api_v2.py（设 ttsApiPath，或放在 data/GPT-SoVITS 下）→ TTS 不启动'
+      log('TTS：' + msg)
+      return { ok: false, error: msg }
+    }
+
+    let out = -1
+    let err = -1
     try {
-      const out = openSync(outLog, 'a')
-      const err = openSync(errLog, 'a')
-      const child = spawnCb(
-        'D:\\Python311\\python.exe',
-        ['D:\\微信deepseek\\data\\GPT-SoVITS\\api_v2.py'],
-        {
-          cwd: 'D:\\微信deepseek\\data\\GPT-SoVITS',
-          detached: true,
-          windowsHide: true,
-          stdio: ['ignore', out, err],
-        },
-      )
-      child.on('exit', (code) => { try { closeSync(out); closeSync(err) } catch { /* ignore */ } ; log('TTs api_v2 退出，code=' + code + '（看 data\\logs\\tts-api.log.err）') })
+      out = openSync(outLog, 'a')
+      err = openSync(errLog, 'a')
+      const child = spawnCb(py, [apiPy], {
+        cwd: dirname(apiPy),
+        detached: true,
+        windowsHide: true,
+        stdio: ['ignore', out, err],
+      })
+      // ★ 关键：没有这个监听，spawn 失败（ENOENT/EACCES）会以 uncaughtException 形式冒到宿主
+      child.on('error', (e) => {
+        try { closeSync(out); closeSync(err) } catch { /* ignore */ }
+        log('TTS 启动失败（' + py + '）：' + String(e?.message || e).slice(0, 160))
+      })
+      child.on('exit', (code) => {
+        try { closeSync(out); closeSync(err) } catch { /* ignore */ }
+        log('TTS api_v2 退出，code=' + code + '（看 data\\logs\\tts-api.log.err）')
+      })
       child.unref()
-      log('TTS api_v2 已启动（日志 → ' + outLog + '）')
-      return { ok: true, log: outLog }
-    } catch (e) { return { ok: false, error: String(e?.message || e).slice(0, 160) } }
+      log('TTS api_v2 已启动（python=' + py + '｜api=' + apiPy + '｜日志 → ' + outLog + '）')
+      return { ok: true, log: outLog, python: py, api: apiPy }
+    } catch (e) {
+      try { if (out >= 0) closeSync(out) } catch { /* ignore */ }
+      try { if (err >= 0) closeSync(err) } catch { /* ignore */ }
+      return { ok: false, error: String(e?.message || e).slice(0, 160) }
+    }
   }
 
   /** 停：杀进程并等它真的消失（异步，最多 8 秒）*/
@@ -8100,6 +8178,9 @@ ${cur.text}`
                    '--data-dir=' + join(base, 'data'), '--wechat=' + (process.env.WECHAT_EXE || (detectWechatDir() ? join(detectWechatDir(), 'Weixin.exe') : ''))]
               const { spawn } = await import('node:child_process')
               const child = spawn(process.execPath, argv, { cwd: bridgeDir, detached: true, stdio: 'ignore', windowsHide: true })
+              // ★ 2026-11-01：任何 spawn 都必须挂 error，否则 ENOENT/EACCES 会变成
+              //   未捕获异常 → 整个 DSH 宿主崩掉（TTS 那次就是这么崩的）。
+              child.on('error', (e) => log('启动桥失败：' + String(e?.message || e).slice(0, 140)))
               child.unref()
               // 等它真的监听上
               let up = false
@@ -9091,6 +9172,13 @@ ${cur.text}`
   startHuman2Timer()    // 人性化②：承诺兑现 + 自己的事
   // 群名缓存：等 hook/微信稍就绪再拉一次（失败也不影响启动，面板请求时会重试）
   track(setTimeout(() => { void refreshNameCaches() }, 5000))
+  // ★ 2026-11-01：把 TTS 依赖解析结果打出来（换台电脑时一眼看出缺什么，
+  //   而不是等 spawn ENOENT 把 DSH 带崩才发现）
+  try {
+    const _py = resolvePythonExe()
+    const _api = resolveTtsApiPy()
+    log('TTS 依赖：python=' + (_py || '（未找到，设 PYTHON_EXE）') + '｜api_v2=' + (_api || '（未找到，设 ttsApiPath）'))
+  } catch { /* ignore */ }
   log(`插件已启动｜bridge=${config.bridgeUrl}｜昵称=${config.botName}｜闲聊概率=${config.replyProbability}｜安静时段=${config.quietHours || 'off'}｜记忆目录=${memoryDir}`)
   // ★ 2026-10-28：吃过"ESM 缓存导致用旧模块"的亏（PS.shouldWriteNarrative is not a function）。
   //   启动时直接检查关键导出，缺了立刻在日志里喊出来。
