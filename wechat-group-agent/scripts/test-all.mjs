@@ -18,7 +18,7 @@
  *   node scripts/test-all.mjs --fast     # 跳过端到端与出站队列（省时间）
  */
 import { execFileSync } from 'node:child_process'
-import { existsSync, readdirSync, readFileSync } from 'node:fs'
+import { existsSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -69,6 +69,18 @@ run('语法检查', () => {
 })
 
 // ② 作用域检查（专防"引用别处变量"）
+// ①b 面板内联 JS 语法：把内联 <script> 抠出来交给 node --check
+//    （以前只查 lib/client.js；index.html 里手写的脚本出语法错只能等浏览器报错）
+run('面板内联 JS', () => {
+  const html = readFileSync(join(PLUGIN, 'panel/index.html'), 'utf8')
+  const scripts = [...html.matchAll(/<script(?![^>]*src=)[^>]*>([\s\S]*?)<\/script>/g)].map((m) => m[1])
+  if (!scripts.length) throw new Error('index.html 里没有内联 script')
+  const tmp = join(DATA, '_panel-inline.cjs')
+  writeFileSync(tmp, scripts.map((c, i) => `/* inline ${i} */\n${c}`).join('\n;\n'))
+  execFileSync(process.execPath, ['--check', tmp], { stdio: ['ignore', 'pipe', 'pipe'] })
+  return `${scripts.length} 段通过`
+})
+
 run('提示词作用域', () => sh(process.execPath, [join(HERE, 'check-prompt-scope.mjs')]))
 
 // ③ 面板操作白名单

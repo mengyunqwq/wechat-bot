@@ -16,12 +16,14 @@
  */
 import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, unlinkSync, writeFileSync, copyFileSync, rmSync, openSync, closeSync } from 'node:fs'
 import { execFileSync, execSync, exec as execCb, spawn as spawnCb } from 'node:child_process'
-import * as MV2 from './memory-v2.mjs?v=vmvxt92lr'   // 艾宾浩斯遗忘曲线 + 情绪加权（?v= 用于打破 ESM 缓存）
+import * as MV2 from './memory-v2.mjs?v=vmvytqnwe'   // 艾宾浩斯遗忘曲线 + 情绪加权（?v= 用于打破 ESM 缓存）
 import * as ST from './style.mjs'   // 口气：标点规约 / 口语碎片 / 情绪→语气
+import * as ASTRO from './astro.mjs'   // 星盘（人际关系×记忆×性格）
+import * as SOCIAL from './social.mjs'  // 人-人关系（对话共现/同群/同话题/同框）
 import * as H3 from './human3.mjs'   // 第三轮：情景示例/幽默三招/不重复/收尾日记/羁绊
 import * as OB from './outbox.mjs'   // 统一出站队列（节流/去重/重试退避）
 import * as H2 from './human2.mjs'   // 第二轮人性化：承诺/纠错/沉默/追话/联想/自己的事
-import * as PS from './persona.mjs?v=vmvxt92lr'      // 性格四件套 + 自传（?v= 打破 ESM 缓存）
+import * as PS from './persona.mjs?v=vmvytqnwe'      // 性格四件套 + 自传（?v= 打破 ESM 缓存）
 import net from 'node:net'
 import { request as httpsRequest } from 'node:https'
 import { join, dirname } from 'node:path'
@@ -49,7 +51,7 @@ try {
 } catch { /* ignore */ }
 
 export const name = '@dsh-external/dsh-wechat-bot'
-export const version = '2.0.5'
+export const version = '2.0.6'
 // Cordis 4.0.4 的 inject 只认**数组**或"服务名→配置"映射；
 // 写成 { required, optional } 会让依赖解析失败、fiber 永远 pending（踩过：改了代码却一直跑旧实例）。
 // 这里只声明必然存在的两个服务；attachments（视觉识别用）改为**惰性获取**，
@@ -8490,6 +8492,85 @@ ${cur.text}`
       case 'persona.selfReview': {
         const r = globalHostRoom()
         return await selfReview(r, { force: true })
+      }
+      case 'persona.astro': {
+        // 星盘数据：人际关系 × 记忆关联 × 性格（2026-11-02 加人-人关系）
+        const room0 = globalHostRoom()
+        const rv = panelRoomView(room0)
+        const st = personaOf(rv)
+        let facts = []
+        try { facts = JSON.parse(readFileSync(globalFactsPath, 'utf8')) || [] } catch { facts = [] }
+        facts = facts.filter((f) => f && !f.archived)
+        // 人名来源（按可靠度）：config.memberNames → contactNameCache → 各房间历史里的 senderName
+        const nameMap = new Map()
+        for (const [id, nm] of Object.entries(config.memberNames || {})) if (nm) nameMap.set(id, String(nm))
+        try { for (const [id, nm] of contactNameCache.entries()) if (nm && !nameMap.has(id)) nameMap.set(id, String(nm)) } catch { /* ignore */ }
+        for (const rr of rooms.values()) {
+          for (const m of (rr.msgs || []).slice(-200)) {
+            if (!m || m.isSelf || !m.sender) continue
+            const nm = String(m.senderName || '')
+            if (nm && !/^wxid_/i.test(nm) && !nameMap.has(m.sender)) nameMap.set(m.sender, nm)
+          }
+        }
+        // ★ 2026-11-02：没有名字的人不要拿 wxid 当显示名（用户要求"只显示名称）
+        const hashId = (id) => {
+          let h = 2166136261
+          for (let i = 0; i < String(id).length; i++) { h ^= String(id).charCodeAt(i); h = Math.imul(h, 16777619) }
+          return (h >>> 0) % 90 + 10
+        }
+        const list = [...nameMap.entries()].map(([id, name]) => {
+          const nm = String(name || '').trim()
+          const clean = nm && !/^wxid_/i.test(nm) && !nm.includes('@chatroom') ? nm : ''
+          return { id, name: clean || ('群友' + hashId(id)) }
+        })
+        // 人-人关系：缓存 30 分钟（要查群成员 + 消息历史，别每次开面板都打库）
+        let social = null
+        try {
+          // ★ 放在 facts 的**上一级**：facts 目录里的 json 会被记忆迁移测试当成记忆文件
+          const cachePath = join(dirname(dirname(globalFactsPath)), 'social-cache.json')
+          try {
+            const raw = JSON.parse(readFileSync(cachePath, 'utf8'))
+            if (raw && raw.at && Date.now() - raw.at < 30 * 60_000) social = raw
+          } catch { /* 没缓存 */ }
+          if (!social) {
+            const realRooms = [...rooms.values()].filter((r2) => r2 && r2.roomId && !String(r2.roomId).startsWith('_'))
+            const roomMembers = {}
+            const talkAcc = new Map()
+            for (const r2 of realRooms.slice(0, 4)) {
+              try {
+                const mm = await client.call('members', { roomId: r2.roomId }, 20_000)
+                const ids = ((mm && mm.members) || []).map((x) => String(x.wxid || '')).filter(Boolean)
+                if (ids.length) roomMembers[r2.roomId] = ids
+              } catch { /* 单群失败不影响 */ }
+              try {
+                const h = await client.call('searchMessages', { roomId: r2.roomId, query: '', limit: 600, scan: 1500 }, 30_000)
+                const msgs = ((h && h.items) || [])
+                  .filter((x) => x && !x.isSelf && x.sender && x.ts)
+                  .map((x) => ({ sender: String(x.sender), ts: Number(x.ts) }))
+                for (const p of SOCIAL.talkPairs(msgs)) {
+                  const k = [p.a, p.b].sort().join('|')
+                  talkAcc.set(k, (talkAcc.get(k) || 0) + p.n)
+                }
+              } catch { /* ignore */ }
+            }
+            const talkPairs = [...talkAcc.entries()].map(([k, n]) => { const [x, y] = k.split('|'); return { a: x, b: y, n } })
+            social = { at: Date.now(), roomMembers, talkPairs }
+            try { writeFileSync(cachePath, JSON.stringify(social)) } catch { /* ignore */ }
+            log(`星盘关系：${Object.keys(roomMembers).length} 个群 / ${talkPairs.length} 对"聊过"`)
+          }
+        } catch (e) {
+          log('星盘关系采集失败（不影响主图）：' + String(e?.message || e).slice(0, 80))
+        }
+        const chart = ASTRO.buildChartWithLayout({
+          persona: st,
+          facts,
+          people: list,
+          now: Date.now(),
+          retentionFn: (f, t) => { try { return MV2.retention(f, t) } catch { return 0.7 } },
+          selfName: String(config.botName || '蓝色大肥鱼'),
+          social,
+        })
+        return { ok: true, ...chart, at: Date.now() }
       }
       case 'persona.addTerm': {
         const w = String(args.term || args.text || '').trim()

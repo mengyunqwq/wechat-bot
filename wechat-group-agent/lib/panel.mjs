@@ -40,6 +40,7 @@ const ALLOWED_OPS = new Set([
   'persona.state', 'persona.diaryWrite', 'persona.tasteAdd', 'persona.tasteRemove', 'persona.goalReroll',   // ★ 性格四件套
   'persona.narrativeWrite', 'persona.narrativeRestore',   // ★ 自传（她自己写人设）
   'persona.traits', 'persona.traitsReset', 'persona.load',   // ★ 方案⑥ 反馈驱动漂移 + 精力负荷
+  'persona.astro',        // ★ 星盘数据
   'persona.selfReview',   // ★ G 自我复盘
   'persona.settleNow',    // ★ 反馈队列立即结算
   'outbox.stats',          // ★ 出站队列状态
