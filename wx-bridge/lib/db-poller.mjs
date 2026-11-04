@@ -281,7 +281,37 @@ export class DbPoller {
     }
   }
 
+  /**
+   * 自己的令牌桶（2026-11-04 事故后的兜底）。
+   *
+   * hook 的 conn_lock 在微信 4.x 上是失效的（sqlite3_vfs_find(NULL) 返回 0，
+   * 因为微信只注册了具名 VFS）→ 我们的每条 SQL 都**不和客户端排队**。
+   * 一旦查询量上来（比如语音解码风暴），就会把微信自己的读请求挤掉，
+   * 表现是客户端聊天界面刷不出来。
+   *
+   * 既然拿不到互斥，就自己限速：默认 12 次/秒、突发 24 次，超了就排队。
+   * 可用 WECHAT_DB_QPS 调。
+   */
+  async _dbGate() {
+    if (!this._gate) {
+      const qps = Math.max(2, Number(process.env.WECHAT_DB_QPS) || 12)
+      this._gate = { qps, tokens: qps, last: Date.now(), waiting: 0, peak: 0 }
+    }
+    const g = this._gate
+    for (;;) {
+      const now = Date.now()
+      g.tokens = Math.min(g.qps * 2, g.tokens + ((now - g.last) / 1000) * g.qps)
+      g.last = now
+      if (g.tokens >= 1) { g.tokens -= 1; return }
+      g.waiting++
+      if (g.waiting > g.peak) g.peak = g.waiting
+      await new Promise((r) => setTimeout(r, Math.ceil((1 - g.tokens) / g.qps * 1000)))
+      g.waiting--
+    }
+  }
+
   async q(db, sql, timeout = 20000) {
+    await this._dbGate()
     // ── 分片自动发现 ────────────────────────────────────────────────
     // ⚠️ 实测坑：微信的消息库是【分片】的（message_0.db / message_1.db / …）。
     //    哪个分片存在取决于微信自己（我们把 message_0.db 删掉后，它就把消息写到 message_1.db 了）。
@@ -415,7 +445,7 @@ export class DbPoller {
     //    首次启动（还没跑过一轮）不回补，避免把整段历史当新消息重放。
     const prevTables = this.tables instanceof Map ? new Map(this.tables) : new Map()
     const hadTablesBefore = this._hadTablesOnce === true
-    const NEW_TABLE_BACKFILL = 30
+    const NEW_TABLE_BACKFILL = 5
 
     this.tables.clear()
     let unknown = 0
@@ -653,8 +683,14 @@ export class DbPoller {
       this._noteReadOk()            // 读到了（哪怕 0 条）就是健康证据
       if (!rows.length) return 0
       let got = 0
+      this._seenRows = this._seenRows || new Set()
       for (const row of rows) {
         info.lastId = Math.max(Number(info.lastId) || 0, Number(row.local_id || 0))
+        // ★ 2026-11-04：同一条消息只处理一次（重扫/双通道会造成重复解码语音、重复回复）
+        const skey = `${table}:${row.local_id}`
+        if (this._seenRows.has(skey)) continue
+        if (this._seenRows.size > 6000) this._seenRows.clear()
+        this._seenRows.add(skey)
         const m = this.toEvent(table, info, row)
         if (m) {
           // 语音（34）：音频是磁盘文件，先旁路定位+解码成 16k WAV（失败只记日志）
@@ -746,6 +782,21 @@ export class DbPoller {
   async enrichVoice(m) {
     if (!m || Number(m.type) !== 34) return m
     if (!voiceEnabled()) return m
+    // ★ 2026-11-04 事故：重扫会"回补"新会话表，把历史消息再走一遍 →
+    //   每条语音都要查库 blob + 起 Python 解码，实测 1 分钟 145 次，
+    //   把微信自己的库读请求挤掉（客户端聊天界面都不显示）。
+    //   两道闸：① 超过 30 分钟的老消息不解码 ② 同一条（房间+localId）只解一次
+    const ageMs = Date.now() - (Number(m.ts) || 0)
+    if (ageMs > 30 * 60_000) {
+      this._voiceSkippedOld = (this._voiceSkippedOld || 0) + 1
+      if (this._voiceSkippedOld % 50 === 1) this.log(`语音：跳过老消息（${Math.round(ageMs / 60000)} 分钟前）不解码，累计 ${this._voiceSkippedOld} 条`)
+      return m
+    }
+    const vkey = `${m.roomId || ''}|${m.localId || m.id}`
+    this._voiceDone = this._voiceDone || new Set()
+    if (this._voiceDone.has(vkey)) return m
+    if (this._voiceDone.size > 4000) this._voiceDone.clear()
+    this._voiceDone.add(vkey)
     const tag = `voice-${m.id || 'noid'}-${m.ts || 0}`
     try {
       // ── ① 主路：media_0.db / VoiceInfo.voice_data（用 local_id 关联消息）──
@@ -797,6 +848,20 @@ export class DbPoller {
    *
    * @returns {Buffer|null} 取不到返回 null（调用方降级）
    */
+  /** DB 限速统计（面板/诊断用） */
+  gateStats() {
+    const g = this._gate
+    return g ? { qps: g.qps, peakWaiting: g.peak } : { qps: 0, peakWaiting: 0 }
+  }
+
+  /** 语音解码统计（面板/诊断用） */
+  voiceStats() {
+    return {
+      skippedOld: this._voiceSkippedOld || 0,
+      decodedUnique: (this._voiceDone && this._voiceDone.size) || 0,
+    }
+  }
+
   async fetchVoiceBlob(localId, roomId) {
     const lid = Number(localId) || 0
     if (!lid) return null

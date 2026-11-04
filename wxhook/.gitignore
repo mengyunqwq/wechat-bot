@@ -1,0 +1,24 @@
+# 构建产物
+x64/
+Debug/
+Release/
+*.dll
+*.lib
+*.exp
+*.pdb
+*.ilk
+
+# 本地备份 / 日志
+*.bak*
+*.log
+hook-*.on
+hook-*.on.disabled
+hook-*.disabled
+
+# Python
+__pycache__/
+*.pyc
+
+# 其它
+.vs/
+*.user

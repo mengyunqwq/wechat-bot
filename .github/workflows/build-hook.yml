@@ -1,0 +1,52 @@
+name: Build WeChat hook (version.dll)
+
+# 用户不需要装 VS：点 Actions → 最新一次运行 → 下载 artifact 就是编译好的 version.dll
+on:
+  push:
+    paths:
+      - 'wxhook/**'
+      - '.github/workflows/build-hook.yml'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 显示工具链
+        shell: pwsh
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          & $vswhere -latest -products * -format value -property installationPath
+
+      - name: 编译（Release x64）
+        shell: pwsh
+        run: |
+          $root = Join-Path $env:GITHUB_WORKSPACE 'wxhook'
+          Set-Location $root
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $msbuild = & $vswhere -latest -products * -requires Microsoft.Component.MSBuild -find "MSBuild\**\Bin\MSBuild.exe" | Select-Object -First 1
+          if (-not $msbuild) { throw '找不到 MSBuild' }
+          Write-Host "MSBuild: $msbuild"
+          & $msbuild 'x64_Version_dll.sln' /p:Configuration=Release /p:Platform=x64 /m /v:m /nologo
+          if ($LASTEXITCODE -ne 0) { throw "编译失败（exit $LASTEXITCODE）" }
+
+      - name: 校验产物
+        shell: pwsh
+        run: |
+          $dll = Join-Path $env:GITHUB_WORKSPACE 'wxhook\x64\Release\version.dll'
+          if (-not (Test-Path $dll)) { throw "没找到产物: $dll" }
+          $item = Get-Item $dll
+          $sha = (Get-FileHash $dll -Algorithm SHA256).Hash.ToLower()
+          Write-Host ("产物: " + $item.FullName)
+          Write-Host ("大小: " + [Math]::Round($item.Length/1KB,0) + "KB")
+          Write-Host ("SHA256: " + $sha)
+          "SHA256=$sha" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+          "大小=$([Math]::Round($item.Length/1KB,0))KB" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: version.dll-win-x64
+          path: wxhook/x64/Release/version.dll
+          if-no-files-found: error
