@@ -1,7 +1,8 @@
 # AI 一键部署（把本文档喂给 AI，让它替你装好）
 
 > 面向对象：**AI agent**（豆包电脑版 / Claude Desktop / Cursor / Cline / DSH / 任何能读写本机文件、能跑命令的 AI）。
-> 配套版本：**v1.4.12**（`version.json` 与插件 `export const version` 必须一致；本文的事实全部按 v1.4.12 核对）。
+> 配套版本：**v2.0.7**（`version.json` 与插件 `export const version` 必须一致），hook **1.2.0**；
+> 本文的版本号与页数已在 2.0.7 重新核对，其余事实（路径、命令、接口）沿用 v1.4.12 时逐条实测的结论。
 > 人类读者请直接看 [第 7 节「装好之后怎么用」](#7-装好之后怎么用给人类看的)。
 ---
 ## 1. 这份文档怎么用
@@ -260,7 +261,7 @@ AI 拿到这段指令后会自己：查环境 → 装依赖 → 复制独立微�
     c. 保持 hosted.enabled = false（config.json 与 data/bridge-config.json 两处都别开）。
     d. 验证：调工具 wechat_bot_selfcheck，期望"桥连接 ✅ / 微信登录 ✅ / hook 存活 ✅ /
        数据库可读 ✅ / 消息轮询 ✅"。
-    ⚠️ 注意（v1.4.12 核对）：scripts/build.sh 与 lib/test-policy.mjs **都在仓库里**，
+    ⚠️ 注意（2.0.7 复核）：编译入口是 **wxhook/scripts/build.ps1**（旧的 scripts/build.sh 已移除），lib/test-policy.mjs **在仓库里**，
        但它是纯 ESM 插件、lib/ 即产物、**无需编译**，所以直接注入即可，不必跑 build.sh。
     ⚠️ 改了插件代码后：面板「热重载插件」**只做预检**（插件无法安全替换自身，见 R17），
        必须**重启 DSH** 才生效。旧版本（1.4.10/1.4.11）点它会面板 404，别用。
@@ -643,7 +644,7 @@ Get-Process Weixin | Where-Object { $_.Path -eq 'D:\wxhook\wx4110\Weixin.exe' } 
 6. **注意隐私。** 机器人会读取群消息、解密群图片、把内容发给大模型。
    不要在包含敏感信息的群里使用，也不要让不认识的人进那个群。
 7. **本项目不含任何微信账号、密钥、聊天数据。** 所有配置都需要你自己填写。
-## 10. 已知的文档 / 代码不一致（部署前必读，v1.4.12 已逐条核对）
+## 10. 已知的文档 / 代码不一致（部署前必读；v1.4.12 逐条核对，2.0.7 复核版本号与页数）
 
 > 上一版这里列了「仓库缺 `wcf.mjs` / `wxhelper.mjs`」「缺 `scripts/build.sh` / `lib/test-policy.mjs`」
 > —— **这几条已经不成立了**：文件都在仓库里且被 git 跟踪。下表只保留现在仍然成立的。

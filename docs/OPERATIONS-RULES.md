@@ -309,6 +309,13 @@ if (ROOM !== 'filehelper') { console.error('❌ 只能发文件传输助手'); p
 不是 `{ id, op, args: {...} }`。写调试脚本时传错，参数全变 undefined，
 表现为"文本为空 / 用了默认值"（我今天就踩了：语音报"文本为空"，刷抖音 count 传 2 却刷了 8 条）。
 
+### R20 — 不许只靠「看起来对」就宣布完成
+
+> 完整条文在 [../wechat-group-agent/DEVELOPMENT-RULES.md](../wechat-group-agent/DEVELOPMENT-RULES.md) 的 R20，这里只放摘要，避免两份文档编号断档。
+
+凡是改动涉及**提示词拼装**（buildSystem / 记忆注入 / 语气块）、**发送路径**（出站队列 / 语音 / 表情 / 图片）、**面板操作**（新增 op / 改 HTML），
+必须给出一条**可复现的验证**（日志行 / 测试断言 / 面板可点），并把验证结果贴出来。
+
 ### R21 — 单元测试必须无副作用（R19 的前置红线）
 
 **2026-10-29 真实事故**：`data/test-sendvoice.mjs` 是很久以前的手工探针，里面直接 POST hook 的
