@@ -23,7 +23,7 @@ from Crypto.Cipher import AES
 from Crypto.Util import Padding
 
 HOOK = 'http://127.0.0.1:30001/QueryDB/execute'
-ATTACH = r'D:\Users\Administrator\xwechat_files\wxid_3odtthhn7u5t22_7886\msg\attach'
+ATTACH = r'D:\Users\Administrator\xwechat_files\wxid_SELF_7886\msg\attach'
 OUT = r'D:\decode-test'
 V2_MAGIC = b'\x07\x08V2\x08\x07'
 

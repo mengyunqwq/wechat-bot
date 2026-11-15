@@ -28,7 +28,8 @@ export const GROUPS = [
   { id: 'link', title: '链接视频', icon: '🔗', desc: '分享的抖音/B站/小红书链接' },
   { id: 'douyin', title: '抖音', icon: '🎵', desc: '只读刷推荐，挑一条分享' },
   { id: 'voiceIn', title: '语音识别（听）', icon: '🎧', desc: '群里语音 → 文字' },
-  { id: 'voiceOut', title: '语音发送（说）', icon: '🎙', desc: '把回复合成微信语音气泡' },
+  { id: 'voiceOut', title: '语音发送（说）', icon: '🎙', desc: '把回复合成微信语音气泡（Breeze 云端）' },
+  { id: 'meme', title: '梗百科', icon: '📚', desc: '6792 条网络梗词库，群里冒生词不硬猜' },
   { id: 'memory', title: '记忆与检索', icon: '🧠', desc: '上下文、长期记忆、历史查询' },
   { id: 'identity', title: '群与人', icon: '👥', desc: '群白名单、昵称、成员名字' },
   { id: 'model', title: '人设与模型', icon: '🐟', desc: '人格、模型、温度、长度' },
@@ -44,6 +45,18 @@ export const CONFIG_META = {
   replyProbability: {
     group: 'reply', label: '闲聊插话概率', type: 'number', min: 0, max: 1, step: 0.01,
     help: '没被叫到时主动插话的概率。越低越"潜水"，0.8 = 很爱插话。',
+  },
+  replyJudge: {
+    group: 'reply', label: '说话前先判定', type: 'bool',
+    help: '开：先让便宜模型给这条消息打 0-10 分，低于阈值就闭嘴（该说时说、不该说时不说）。关：按概率决定。',
+  },
+  replyJudgeMinScore: {
+    group: 'reply', label: '判定及格分', type: 'number', min: 0, max: 10, step: 1, unit: '分',
+    help: '低于这个分就不接话。5 = 平衡；7 = 只在明显冲她来/有趣时才说；3 = 几乎都接。',
+  },
+  replyJudgeModel: {
+    group: 'reply', label: '判定用模型', type: 'text', advanced: true,
+    help: '留空 = 跟随主模型。建议填便宜的快模型（判定只输出 8 个 token，但要快）。',
   },
   minReplyGapMs: {
     group: 'reply', label: '同群最小回复间隔', type: 'number', min: 0, max: 600000, step: 500, unit: 'ms',
@@ -398,6 +411,63 @@ export const CONFIG_META = {
   },
 
   // ── 语音发送 ────────────────────────────────────────────────
+  voiceBackend: {
+    group: 'voiceOut', label: '语音合成后端', type: 'select',
+    options: [['breeze-cloud', 'Breeze 云端（约 3 秒出音，不占显存，推荐）']],
+    help: 'Breeze 音质明显更好但慢很多；它常驻 CPU 内存、合成时才上显卡，空闲自动释放显存。'
+        + '（原 GPT-SoVITS 后端已废弃：训练权重 2026-11-14 已删除，选了也没声音）',
+  },
+  voiceCloudVoice: {
+    group: 'voiceOut', label: '云端音色', type: 'select',
+    options: [['voc_rn489h83rcvs', '大肥鱼·偶像版'],
+              ['voc_8yud7hz7c9q2', '大肥鱼·迷糊版'],
+              ['voc_u3nxkd5578wc', '大肥鱼·机灵版']],
+    help: 'BreezeBlue 控制台里已经建好的三个她的音色。换音色只影响新合成的语音。',
+  },
+  memeWiki: {
+    group: 'meme', label: '启用梗百科', type: 'bool',
+    help: '群里出现不懂的梗（「yyds是什么意思」「这个显眼包」）时，'
+        + '先查本地 6792 条词库，命中就把词条塞进她的上下文——先接梗，不硬编。'
+        + '查不到就不注入，她会老实说不知道。',
+  },
+  memeWikiBare: {
+    group: 'meme', label: '短词也查', type: 'bool',
+    help: '群里只丢一个短词（≤8 字、无标点）也去查。关掉则只查「X是什么意思」这类明确问法。',
+  },
+  memeWikiMaxChars: {
+    group: 'meme', label: '单条注入字数上限', type: 'number', min: 80, max: 600, step: 20, unit: '字',
+    help: '词条太长会挤掉记忆和聊天上下文，默认 260 字够用。',
+  },
+  memeWikiBlocklist: {
+    group: 'meme', label: '屏蔽词（语义不符）', type: 'text',
+    help: '逗号分隔。词库里有些条目语义和她的口癖冲突（如「杂鱼」在库里是健身梗），'
+        + '命中这些词直接丢弃，避免解释错。',
+  },
+  memeWikiDb: {
+    group: 'meme', label: '词库路径', type: 'text', advanced: true,
+    help: 'dsh-memewiki 的 SQLite 词库（只读）。注意必须用正斜杠 /，node:sqlite 不认反斜杠。',
+  },
+  voiceStyle: {
+    group: 'voiceOut', label: '语气风格（style）', type: 'textarea',
+    help: '自然语言描述说话方式。官方建议"描述情境+意图+表达"，比堆形容词有效。'
+        + '当前是雌小鬼味（居高临下嘲讽、尾音上挑）。改成"成熟御姐、低沉有磁性"就换风格。',
+  },
+  voiceSpeed: {
+    group: 'voiceOut', label: '语速倍率', type: 'number', min: 0.5, max: 2, step: 0.05,
+    help: '1=正常，>1 更快。雌小鬼用 1.05 略快更活泼。',
+  },
+  voiceGuidanceScale: {
+    group: 'voiceOut', label: '贴合度（guidance_scale）', type: 'number', min: 1, max: 10, step: 1,
+    help: '4=严守风格描述；调低（1~2）更松散自然、更像真人随意说话。',
+  },
+  voiceFillerChance: {
+    group: 'voiceOut', label: '语气词概率', type: 'number', min: 0, max: 1, step: 0.05,
+    help: '有多少比例的语音会在开头加 [哼]/[笑]/[叹气] 这类真人语气词。0=不加。',
+  },
+  voiceFillers: {
+    group: 'voiceOut', label: '语气词列表', type: 'text',
+    help: '逗号分隔，写进正文开头。目前实测有效：[哼] [笑] [叹气] [鼻音] [清嗓子]。',
+  },
   voiceSay: {
     group: 'voiceOut', label: '可以发微信语音气泡', type: 'bool', risk: 'warn',
     help: '需要 hook 侧语音发送开关打开（面板会显示状态）。关着时自动降级发文字。',

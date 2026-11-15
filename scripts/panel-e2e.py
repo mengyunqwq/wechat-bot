@@ -144,7 +144,7 @@ async def main():
         await page.click('a[data-tab="manual"]')
         await page.wait_for_timeout(1200)
         try:
-            await page.select_option('#q-room', '47390425951@chatroom')
+            await page.select_option('#q-room', '10000000002@chatroom')
             await page.click('#btn-search')
             await page.wait_for_timeout(3000)
             print("search result:", (await page.inner_text('#q-result'))[:220].replace("\n", " | "))

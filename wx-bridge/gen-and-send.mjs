@@ -4,7 +4,7 @@
  */
 import WebSocket from 'ws'
 
-const roomId = process.argv[2] || '47390425951@chatroom'
+const roomId = process.argv[2] || '10000000002@chatroom'
 const SPECS = [
   { emotion: '大笑', extra: '抱着奶茶笑得直不起腰，奶茶差点洒出来' },
   { emotion: '困', extra: '趴在键盘上睡着了，脸上压出键盘印' },

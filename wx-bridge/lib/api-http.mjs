@@ -192,6 +192,31 @@ export function createApiHandler({ handle, rooms, log, bridge, counters, started
         return sendJson(res, 200, await handle('pollStatus', {}))
       }
 
+      // ── hook 代理（2026-11-12）───────────────────────────────────
+      // 背景：插件原本直连 hook:30001 发朋友圈，但那个 HTTP 服务端在
+      //   微信 4.1.10.27 上 accept 不可靠（fd_set 64 项限制），插件会一直失败。
+      //   这里把 hook 的端点统一代理到"单据通道"，插件只需要改 base URL。
+      //   - /api/hook/Moment/Ready          (GET)
+      //   - /api/hook/Moment/PostSilent     (POST)
+      //   - /api/hook/<任意路径>
+      if (path.startsWith('/api/hook/')) {
+        const hookPath = '/' + path.slice('/api/hook/'.length)
+        // ★ 注意：arg() 默认返回 ''（不是 undefined），所以不能写 `!== undefined` 判断。
+        //   规则：显式给了 body / data 就用它；否则**把整个请求体原样透传**
+        //   （这样插件可以照抄 hook 的原始字段，如 {"optDbName":"x","SQL":"y"}）。
+        let hookBody
+        if (body && typeof body === 'object' && body.body !== undefined) hookBody = body.body
+        else if (body && typeof body === 'object' && body.data !== undefined) hookBody = body.data
+        else hookBody = body && typeof body === 'object' ? body : {}
+        const method = String((body && body.method) || (hookPath.includes('/Ready') ? 'GET' : 'POST')).toUpperCase()
+        try {
+          const out = await handle('hookProxy', { path: hookPath, method, body: hookBody })
+          return sendJson(res, 200, out)
+        } catch (e) {
+          return sendJson(res, 200, { ok: false, error: String(e?.message || e).slice(0, 300) })
+        }
+      }
+
       return sendJson(res, 404, { error: '未知接口：' + path, hint: '见 PROTOCOL.md' })
     } catch (e) {
       const msg = String(e?.message || e)

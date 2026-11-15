@@ -9,7 +9,7 @@ ws.on('message', (data) => {
   console.log('recv:', JSON.stringify(m).slice(0, 150));
   if (m.id === '1') {
     // args 在顶层
-    ws.send(JSON.stringify({ id: '2', op: 'sayVoice', roomId: '47390425951@chatroom', text: '你好呀，我是鲸鱼娘，今天也要好好吃饭哦', emotion: 'main' }));
+    ws.send(JSON.stringify({ id: '2', op: 'sayVoice', roomId: '10000000002@chatroom', text: '你好呀，我是鲸鱼娘，今天也要好好吃饭哦', emotion: 'main' }));
   } else if (m.id === '2') {
     clearTimeout(timeout);
     process.exit(0);

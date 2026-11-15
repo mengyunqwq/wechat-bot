@@ -9,7 +9,7 @@ ws.on('message', (data) => {
   const m = JSON.parse(data.toString());
   if (m.op === 'identify' && !identified) {
     identified = true;
-    ws.send(JSON.stringify({ id: '2', op: 'sayVoice', args: { roomId: '47390425951@chatroom', text: '你好呀，我是鲸鱼娘，今天也要好好吃饭哦', emotion: 'main' } }));
+    ws.send(JSON.stringify({ id: '2', op: 'sayVoice', args: { roomId: '10000000002@chatroom', text: '你好呀，我是鲸鱼娘，今天也要好好吃饭哦', emotion: 'main' } }));
   } else if (m.id === '2') {
     console.log('sayVoice:', JSON.stringify(m));
     clearTimeout(timeout);

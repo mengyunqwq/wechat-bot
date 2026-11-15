@@ -11,7 +11,7 @@ const call = (op, a = {}) => new Promise((res, rej) => {
 })
 
 ws.on('open', async () => {
-  for (const room of ['48684538221@chatroom', '47390425951@chatroom', '45701312872@chatroom']) {
+  for (const room of ['10000000001@chatroom', '10000000002@chatroom', '10000000003@chatroom']) {
     try {
       const r = await call('searchMessages', { roomId: room, query: '', limit: 240, scan: 800 })
       const items = (r && r.items) || []

@@ -378,7 +378,7 @@ void Route_SendMoment(httplib::Server& svr)
                 variant = reqJson["variant"].get<int>();
 
             std::string diag = "{}";
-            std::string wxid = reqJson.value("wxid", "wxid_3odtthhn7u5t22");
+            std::string wxid = reqJson.value("wxid", "wxid_SELF");
             int ret = WeixinMoment::SendMoment(text, stage, &diag, variant, wxid);
 
             resp["ret"] = ret;
@@ -1167,7 +1167,7 @@ void Route_SendMomentUi(httplib::Server& svr)
             json body;
             try { body = json::parse(req.body); } catch (...) { body = json::object(); }
             std::string text = body.value("text", "");
-            std::string wxid = body.value("wxid", "wxid_3odtthhn7u5t22");
+            std::string wxid = body.value("wxid", "wxid_SELF");
 
             std::string xml = BuildMomentXml(text, wxid, false);
             std::string diag = "{}";

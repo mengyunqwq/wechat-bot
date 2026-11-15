@@ -66,10 +66,10 @@ out.rooms = { status: r.status, ok: r.json?.ok, count: Array.isArray(r.json?.res
 r = await call('/wechat-bot/api/action', { method: 'POST', body: JSON.stringify({ op: 'stickers', args: { limit: 3 } }) })
 out.stickers = { status: r.status, ok: r.json?.ok, count: r.json?.result?.stats?.count, items: r.json?.result?.items?.length }
 
-r = await call('/wechat-bot/api/action', { method: 'POST', body: JSON.stringify({ op: 'searchMessages', args: { room: '47390425951@chatroom', query: '', limit: 5 } }) })
+r = await call('/wechat-bot/api/action', { method: 'POST', body: JSON.stringify({ op: 'searchMessages', args: { room: '10000000002@chatroom', query: '', limit: 5 } }) })
 out.senders = (r.json?.result?.items || []).map((x) => ({ sender: x.sender, senderName: x.senderName, text: String(x.text || '').slice(0, 20) }))
 
-r = await call('/wechat-bot/api/action', { method: 'POST', body: JSON.stringify({ op: 'memory.list', args: { room: '47390425951@chatroom' } }) })
+r = await call('/wechat-bot/api/action', { method: 'POST', body: JSON.stringify({ op: 'memory.list', args: { room: '10000000002@chatroom' } }) })
 out.memoryRoom = { status: r.status, ok: r.json?.ok, roomName: r.json?.result?.roomName, error: r.json?.error }
 out.memorySample = (r.json?.result?.facts || []).slice(-3).map((f) => f.text)
 out.memoryWxids = (r.json?.result?.facts || []).filter((f) => /wxid_/.test(f.text)).map((f) => f.text)

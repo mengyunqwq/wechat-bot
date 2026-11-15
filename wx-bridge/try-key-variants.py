@@ -15,7 +15,7 @@ except Exception:
 from Crypto.Cipher import AES
 from Crypto.Util import Padding
 
-ATTACH = r'D:\Users\Administrator\xwechat_files\wxid_3odtthhn7u5t22_7886\msg\attach'
+ATTACH = r'D:\Users\Administrator\xwechat_files\wxid_SELF_7886\msg\attach'
 V2 = b'\x07\x08V2\x08\x07'
 MAGICS = [(b'\xff\xd8\xff', 'JPEG'), (b'\x89PNG', 'PNG'), (b'RIFF', 'WEBP'), (b'GIF', 'GIF'), (b'wxgf', 'WXGF')]
 

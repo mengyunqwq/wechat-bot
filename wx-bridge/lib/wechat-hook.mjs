@@ -307,8 +307,89 @@ export class WeChatHookBridge {
 
   get ok() { return this.ready && this.loggedIn }
 
+  /**
+   * 文件队列通道（2026-11-12）
+   *
+   * 为什么：hook 的 HTTP **服务端**在微信 4.1.10.27 上起不来
+   *   （fd_set 只有 64 项，socket 句柄 1480 → FD_SET 越界 → select 永远返回 0
+   *     → accept 永不执行 → 端口 LISTEN 但连不上；换 WSAPoll 在 listen socket 上同样不可靠）。
+   *   改用「桥写请求文件 → hook 轮询执行 → 写结果文件」，
+   *   彻底绕开监听端口这一整类问题。
+   *
+   * 目录：<客户端目录>\hook-queue\（hook 用自己 DLL 所在目录推导，两边一致）
+   * 协议：req-<id>.json {"id","op",...} → res-<id>.json {"ok":true,"data":...}
+   */
+  get queueDir() {
+    const dir = String(this.wechatExe || '').replace(/[\\/][^\\/]+$/, '')
+    return join(dir, 'hook-queue')
+  }
+
+  /**
+   * 把 HTTP 路径映射成队列 op。
+   *
+   * ★ 2026-11-12：改成**通用分发** —— 除少数高频 op 走专用实现外，
+   *   其余一律用 { op:'http', method, path, body } 交给 hook 在内存里跑路由表，
+   *   于是 hook 的 60 个端点全部可用（朋友圈 / 语音 / XML 转发 / Debug …），
+   *   桥这边不用再为每个端点写映射。
+   */
+  #queueOp(path, data, method = 'POST') {
+    const p = String(path || '')
+    // 高频路径：专用 op（少一层 JSON 包装，日志更可读）
+    if (p.includes('/QueryDB/status')) return { op: 'status' }
+    if (p.includes('/QueryDB/execute')) {
+      return { op: 'queryDB', optDbName: data?.optDbName || '', SQL: data?.SQL || '' }
+    }
+    if (p === '/Ping' || p.includes('/ping')) return { op: 'ping' }
+    if (p.includes('/QueryDB/debug')) return { op: 'dbs' }   // 桥靠它拿分片名
+    // 其余全部走通用分发
+    return {
+      op: 'http',
+      method: String(method || 'POST').toUpperCase(),
+      path: p.split('?')[0],
+      body: data === null || data === undefined ? {} : data,
+    }
+  }
+
+  async apiViaQueue(path, data, timeoutMs = 10000, method = 'POST') {
+    const op = this.#queueOp(path, data, method)
+
+    const dir = this.queueDir
+    try { mkdirSync(dir, { recursive: true }) } catch { /* ignore */ }
+
+    const id = Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8)
+    const reqPath = join(dir, 'req-' + id + '.json')
+    const resPath = join(dir, 'res-' + id + '.json')
+    writeFileSync(reqPath, JSON.stringify({ id, ...op }))
+
+    const t0 = Date.now()
+    const deadline = t0 + timeoutMs
+    while (Date.now() < deadline) {
+      try {
+        const raw = readFileSync(resPath, 'utf8')
+        try { unlinkSync(resPath) } catch { /* ignore */ }
+        const j = JSON.parse(raw)
+        if (j.ok === false) throw new Error(String(j.error || '队列执行失败').slice(0, 200))
+        const out = j.data !== undefined ? j.data : j
+        const label = op.op === 'http' ? `${op.method} ${op.path}` : op.op
+        this.log(`队列 ${label}${op.optDbName ? ' [' + op.optDbName + ']' : ''} 用时 ${Date.now() - t0}ms`)
+        return out
+      } catch (e) {
+        if (String(e.message || '').includes('队列执行失败')) throw e
+        await new Promise((r) => setTimeout(r, 60))
+      }
+    }
+    // 超时：清掉请求，避免 hook 之后又执行一遍
+    try { unlinkSync(reqPath) } catch { /* ignore */ }
+    throw new Error(`队列超时（${timeoutMs}ms）：${op.op}。hook 可能没在轮询（看客户端目录 hook-queue/）`)
+  }
+
   // ── HTTP（发送类接口）───────────────────────────────────────
   async api(path, data, method = 'POST', timeoutMs = 10000) {
+    // ★ 2026-11-12：能映射成队列 op 的，直接走文件队列（HTTP 服务端在这台机器上不可用）。
+    //   环境变量 WECHAT_TRANSPORT=http 可强制回到 HTTP（用于排查）。
+    if (process.env.WECHAT_TRANSPORT !== 'http') {
+      return this.apiViaQueue(path, data, timeoutMs, method)
+    }
     const t0 = Date.now()
     const ac = new AbortController()
     const t = setTimeout(() => ac.abort(new Error('api timeout')), timeoutMs)
@@ -337,15 +418,20 @@ export class WeChatHookBridge {
   }
 
   async apiAlive() {
-    try {
-      const r = await this.api('/QueryDB/status', null, 'GET', 3000)
-      const ok = !!(r && (r.IsLogin !== undefined || r.hWeixin !== undefined))
-      if (!ok) this.noteProbeFailure('apiAlive: /QueryDB/status 返回异常')
-      return ok
-    } catch (e) {
-      this.noteProbeFailure('apiAlive: ' + String(e?.message || e))
-      return false
+    // ★ 2026-11-12：存活判定也走队列（HTTP 端口不可用，探测它只会一直失败）
+    // ★ 2026-11-14：**不再触发发送禁令**。这只是"hook 活着吗"的探活，
+    //   队列忙时超时很常见；以前它一失败就开 30 秒禁令 → 机器人整条降级。
+    //   能不能发消息只由 refreshLoginState（权威判据）决定。
+    if (process.env.WECHAT_TRANSPORT !== 'http') {
+      try {
+        const r = await this.apiViaQueue('/QueryDB/status', {}, 5000)
+        return !!(r && (r.IsLogin !== undefined || r.hWeixin !== undefined))
+      } catch { return false }
     }
+    try {
+      const r = await this.api('/QueryDB/status', null, 'GET', 5000)
+      return !!(r && (r.IsLogin !== undefined || r.hWeixin !== undefined))
+    } catch { return false }
   }
 
   // ══════════════════════════════════════════════════════════════════
@@ -359,14 +445,27 @@ export class WeChatHookBridge {
   //    · loggedIn 超过 60 秒没被刷新 → 同样视为不可发（数据过期就当作不可信）。
   // ══════════════════════════════════════════════════════════════════
 
-  /** 记一次探测失败 → 打开 30 秒禁止发送窗口 */
+  /**
+   * 记一次探测失败 → **连续 2 次**才打开 30 秒禁止发送窗口。
+   *
+   * ★ 2026-11-14 改：原来是"一次失败就禁 30 秒"。实测队列有 300ms 节流 +
+   *   轮询抢占，单次 status 探测偶发超时很常见，于是发送被反复禁 30 秒，
+   *   机器人的每条语音/文字都降级 —— 用户看到的就是"日志发了但没发出去"。
+   *   现在单次抖动只记日志，连续 2 次（≈10~20 秒内）才真正开禁令。
+   */
   noteProbeFailure(reason) {
+    this._probeFailStreak = (this._probeFailStreak || 0) + 1
+    if (this._probeFailStreak < 2) {
+      this.log('探测失败第 ' + this._probeFailStreak + ' 次（未达阈值，不禁止发送）：' + String(reason || '').slice(0, 100))
+      return
+    }
     const wasOpen = this._sendBanUntil > Date.now()
     this._sendBanUntil = Date.now() + 30_000
     this._sendBanReason = String(reason || '').slice(0, 160)
+    this._probeFailStreak = 0
     if (!wasOpen || !this._sendBanLogged) {
       this._sendBanLogged = true
-      this.log('发送已临时禁止（30 秒）：探测失败 → ' + this._sendBanReason)
+      this.log('发送已临时禁止（30 秒）：连续探测失败 → ' + this._sendBanReason)
     }
   }
 
@@ -388,7 +487,9 @@ export class WeChatHookBridge {
   async refreshLoginState() {
     let r = null
     try {
-      r = await this.api('/QueryDB/status', null, 'GET', 3000)
+      // ★ 3s 太紧：队列有 300ms 节流 + 轮询抢占，忙时一次 status 就能超 3 秒，
+      //   然后触发 30 秒发送禁令 —— 这正是"一直降级"的元凶（15:14/15:18 实测）。
+      r = await this.api('/QueryDB/status', null, 'GET', 8000)
     } catch (e) {
       this.noteProbeFailure('refreshLoginState: ' + String(e?.message || e))
       return false
@@ -397,13 +498,39 @@ export class WeChatHookBridge {
       this.noteProbeFailure('refreshLoginState: /QueryDB/status 返回非 JSON')
       return false
     }
-    const isLogin = Number(r.IsLogin) === 1
+    let isLogin = Number(r.IsLogin) === 1
     const hWeixin = Number(r.hWeixin) > 0
     if (isLogin && hWeixin) {
+      this._probeFailStreak = 0                   // 成功 → 清零失败计数
       if (!this.loggedIn) this.markLoggedIn('/QueryDB/status IsLogin=1 且 hWeixin>0')
       else this._loggedInAt = Date.now()          // 只是刷新新鲜度，不重复打日志
       return true
     }
+
+    // ★★ 2026-11-14 自愈（这次"一直降级"的根因）：
+    //   hook 的 g_IsLogin 是**懒加载**的 —— 只在 /GetSelfProfile 被调用时才置 1
+    //   （见 hook 源码 GetSelfProfile.cpp）。客户端重启后它归 0，
+    //   于是 /QueryDB/status 一直回 IsLogin=0，桥判"未登录" → 发送守卫拦死
+    //   → 语音/文字全部降级，日志刷 "发送失败 ret=-1（未登录）"。
+    //   但 hWeixin>0 说明**客户端句柄有效 = 实际早就登录了**，只是那个标志没被顶起来。
+    //   所以这里补一次 /GetSelfProfile 把标志推上去，再复查一次。
+    if (!isLogin && hWeixin) {
+      try {
+        await this.api('/GetSelfProfile', {}, 'POST', 5000)
+        const r2 = await this.api('/QueryDB/status', null, 'GET', 3000)
+        isLogin = Number(r2?.IsLogin) === 1
+        if (isLogin) {
+          this.markLoggedIn('自愈：hWeixin>0 → 补探测 /GetSelfProfile 后 IsLogin=1')
+          return true
+        }
+      } catch { /* 继续走下面的兜底 */ }
+      // 兜底：句柄有效且知道自己的 wxid → 事实已登录，别再拦着自己
+      if (this.selfWxid) {
+        this.markLoggedIn('自愈：hWeixin>0 且 selfWxid=' + this.selfWxid + '（IsLogin 标志滞后）')
+        return true
+      }
+    }
+
     this.loggedIn = false
     return false
   }
@@ -431,6 +558,10 @@ export class WeChatHookBridge {
       'RecvType=1',
       `CallBackURL=http://127.0.0.1:${this.cbPort}`,
     ], { cwd: dir, detached: true, stdio: 'ignore' }).unref()
+    // ★ 2026-11-11：记下启动时刻 —— 看门狗用它做 3 分钟冷却，
+    //   避免"客户端刚起、还在登录页"就被判死杀掉（40 秒一轮死循环的真凶）。
+    this._lastLaunchAt = Date.now()
+    this._restartCapWarned = false
   }
 
   // ── 回调服务器（收消息）─────────────────────────────────────
@@ -707,7 +838,12 @@ export class WeChatHookBridge {
         //   要改回去：设环境变量 DB_POLL_MS=2500，或改这里的默认值。
         intervalMs: Number(process.env.DB_POLL_MS || 6000),
         // 读库失败 = hook/DB 探测失败 → 桥侧进入 30 秒禁止发送窗口（fail-closed）
-        onReadFail: (why) => this.noteProbeFailure('轮询读库失败：' + String(why || '')),
+        // ★ 2026-11-14：轮询读库失败**不能**触发发送禁令。
+        //   轮询是后台任务，队列忙（300ms 节流 + 5 张表并发）时它超时很正常，
+        //   但它一失败就把"能不能发消息"关掉 30 秒 → 机器人整条降级。
+        //   实测 15:23:45 就是这样：轮询 queryDB 超时 → 发送被禁 30 秒。
+        //   读库失败只记日志；能不能发只看 /QueryDB/status 这个权威判据。
+        onReadFail: (why) => this.log('轮询读库失败（仅记录，不影响发送）：' + String(why || '').slice(0, 100)),
         // 能轮询到数据库 = 强证据（但发送守卫仍以 /QueryDB/status 为准）
         onReady: (self) => {
           if (self && !this.selfWxid) this.selfWxid = self
@@ -796,8 +932,11 @@ export class WeChatHookBridge {
         const ok = await this.dbHealthy()
         if (ok) { this.dbFailStreak = 0; return }
         this.dbFailStreak++
-        this.noteProbeFailure(`数据库探测失败（第 ${this.dbFailStreak} 次）`)   // → 30 秒禁止发送
-        this.log('数据库探测失败（第 ' + this.dbFailStreak + ' 次）')
+        // ★ 2026-11-14：**不再触发发送禁令**。
+        //   dbHealthy() 走的是 GetAllDBName 全内存扫描，本身很慢（这里注释自己都写了
+        //   "重扫很慢，探测超时会被误判"）。拿它去关"能不能发消息"的闸，
+        //   等于让一个慢扫描把消息发送掐死 —— 这就是"一直降级"的第三个来源。
+        this.log('数据库探测失败（第 ' + this.dbFailStreak + ' 次，仅记录，不影响发送）')
         // 注意：**不要**在这里自动重启客户端！
         // 教训：DB 重扫本身很慢（全内存扫描），探测超时会被误判成"失效"，
         // 于是每 3 分钟杀一次客户端 → 用户看到微信反复掉线（实测 2 小时重启 31 次）。
@@ -840,9 +979,40 @@ export class WeChatHookBridge {
           this.ready = false
           this.loggedIn = false
           const deadSec = Math.round((Date.now() - this._apiDeadSince) / 1000)
-          if (deadSec >= 30) {
-            this.log(`HTTP 服务已死 ${deadSec}s（hook 崩了）→ 重启客户端`)
+
+          // ★ 2026-11-11 防死循环四道闸（原来是 30s 就杀客户端 → 40 秒一轮无限重启）
+          //   ① 还在登录页（进程数 < 3）→ HTTP 本来就不应答，绝不能判死
+          const procs = this.countOwnClientProcs()
+          if (procs > 0 && procs < 3) {
+            if (deadSec > 0 && deadSec % 60 === 0) {
+              this.log(`客户端还在登录页（${procs} 个进程）→ 等待登录，不重启（已等 ${deadSec}s）`)
+            }
+            return
+          }
+          //   ② 刚启动/刚重启过 → 3 分钟冷却
+          const sinceBoot = Date.now() - (this._lastLaunchAt || 0)
+          if (this._lastLaunchAt && sinceBoot < 180_000) {
+            const left = Math.ceil((180_000 - sinceBoot) / 1000)
+            if (deadSec > 0 && deadSec % 60 === 0) {
+              this.log(`刚启动 ${Math.round(sinceBoot / 1000)}s → 冷却中（还剩 ${left}s 不重启）`)
+            }
+            return
+          }
+          //   ③ 每小时最多 2 次
+          const nowMs = Date.now()
+          this._restartTimes = (this._restartTimes || []).filter((t) => nowMs - t < 3_600_000)
+          if (this._restartTimes.length >= 2) {
+            if (!this._restartCapWarned) {
+              this._restartCapWarned = true
+              this.log('⚠️ 一小时内已自动重启 2 次仍未恢复 → 停止自动重启（请人工检查 hook / 登录状态）')
+            }
+            return
+          }
+          //   ④ 阈值从 30s 放宽到 90s（hook 起 HTTP 需要时间）
+          if (deadSec >= 90) {
             this._apiDeadSince = 0
+            this._restartTimes.push(nowMs)
+            this.log(`HTTP 服务已死 ${deadSec}s（客户端在跑但 hook 不应答）→ 重启客户端（本小时第 ${this._restartTimes.length} 次）`)
             this.killOwnClient()          // 只杀机器人自己的客户端，绝不动用户日常微信
             await sleep(3000)
             try { this.launchClient() } catch (e) { this.log('拉起失败: ' + String(e?.message || e)) }
@@ -861,6 +1031,19 @@ export class WeChatHookBridge {
         }
       })()
     }, 10_000)
+  }
+
+  /** 机器人自己那份客户端当前有几个进程（登录页 1 个，进主界面 5 个） */
+  countOwnClientProcs() {
+    try {
+      const { execFileSync } = require('node:child_process') // eslint-disable-line
+      const out = execFileSync('powershell',
+        ['-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden', '-Command',
+          "@(Get-Process Weixin -ErrorAction SilentlyContinue | Where-Object { $_.Path -like '*wxhook*' -or $_.Path -like '*wx4110*' }).Count"],
+        { encoding: 'utf8', timeout: 8000, windowsHide: true })
+      const n = Number(String(out).trim())
+      return Number.isFinite(n) ? n : 0
+    } catch { return 0 }
   }
 
   stop() {

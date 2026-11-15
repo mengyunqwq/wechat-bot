@@ -414,6 +414,15 @@ async function handle(op, a = {}) {
       try { restarted = await bridge.restartPoller?.('手动 /api/pollResume') } catch { /* ignore */ }
       return { ok: true, restarted, ...bridge.pollStatus?.() }
     }
+    case 'hookProxy': {
+      // ★ 2026-11-12：把插件的请求转给 hook。
+      //   hook 的 HTTP 服务端在 4.1.10.27 上不可用，所以这里调 hook 的
+      //   文件队列通道（内部会在 hook 进程里跑一遍路由表）。
+      const p = String(a?.path || '')
+      const m = String(a?.method || 'POST').toUpperCase()
+      if (!p) throw new Error('hookProxy: path 不能为空')
+      return await bridge.api(p, a?.body ?? {}, m, 150000)
+    }
     case 'pollStatus': {
       // 只读：轮询器快照（硬闸 / 暂停 / 连续失败 / 轮数 / 条数 / 表数）
       const snap = bridge.pollStatus?.() || {}

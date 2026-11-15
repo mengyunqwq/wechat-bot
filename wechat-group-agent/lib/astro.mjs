@@ -75,7 +75,7 @@ export function pickTopics(facts, { minSize = 3, maxTopics = 12 } = {}) {
     // 同簇的第二个词（让标签更像"话题"而不是单个词）
     const partner = ranked
       .map(([w]) => w)
-      // wxid / 英文 ID 不当话题名（"梦云·wxid_urirqbcdh0rc22" 这种太长也没意义）
+      // wxid / 英文 ID 不当话题名（"梦云·wxid_MASTER" 这种太长也没意义）
       .filter((w) => !/^wxid_/i.test(w) && !/^[a-z0-9_]{6,}$/i.test(w))
       .find((w) => w !== word && !used.has(w)
         && memoryIds.filter((id) => (memGrams.get(id) || []).includes(w)).length >= Math.max(2, memoryIds.length * 0.5))

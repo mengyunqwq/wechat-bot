@@ -930,7 +930,7 @@ step hook（客户端线程）
 ### 真实消息数据（实测输出）
 
 ```
-*** MESSAGE DB FOUND: Msg_9e20f478899dc29eb19741386f9343c8 ***
+*** MESSAGE DB FOUND: Msg_HASH_FILEHELPER ***
 MSG row 1:
    [0] 106
    [1] 2424952228019969912      ← msgSvrId
@@ -3042,13 +3042,13 @@ HTTP 30007 /contacts → 1191 字节，真实联系人
 ### 实测
 
 截图：群「呆子梦云粉丝团（13）」出现 **"@梦云 测试艾特"**
-日志：`ATLIST written` + `REWRITE target=47390425951@chatroom text=@梦云 测试艾特`
+日志：`ATLIST written` + `REWRITE target=10000000002@chatroom text=@梦云 测试艾特`
 
 ### 实现（wxdump55）
 
 ```
 content (msgBuf+0x768) = "@梦云 测试艾特"        ← 显示层
-atlist  (msgBuf+0x788) = wxid_urirqbcdh0rc22     ← 提醒层（梦云 wxid）
+atlist  (msgBuf+0x788) = wxid_MASTER     ← 提醒层（梦云 wxid）
 ```
 
 ### atlist 偏移（从 txt_message_ctr 初始化推导）

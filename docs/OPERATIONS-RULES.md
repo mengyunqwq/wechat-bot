@@ -319,7 +319,7 @@ if (ROOM !== 'filehelper') { console.error('❌ 只能发文件传输助手'); p
 ### R21 — 单元测试必须无副作用（R19 的前置红线）
 
 **2026-10-29 真实事故**：`data/test-sendvoice.mjs` 是很久以前的手工探针，里面直接 POST hook 的
-`/SendVoiceMsg` 到真实群（`47390425951@chatroom`，durationMs=2220）。而 R19 的 `test-all.mjs`
+`/SendVoiceMsg` 到真实群（`10000000002@chatroom`，durationMs=2220）。而 R19 的 `test-all.mjs`
 会跑 `data/test-*.mjs` —— **于是每跑一次 R19，群里就多一条一模一样的 2.2 秒语音**。
 用户听到的就是"莫名其妙的语音"，排查了半天以为是自检在发。
 

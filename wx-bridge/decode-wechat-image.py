@@ -34,7 +34,7 @@ from Crypto.Util import Padding
 
 # ── 配置 ──────────────────────────────────────────────────────
 BOT_EXE = r"D:\wxhook\wx4110\Weixin.exe"          # 只扫**机器人这份**微信，绝不碰日常微信
-ATTACH_DIR = r"D:\Users\Administrator\xwechat_files\wxid_3odtthhn7u5t22_7886\msg\attach"
+ATTACH_DIR = r"D:\Users\Administrator\xwechat_files\wxid_SELF_7886\msg\attach"
 KEY_CACHE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "data", "wechat-image-key.json")
 V2_MAGIC = b'\x07\x08V2\x08\x07'
 

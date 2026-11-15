@@ -9,6 +9,13 @@
  *
  * 产出的事件结构与 hook 回调完全一致，所以桥和插件都不需要改。
  */
+
+// 系统账号（不是真人，收到即丢弃）
+const SYSTEM_SENDERS = new Set([
+  'notifymessage', 'weixin', 'fmessage', 'medianote',
+  'qqmail', 'qqsafe', 'floatbottle', 'newsapp', 'weibo',
+  'voicebyphone', 'brandsessionholder', 'upgradeholder',
+])
 import { createHash } from 'node:crypto'
 import { existsSync, statSync, readdirSync, readFileSync, writeFileSync, mkdirSync, renameSync } from 'node:fs'
 import { join } from 'node:path'
@@ -417,14 +424,56 @@ export class DbPoller {
         this.log(`会话映射：已缓存 ${byHash.size} 条到磁盘`)
       } catch (e) { this.log('会话映射缓存写入失败：' + String(e?.message || e).slice(0, 80)) }
     }
-    // 3) 发送者映射：**用消息库自己的 Name2Id**（不是 contact.db 的那个！）
-    //    contact.db.Name2Id 的 rowid 是全局联系人编号，跟 real_sender_id 对不上，实测会映射成 weixin/notifymessage）
+    // 3) 发送者映射：**message_0.db.Name2Id 才是权威表**（2026-11-14 实测纠正）
+    //
+    //  ★ 上一版写反了（用 contact.db 优先），导致"id 对应的名字错误"。
+    //    两份映射的 rid 空间**完全不同**，而消息表里的 real_sender_id
+    //    索引的是 **message_0.db.Name2Id**：
+    //
+    //      contact.db.Name2Id        message_0.db.Name2Id
+    //        rid=1 notifymessage       rid=1 wxid_SELF  ← 自己
+    //        rid=2 weixin              rid=2 某个群
+    //        rid=5 wxid_MASTER...   rid=5 wxid_MEMBER_A
+    //
+    //    实测对账（碧桂园集团最近消息）：
+    //      lid=180 rsid=1 → message_0: wxid_SELF（自己 ✓）
+    //                       contact  : notifymessage（✗）
+    //      lid=184 rsid=6 → message_0: wxid_MEMBER_B（真人 ✓）
+    //                       contact  : mmo9cq...@weclaw（✗）
+    //
+    //    所以：message_0 优先且**独占**（rid 语义一致）；contact.db 只在
+    //    message_0 拿不到时兜底，并且要打日志说明"这次是降级模式"。
+    let usedPrimary = false
     try {
       const n2i = await this.q('message_0.db', 'SELECT rowid AS rid, user_name FROM Name2Id')
-      for (const r of n2i) this.senderMap.set(String(r.rid), String(r.user_name || ''))
+      let added = 0
+      for (const r of n2i) {
+        const rid = String(r.rid)
+        const nm = String(r.user_name || '').trim()
+        if (nm) { this.senderMap.set(rid, nm); added++ }
+      }
+      if (added) {
+        this.log(`发送者映射：message_0.db.Name2Id ${added} 条（权威表）`)
+        usedPrimary = true
+      }
     } catch (e) {
-      this.log(`Name2Id 暂不可用（${String(e?.message || e).slice(0, 60)}）→ 发送者退化为 id，轮询照常`)
+      this.log(`message_0.db.Name2Id 不可用（${String(e?.message || e).slice(0, 50)}）`)
     }
+    if (!usedPrimary) {
+      // 降级：消息库的映射表读不出来时才用 contact.db —— 但 rid 语义不同，
+      // 名字很可能对不上，日志必须显式标出来，方便一眼看出是降级状态。
+      try {
+        const main = await this.q('contact.db', 'SELECT rowid AS rid, username AS nm FROM Name2Id')
+        for (const r of main) {
+          const nm = String(r.nm || '').trim()
+          if (nm) this.senderMap.set(String(r.rid), nm)
+        }
+        this.log(`发送者映射：降级用 contact.db.Name2Id ${main.length} 条（⚠ rid 语义不同，名字可能对不上）`)
+      } catch (e) {
+        this.log(`contact.db.Name2Id 也不可用（${String(e?.message || e).slice(0, 50)}）`)
+      }
+    }
+    this.log(`发送者映射合计 ${this.senderMap.size} 条`)
 
     // 4) 自己的 wxid：从数据目录名 wxid_xxx_hash 里取（用于标记 isSelf，避免它回自己）
     if (!this.selfWxid) {
@@ -692,6 +741,15 @@ export class DbPoller {
         if (this._seenRows.size > 6000) this._seenRows.clear()
         this._seenRows.add(skey)
         const m = this.toEvent(table, info, row)
+        // ★ 2026-11-12：过滤系统账号。
+        //   实测坑：contact.db.Name2Id 的 rid 1~4 是 notifymessage / weixin /
+        //   fmessage / medianote 等系统联系人。以前发送者映射不全时它们会退化成
+        //   空/错值；现在映射正确了，这些系统消息就会以"notifymessage 说了话"
+        //   的形式进到插件里（实测插件把它当成人，去算羁绊、准备回话）。
+        //   系统消息不是聊天，丢掉即可。
+        if (m && SYSTEM_SENDERS.has(String(m.sender || '').toLowerCase())) {
+          continue
+        }
         if (m) {
           // 语音（34）：音频是磁盘文件，先旁路定位+解码成 16k WAV（失败只记日志）
           await this.enrichVoice(m)
@@ -732,11 +790,25 @@ export class DbPoller {
   /** 数据库行 → 与 hook 回调一致的消息事件 */
   toEvent(table, info, row) {
     const type = Number(row.local_type || 0)
-    const content = decodeContent(row.message_content)
+    let content = decodeContent(row.message_content)
     const xml = decodeContent(row.source)
     const roomId = info.roomId || ''
     const isGroup = roomId.endsWith('@chatroom')
-    const sender = this.senderMap.get(String(row.real_sender_id)) || ''
+    let sender = this.senderMap.get(String(row.real_sender_id)) || ''
+
+    // ★ 2026-11-14：群消息正文里带着「发送者wxid: 换行 真实内容」的前缀。
+    //   两个后果，都必须处理：
+    //     ① 机器人看到的是「wxid_xxx: 三星不死图」——名字和内容都错
+    //     ② 这个前缀本身就是最可靠的发送者（比 real_sender_id 还准）
+    //   所以：剥掉前缀，并且用前缀里的 wxid 覆盖 sender。
+    if (isGroup) {
+      const m = /^(wxid_[A-Za-z0-9_\-]+|[0-9]+@chatroom|gh_[A-Za-z0-9_\-]+):\s*\r?\n?/.exec(content)
+      if (m) {
+        const fromPrefix = m[1]
+        content = content.slice(m[0].length)
+        if (fromPrefix && fromPrefix !== 'gh_') sender = fromPrefix
+      }
+    }
     const ts = Number(row.create_time || 0) * 1000
     const text = type === 1 ? content : (type === 47 ? '[表情]' : type === 3 ? '[图片]' : `[${TYPE_NAMES[type] || type}]`)
     if (!content && !xml) return null

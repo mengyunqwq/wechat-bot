@@ -93,6 +93,208 @@ def panel_voice():
     except Exception:
         return None
 
+# ── 语音后端（2026-11-14 新增）───────────────────────────────────────
+#   gpt-sovits : 原来那条（本地 9880，2~3 秒出音，显存约 3GB）
+#   breeze     : Breeze TTS 2（本地 9881 常驻服务，显存按需上下卡，音质更好但慢）
+#   选择顺序：环境变量 > 面板 config.json(voiceBackend) > 默认 gpt-sovits
+BREEZE_API = os.environ.get('BREEZE_API', 'http://127.0.0.1:9881/tts')
+BREEZE_HEALTH = os.environ.get('BREEZE_HEALTH', 'http://127.0.0.1:9881/health')
+BREEZE_SERVER = os.environ.get('BREEZE_SERVER', r'D:\微信deepseek\data\breeze-server.py')
+BREEZE_PYTHON = os.environ.get('BREEZE_PYTHON', r'E:\breeze\venv\Scripts\python.exe')
+BREEZE_TIMEOUT = int(os.environ.get('BREEZE_TIMEOUT', '300'))   # 6 秒音频实测要 49 秒
+
+# ── Breeze Blue 云端 TTS（2026-11-15 接入）──────────────────────────
+#   比本地快 20~30 倍（本地 8x 慢于实时；云端约 3 秒出音），且不占显存。
+#   key 存在 D:\微信deepseek\data\.breeze-key（单独文件，权限 600）
+#   ★ 2026-11-15：改走**本地代理**（breeze-cloud-server.py:9882）。
+#     直连 api.breeze.blue 的瓶颈是 TLS 握手（实测 0.5~27s，经常超时），
+#     每次新建连接要 28 秒；代理复用长连接后只要 1~2 秒（快 10 倍）。
+CLOUD_API = os.environ.get('BREEZE_CLOUD_API', 'http://127.0.0.1:9882/tts')
+CLOUD_PROXY_HEALTH = os.environ.get('BREEZE_CLOUD_HEALTH', 'http://127.0.0.1:9882/health')
+CLOUD_PROXY_SCRIPT = os.environ.get('BREEZE_CLOUD_SERVER', r'D:\微信deepseek\datareeze-cloud-server.py')
+CLOUD_PYTHON = os.environ.get('BREEZE_PYTHON_CLOUD', r'D:\Python311\python.exe')
+CLOUD_KEY_FILE = os.environ.get('BREEZE_KEY_FILE', r'D:\微信deepseek\data\.breeze-key')
+CLOUD_TIMEOUT = int(os.environ.get('BREEZE_CLOUD_TIMEOUT', '200'))
+#   她的三个音色（BreezeBlue 控制台已建好）：
+#     偶像版 voc_rn489h83rcvs ／ 迷糊版 voc_8yud7hz7c9q2 ／ 机灵版 voc_u3nxkd5578wc
+CLOUD_DEFAULT_VOICE = os.environ.get('BREEZE_CLOUD_VOICE', 'voc_rn489h83rcvs')
+BRIDGE_CONFIG = os.environ.get('WECHAT_BOT_CONFIG',
+                               r'D:\dsh\data\wechat-bot\config.json')
+
+
+def voice_backend():
+    """决定本次用哪个合成后端：breeze-cloud（默认）/ breeze（本地）/ gpt-sovits（已废弃）"""
+    def norm(v):
+        v = str(v or '').strip().lower()
+        if v in ('breeze-cloud', 'cloud', 'breezeblue'):
+            return 'breeze-cloud'
+        if v == 'breeze':
+            return 'breeze'
+        if v in ('gpt-sovits', 'gptsovits'):
+            return 'gpt-sovits'
+        return '' 
+    v = norm(os.environ.get('WECHAT_VOICE_BACKEND'))
+    if v:
+        return v
+    try:
+        with open(BRIDGE_CONFIG, encoding='utf-8') as f:
+            c = json.load(f)
+        v = norm(c.get('voiceBackend'))
+        if v:
+            return v
+    except Exception:
+        pass
+    return 'breeze-cloud'
+
+
+def breeze_health(timeout=3):
+    """服务活着吗 → (alive, vramMiB)"""
+    import urllib.request
+    try:
+        with urllib.request.urlopen(BREEZE_HEALTH, timeout=timeout) as r:
+            d = json.loads(r.read().decode('utf-8'))
+        return bool(d.get('ok')), int(d.get('vramMiB') or 0)
+    except Exception:
+        return False, 0
+
+
+def cloud_proxy_alive(timeout=3):
+    """本地云端代理活着吗"""
+    import urllib.request
+    try:
+        with urllib.request.urlopen(CLOUD_PROXY_HEALTH, timeout=timeout) as r:
+            d = json.loads(r.read().decode('utf-8'))
+        return bool(d.get('ok'))
+    except Exception:
+        return False
+
+
+def ensure_cloud_proxy(wait_sec=40):
+    """代理没起就拉起来（Popen 完全脱离父进程，不继承管道）"""
+    if cloud_proxy_alive():
+        return True
+    try:
+        import subprocess
+        import tempfile
+        flags = 0
+        if os.name == 'nt':
+            flags = 0x00000008 | 0x00000200 | 0x08000000   # DETACHED | NEW_GROUP | NO_WINDOW
+        logf = open(os.path.join(tempfile.gettempdir(), 'breeze-cloud-autostart.log'), 'ab')
+        subprocess.Popen([CLOUD_PYTHON, CLOUD_PROXY_SCRIPT, '--port', '9882'],
+                         cwd=os.path.dirname(CLOUD_PROXY_SCRIPT),
+                         stdout=logf, stderr=logf, stdin=subprocess.DEVNULL,
+                         creationflags=flags, close_fds=True)
+    except Exception:
+        pass
+    t0 = time.time()
+    while time.time() - t0 < wait_sec:
+        if cloud_proxy_alive():
+            return True
+        time.sleep(1)
+    return False
+
+
+def synth_cloud(text, out_path, voice_id='', timeout=CLOUD_TIMEOUT):
+    """调本地云端代理合成 → 写音频（代理内部负责长连接、重连、重试）"""
+    import urllib.request
+    if not ensure_cloud_proxy():
+        raise StageError('synth', 'Breeze 云端代理没起来（%s）——请检查 breeze-cloud-server.py' % CLOUD_PROXY_HEALTH)
+    vid = voice_id or CLOUD_DEFAULT_VOICE
+    # 从面板配置读 voice_settings（风格/语速/贴合度）—— 2026-11-16 固化「雌小鬼」调教
+    vs = {}
+    try:
+        with open(BRIDGE_CONFIG, encoding='utf-8') as f:
+            c = json.load(f)
+        if c.get('voiceStyle'):
+            vs['style'] = str(c['voiceStyle'])
+        sp = c.get('voiceSpeed')
+        if isinstance(sp, (int, float)) and sp > 0:
+            vs['speed'] = float(sp)
+        gs = c.get('voiceGuidanceScale')
+        if isinstance(gs, (int, float)) and gs > 0:
+            vs['guidance_scale'] = float(gs)
+    except Exception:
+        pass
+    payload = {'text': text, 'voice_id': vid}
+    if vs:
+        payload['voice_settings'] = vs
+    body = json.dumps(payload).encode('utf-8')
+    req = urllib.request.Request(CLOUD_API, data=body,
+                                 headers={'content-type': 'application/json'})
+    t0 = time.time()
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            data = r.read()
+    except Exception as e:
+        detail = ''
+        try:
+            err_body = e.read().decode('utf-8', 'replace')[:200]
+            detail = ' | ' + err_body
+        except Exception:
+            pass
+        raise StageError('synth', 'Breeze 云端合成失败：%s%s' % (str(e)[:120], detail))
+    if not data:
+        raise StageError('synth', 'Breeze 云端返回空音频')
+    with open(out_path, 'wb') as f:
+        f.write(data)
+    return len(data)
+
+
+def ensure_breeze(wait_sec=120):
+    """服务没起就拉起来。用 Popen + DETACHED_PROCESS 完全脱离父进程/管道
+    （之前在别处用 WMI 字符串拼接，引号极易出错；这里改成参数列表，稳）
+    """
+    ok, _ = breeze_health()
+    if ok:
+        return True
+    try:
+        import subprocess
+        flags = 0
+        if os.name == 'nt':
+            DETACHED_PROCESS = 0x00000008
+            CREATE_NEW_PROCESS_GROUP = 0x00000200
+            CREATE_NO_WINDOW = 0x08000000
+            flags = DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW
+        logf = open(os.path.join(tempfile.gettempdir(), 'breeze-autostart.log'), 'ab')
+        subprocess.Popen(
+            [BREEZE_PYTHON, BREEZE_SERVER, '--port', '9881'],
+            cwd=os.path.dirname(BREEZE_PYTHON),
+            stdout=logf, stderr=logf, stdin=subprocess.DEVNULL,
+            creationflags=flags, close_fds=True)
+    except Exception:
+        pass
+    t0 = time.time()
+    while time.time() - t0 < wait_sec:
+        ok, _ = breeze_health()
+        if ok:
+            return True
+        time.sleep(3)
+    return False
+
+
+def synth_breeze(text, out_path, ref, prompt, timeout=BREEZE_TIMEOUT):
+    """调常驻服务合成 → 写 WAV 到 out_path（ffmpeg 能直接吃）"""
+    import urllib.request
+    if not ensure_breeze():
+        raise StageError('synth', 'Breeze 服务没起来（%s）' % BREEZE_HEALTH)
+    body = json.dumps({
+        'text': text,
+        'ref_audio': ref,
+        'ref_text': prompt,
+        'seed': 42,
+    }).encode('utf-8')
+    req = urllib.request.Request(BREEZE_API, data=body,
+                                 headers={'Content-Type': 'application/json'})
+    t0 = time.time()
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        data = r.read()
+    if not data or data[:4] != b'RIFF':
+        raise StageError('synth', 'Breeze 返回的不是 WAV（%d 字节）' % len(data))
+    with open(out_path, 'wb') as f:
+        f.write(data)
+    return len(data)
+
+
 RATE_RE = re.compile(r'^[+-]\d{1,3}%$')
 PITCH_RE = re.compile(r'^[+-]\d{1,3}Hz$')
 
@@ -444,9 +646,38 @@ def synthesize(text, out_path, voice=DEFAULT_VOICE, rate=DEFAULT_RATE, pitch=DEF
 
     try:
         t0 = time.time()
-        say('① edge-tts: %s ｜ rate=%s pitch=%s ｜ %d 字' % (voice, rate, pitch, len(text)))
-        mp3_bytes = synth_mp3(text, voice, rate, pitch, mp3)
-        say('   mp3 %d 字节（%.1fs）' % (mp3_bytes, time.time() - t0))
+        backend = voice_backend()
+        if backend == 'breeze-cloud':
+            vid = os.environ.get('BREEZE_CLOUD_VOICE') or ''
+            if not vid:
+                try:
+                    with open(BRIDGE_CONFIG, encoding='utf-8') as f:
+                        vid = str(json.load(f).get('voiceCloudVoice') or '')
+                except Exception:
+                    vid = ''
+            say('① Breeze Cloud（云端）: %d 字 ｜ voice=%s' % (len(text), vid or CLOUD_DEFAULT_VOICE))
+            mp3_bytes = synth_cloud(text, mp3, vid)   # 后面统一要用这个变量名
+            say('   audio %d 字节（%.1fs）' % (mp3_bytes, time.time() - t0))
+        elif backend == 'breeze':
+            # ★ 2026-11-15：本地 Breeze 的 venv 与 7.2GB 权重已删除
+            #   （换用云端，快 20~30 倍且不占显存）。这条路径只留明确报错。
+            raise StageError('synth',
+                             '本地 Breeze 已删除（换用云端，快 20~30 倍）。'
+                             '请在面板把「语音合成后端」改为 breeze-cloud。')
+            # 以下为历史实现，保留以便将来重新部署本地后端时参考
+            pv = panel_voice()
+            ref = (pv[0] if pv else '') or DEFAULT_REF
+            prompt = (pv[1] if pv else '') or DEFAULT_PROMPT
+            say('① Breeze TTS 2（高质量）: %d 字 ｜ ref=%s'
+                % (len(text), os.path.basename(ref)))
+            mp3_bytes = synth_breeze(text, mp3, ref, prompt)
+            say('   wav %d 字节（%.1fs）' % (mp3_bytes, time.time() - t0))
+        else:
+            # ★ 2026-11-14：GPT-SoVITS 训练权重已删除，这条路只剩一个明确的报错，
+            #   免得静默失败后看不出原因（以前会去连 9880，服务没起就卡到超时）。
+            raise StageError('synth',
+                             'GPT-SoVITS 后端已废弃（训练权重已删除）。'
+                             '请在面板把「语音合成后端」改为 breeze。')
 
         mp3_sec = probe_duration(ff, mp3)
         say('② ffmpeg: %s' % os.path.basename(ff))

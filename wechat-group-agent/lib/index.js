@@ -15,15 +15,17 @@
  * 纯 ESM，无编译步骤（本环境没有可用的 tsc），改完 dev_reload_package 即生效。
  */
 import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, unlinkSync, writeFileSync, copyFileSync, rmSync, openSync, closeSync } from 'node:fs'
-import { execFileSync, execSync, exec as execCb, spawn as spawnCb } from 'node:child_process'
-import * as MV2 from './memory-v2.mjs?v=vmvytqnwe'   // 艾宾浩斯遗忘曲线 + 情绪加权（?v= 用于打破 ESM 缓存）
+import { execFile, execFileSync, execSync, exec as execCb, spawn as spawnCb } from 'node:child_process'
+import { createRequire } from 'node:module'
+// 插件是 ESM（type: module），没有全局 require；node:sqlite 只能同步 require，
+// 所以这里造一个 require 出来（2026-11-16 接梗百科时踩到）
+const require = createRequire(import.meta.url)
+import * as MV2 from './memory-v2.mjs?v=vmwi2xhzp'   // 艾宾浩斯遗忘曲线 + 情绪加权（?v= 用于打破 ESM 缓存）
 import * as ST from './style.mjs'   // 口气：标点规约 / 口语碎片 / 情绪→语气
-import * as ASTRO from './astro.mjs'   // 星盘（人际关系×记忆×性格）
-import * as SOCIAL from './social.mjs'  // 人-人关系（对话共现/同群/同话题/同框）
 import * as H3 from './human3.mjs'   // 第三轮：情景示例/幽默三招/不重复/收尾日记/羁绊
 import * as OB from './outbox.mjs'   // 统一出站队列（节流/去重/重试退避）
 import * as H2 from './human2.mjs'   // 第二轮人性化：承诺/纠错/沉默/追话/联想/自己的事
-import * as PS from './persona.mjs?v=vmvytqnwe'      // 性格四件套 + 自传（?v= 打破 ESM 缓存）
+import * as PS from './persona.mjs?v=vmwi2xhzp'      // 性格四件套 + 自传（?v= 打破 ESM 缓存）
 import net from 'node:net'
 import { request as httpsRequest } from 'node:https'
 import { join, dirname } from 'node:path'
@@ -51,7 +53,7 @@ try {
 } catch { /* ignore */ }
 
 export const name = '@dsh-external/dsh-wechat-bot'
-export const version = '2.0.7'
+export const version = '2.1.0'
 // Cordis 4.0.4 的 inject 只认**数组**或"服务名→配置"映射；
 // 写成 { required, optional } 会让依赖解析失败、fiber 永远 pending（踩过：改了代码却一直跑旧实例）。
 // 这里只声明必然存在的两个服务；attachments（视觉识别用）改为**惰性获取**，
@@ -187,6 +189,68 @@ function linkHostOf(url) {
  * 从消息文本 / 链接卡片 XML 里找出**受支持的视频链接**。
  * @returns {{url:string, site:string}|null}
  */
+/**
+ * 解析「判定模型」的输出 → { ok, score, why }
+ * 纯函数；解析不出就当放行（score=-1），绝不能把"判定失败"变成"不说话了"。
+ */
+/**
+ * 把系统提示词拆成「稳定前缀」+「本轮附加」两部分。
+ *
+ * 为什么：system 里混着"每轮都在变"的东西（时间、对某人的好感/羁绊、群梗、
+ * 语气档、自我复盘结论）→ 前缀缓存永远不命中，输入费白付。
+ * 做法（SpectreCore 的思路）：稳定的留在 system（字节不变 → 缓存命中），
+ * 易变的挪到**本轮用户消息之后**（位置变了但内容一样，不影响模型理解）。
+ *
+ * 纯函数，可单测；拆不动就原样返回（绝不能把提示词搞坏）。
+ */
+export function splitSystemText(text) {
+  const raw = String(text || '')
+  if (!raw) return { system: '', volatile: '' }
+  const MARK = [
+    '【现在的时间】', '【你学会的群梗】', '【她学会的群梗】',
+    '【羁绊', '【印象', '【语气', '【自我复盘', '【她在犯', '【最近的语气',
+    '【你这个人的状态', '【她的状态', '【你现在的心情',
+  ]
+  const lines = raw.split('\n')
+  const keep = []
+  const moved = []
+  let inVol = false
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i]
+    const t = line.trim()
+    const isMark = MARK.some((m) => t.startsWith(m) || t.includes(m))
+    if (isMark) {
+      inVol = true
+      moved.push(line)
+      continue
+    }
+    if (inVol) {
+      // 块结束：遇到空行，或遇到下一个"大标题"（【…】开头的新段）就回 system
+      if (!t) { inVol = false; keep.push(line); continue }
+      if (t.startsWith('【')) { inVol = false; keep.push(line); continue }
+      moved.push(line)
+      continue
+    }
+    keep.push(line)
+  }
+  const system = keep.join('\n').replace(/\n{3,}/g, '\n\n').trim()
+  const volatile = moved.join('\n').trim()
+  // 兜底：如果拆完 volatile 为空或 system 太短，说明标记没匹配上 → 不拆
+  if (!volatile || system.length < 200) return { system: raw, volatile: '' }
+  return { system, volatile }
+}
+
+export function parseJudgeOutputImpl(text) {
+  const m = String(text || '').match(/\{[\s\S]*?\}/)
+  if (!m) return { ok: true, score: -1, why: '判定输出不可解析（放行）' }
+  let obj = null
+  try { obj = JSON.parse(m[0]) } catch { return { ok: true, score: -1, why: '判定 JSON 坏了（放行）' } }
+  const raw = obj && (obj.score !== undefined ? obj.score : obj.Score)
+  const score = Math.max(0, Math.min(10, Number(raw)))
+  if (!Number.isFinite(score)) return { ok: true, score: -1, why: '判定分无效（放行）' }
+  return { ok: true, score, why: String(obj.why || obj.reason || '').slice(0, 20) }
+}
+
 export function detectLinkVideo(text) {
   for (const raw of linkCandidates(text)) {
     const host = linkHostOf(raw)
@@ -291,6 +355,8 @@ const DEFAULT_CONFIG = {
   // 唯一可以叫"主人"的人（其他人一律用"你"）。改这里即可换人。
   masterName: '梦云',
   // 模型（留空 = 用 DSH 当前默认模型）
+  // 注：实际值以「控制面板 → 人设与模型」里保存的为准（持久化在
+  //     <DSH_HOME>/wechat-bot/config.json），这里是兜底默认值。
   provider: '',
   model: '',
   temperature: 0.95,
@@ -362,6 +428,36 @@ const DEFAULT_CONFIG = {
   voiceSay: false,                 // 总开关（默认**关**：先自测通过再开）
   voiceModelOn: true,               // 语音模型：true=常驻（时刻准备）/ false=关闭（省 GPU）
   voicePreset: '雌小鬼·A（当前）',  // 音色预设（当前用 GPT-SoVITS）
+  // 语音合成后端（2026-11-14 新增）
+  //   gpt-sovits : 本地 9880，2~3 秒出音，显存约 3GB
+  //   breeze     : Breeze TTS 2（本地 9881 常驻，显存按需上下卡）
+  //                音质明显更好，但慢（实时率约 8 倍：3 秒语音约 27 秒）
+  //    breeze-cloud : Breeze Blue 云端（推荐）—— 约 3 秒出音，不占显存，$5 用一年多
+  //    breeze       : 本地 8GB 显卡推理 —— 8 倍慢于实时（3 秒语音要 60~90 秒）
+  voiceBackend: 'breeze-cloud',
+  // 云端音色 id（BreezeBlue 控制台建的三个）：
+  //   偶像版 voc_rn489h83rcvs ／ 迷糊版 voc_8yud7hz7c9q2 ／ 机灵版 voc_u3nxkd5578wc
+  voiceCloudVoice: 'voc_rn489h83rcvs',
+  // ── 梗百科（2026-11-16 接入 thawline/dsh-memewiki 的 6792 条词库）──────
+  //   直接读那份 SQLite（只读），群里冒出不懂的梗就查一条塞进上下文，
+  //   让她先接梗、别硬编。DSH 侧的注入链管不到机器人自己的模型调用，所以这里单独接。
+  memeWiki: true,
+  memeWikiDb: 'E:/memewiki/dsh-memewiki-main/data/memes.db',
+  memeWikiMaxChars: 260,        // 单条词条注入上限（太长会挤掉别的上下文）
+  memeWikiBare: true,           // 群里只发一个短词（≤8字、无标点）也去查
+  // 词库里语义不对的条目：她的"杂鱼杂鱼"是雌小鬼口癖，不是健身梗。
+  // 这些标题命中时直接丢弃，避免把她的口癖解释错。
+  memeWikiBlocklist: '杂鱼,666,白饭,肥鱼',
+  // ── 云端音色微调（2026-11-16 按用户挑选的 06 方案固化）──────────────
+  //   style 用"情境式"中文描述（官方指南：描述情境+意图+表达方式，
+  //   比堆形容词有效得多）。换风格只改这一句，不必换音色。
+  voiceStyle: '用居高临下的嘲讽语气说话，像在逗弄一个笨蛋，尾音微微上挑拖长，带着小恶魔似的坏笑。',
+  voiceSpeed: 1.05,            // 语速倍率（1=正常，>1 更快）
+  voiceGuidanceScale: 4,       // 贴合度：4=严守描述，越低越松散自然
+  // 语气词：真人说话有这些非语言声音，AI 语音缺的就是这个。
+  // 概率性注入到句子开头（不是每条都加，否则腻）。
+  voiceFillerChance: 0.5,
+  voiceFillers: '[哼],[笑],[叹气],[鼻音]',
   // 更新检查的自定义版本源（不依赖 GitHub）：逗号分隔 URL，返回 {"version":"1.3.x"} 即采用。
   // 适合自建对象存储 / 局域网共享 / 别的托管；也可填第三方镜像。
   updateMirror: '',
@@ -426,6 +522,12 @@ const DEFAULT_CONFIG = {
 
   // 拟人节流
   replyProbability: 0.8,          // 闲聊插话概率（用户要求：80%，很爱插话）
+  // ★ 2026-11-11 抄自 heartflow「双模型」：说话之前先让便宜模型打 0-10 分，
+  //   低于阈值就闭嘴。以前的策略是"概率决定"，该说时不说、不该说时乱说。
+  replyJudge: true,               // 总开关
+  replyJudgeMinScore: 5,          // 低于这个分 → 不说话（0-10）
+  replyJudgeModel: '',            // 判定用模型（空 = 跟随主模型；建议填便宜的快模型）
+  replyJudgeTimeoutMs: 2500,      // 超时就按"概率结果"放行，绝不卡住回复
   useDbMembers: true,             // 用数据库里的真实群成员昵称（我们修好了 hook 的 QueryDB）
   memoryExtract: true,            // 定期从群聊里提炼长期记忆（本地保存，每次对话都带上）
   // ── 记忆系统 v2（艾宾浩斯遗忘曲线 + 情绪加权）──────────────────
@@ -749,6 +851,14 @@ const BUILD_VER = '2026-10-23.4'   // 抬版本：让新实例压过热重载残
   }
 
   async function ttsStatus() {
+    // ★ 2026-11-14：GPT-SoVITS 引擎已被删除（换用 Breeze TTS 2）。
+    //   这里直接给出明确状态，避免面板显示"已停止"、用户点启动后一头雾水。
+    if (!resolveTtsApiPy()) {
+      return {
+        ok: true, state: 'removed', running: false, pids: [], port: TTS_PORT(), portAlive: false,
+        note: 'GPT-SoVITS 已删除（2026-11-14 换用 Breeze TTS 2）——语音走 breeze-server.py:9881',
+      }
+    }
     const [pids, portAlive] = await Promise.all([ttsPids(), tcpProbe(TTS_PORT())])
     const running = pids.length > 0
     // 语义化状态，面板直接显示这一句就够
@@ -769,6 +879,9 @@ const BUILD_VER = '2026-10-23.4'   // 抬版本：让新实例压过热重载残
 
   /** 真的合成一句（短），把服务端原文错误带回来 —— "坏没坏"的唯一可靠判据 */
   async function ttsTest(text) {
+    if (!resolveTtsApiPy()) {
+      return { ok: false, error: 'GPT-SoVITS 已删除，语音测试请直接试 Breeze：在群里 @她 说要语音' }
+    }
     const body = {
       text: String(text || '测试').slice(0, 20),
       text_lang: 'zh',
@@ -937,6 +1050,15 @@ const BUILD_VER = '2026-10-23.4'   // 抬版本：让新实例压过热重载残
       return { ok: false, error: 'action 只能是 status / start / stop / restart' }
     }
     if (act === 'status') return await ttsStatus()
+
+    // 引擎已删除时，start/restart 没有意义 → 直接返回原因（不抛错，面板好显示）
+    if ((act === 'start' || act === 'restart') && !resolveTtsApiPy()) {
+      return {
+        ok: false,
+        error: 'GPT-SoVITS 引擎已于 2026-11-14 删除，无法启动。语音后端请用 Breeze（面板「语音合成后端」= breeze，服务 breeze-server.py:9881，会自动拉起）。',
+        state: 'removed',
+      }
+    }
 
     const notes = []
     if (act === 'stop' || act === 'restart') {
@@ -1195,7 +1317,12 @@ const namesFile = join(dirname(memoryDir), 'members.json')
   // 背景：桥侧 rooms() 早期只能返回 roomId，消息里 senderName 也只能拿到 wxid。
   // 群名和联系人昵称都在 contact_fts_v5_content.c0（\b 分隔），
   // 用 name2id.rowid ↔ username 对上即可；这段查询只读、慢一点也无妨。
-  const HOOK_API_BASE = process.env.WECHAT_HOOK_API || 'http://127.0.0.1:30001'
+  // ★ 2026-11-12：hook 的 HTTP 服务端在微信 4.1.10.27 上 accept 不可靠
+  //   （fd_set 只有 64 项而 socket 句柄可达 1480 → select 永不就绪）。
+  //   现在统一走桥的代理端点：/api/hook/<原路径>，桥内部再用文件队列交给 hook。
+  //   WECHAT_HOOK_API 仍可用（设成 http://127.0.0.1:30001 就回到直连）。
+  const HOOK_API_BASE = process.env.WECHAT_HOOK_API || config.bridgeUrl.replace(/^ws/, 'http') + '/api/hook'
+  const HOOK_VIA_BRIDGE = !process.env.WECHAT_HOOK_API
   const roomNameCache = new Map()
   const contactNameCache = new Map()
   let namesAt = 0
@@ -2197,11 +2324,12 @@ let res = await callLlm(route, sys, usr, undefined)
       const res = MV2.sweep(facts, now, cfg)
       out.rooms = 1
       out.total = res.items.length
-      if (res.archived || res.purged || res.evicted) {
+      if (res.archived || res.purged || res.evicted || res.faded) {
         try { writeFileSync(globalFactsPath, JSON.stringify(res.items, null, 2)) } catch { /* ignore */ }
         for (const r of rooms.values()) r.facts = res.items   // 所有群指向同一份
         out.archived += res.archived; out.purged += res.purged; out.evicted += res.evicted
-        log(`记忆巡检（全局）：归档 ${res.archived}｜清理 ${res.purged}｜容量淘汰 ${res.evicted}（生效 ${res.items.filter((x) => !x.archived).length} 条）`)
+        out.faded = (out.faded || 0) + (res.faded || 0)
+        log(`记忆巡检（全局）：褪色 ${res.faded || 0}｜归档 ${res.archived}｜清理 ${res.purged}｜容量淘汰 ${res.evicted}（生效 ${res.items.filter((x) => !x.archived).length} 条）`)
       }
       return out
     }
@@ -2211,12 +2339,13 @@ let res = await callLlm(route, sys, usr, undefined)
       out.rooms++
       const res = MV2.sweep(facts, now, cfg)
       out.total += res.items.length
-      if (res.archived || res.purged || res.evicted) {
+      if (res.archived || res.purged || res.evicted || res.faded) {
         r.facts = res.items
         saveFacts(r)
         out.archived += res.archived
         out.purged += res.purged
         out.evicted += res.evicted
+        out.faded = (out.faded || 0) + (res.faded || 0)
         log(`记忆巡检「${r.roomName || r.roomId}」：归档 ${res.archived}｜清理 ${res.purged}｜容量淘汰 ${res.evicted}（剩 ${res.items.filter((x) => !x.archived).length} 条生效）`)
       }
     }
@@ -3285,7 +3414,26 @@ ${cur.text}`
     if (!force && Date.now() - (r.membersSyncedAt || 0) < 10 * 60_000) return 0
     r.membersSyncedAt = Date.now()
     try {
-      const res = await client.call('members', { roomId: r.roomId }, 30_000)
+      // ★ 2026-11-14：一次超时不算失败 —— 实测 JOIN 只要 124ms，
+      //   但桥重启/回调密集时会瞬时打满 30 秒。重试一次再判死刑。
+      let res = null
+      let lastErr = null
+      for (let attempt = 1; attempt <= 2; attempt++) {
+        const t0 = Date.now()
+        try {
+          res = await client.call('members', { roomId: r.roomId }, 15_000)
+          lastErr = null
+          break
+        } catch (e) {
+          lastErr = e
+          const ms = Date.now() - t0
+          if (attempt === 1) {
+            log(`群成员查询第 1 次失败（${ms}ms，bridge=${client.status?.connected ? '已连接' : '断开'}）→ 重试一次`)
+            await new Promise((z) => setTimeout(z, 1500))
+          }
+        }
+      }
+      if (lastErr) throw lastErr
       const list = res?.members || []
       if (!list.length) return 0
       let added = 0
@@ -3322,7 +3470,9 @@ ${cur.text}`
       }
       return added
     } catch (e) {
-      log('数据库同步群成员失败（可能是旧 DLL）：' + String(e?.message || e))
+      // 原来的提示"可能是旧 DLL"已经过时（DLL 早换过），改成如实报状态：
+      //   bridge 连接状态 + 群名，避免下次又误判成 DLL 问题。
+      log(`数据库同步群成员失败｜群=${r.name || r.roomId}｜bridge=${client.status?.connected ? '已连接' : '断开'}｜${String(e?.message || e).slice(0, 80)}`)
       return 0
     }
   }
@@ -3420,6 +3570,33 @@ ${cur.text}`
       log(`决定回（${d.reason}）｜${r.roomName}｜${trigger.senderName}: ${trigger.text}`)
     }
 
+    // ★ 2026-11-11「先判定再说话」：概率说"回"，再让便宜模型打分决定值不值得。
+    //   只判闲聊/问句/图片；被@、被点名、对话延续一律跳过判定（那几句必须回）。
+    if (config.replyJudge !== false && ['ambient', 'question', 'image'].includes(String(priority || ''))) {
+      try {
+        const st0 = personaOf(r)
+        const jr = await judgeReply(r, trigger, {
+          energy: Number(st0.energy) || 0.7,
+          social: Number(st0.social) || 0.25,
+          satiety: Number(st0.satiety) || 0.7,
+        })
+        stats.judge = (stats.judge || 0) + 1
+        const minScore = Number(config.replyJudgeMinScore) || 5
+        if (jr.score >= 0) {
+          if (jr.score < minScore) {
+            stats.skipped++
+            log(`不接（判定 ${jr.score}/10 < ${minScore}${jr.why ? '，' + jr.why : ''}）｜${r.roomName}｜${trigger.senderName}: ${String(trigger.text).slice(0, 40)}`)
+            return
+          }
+          log(`判定 ${jr.score}/10 ≥ ${minScore} → 接话${jr.why ? '（' + jr.why + '）' : ''}`)
+        } else {
+          log(`判定跳过（${jr.why}）→ 按概率结果继续`)
+        }
+      } catch (e) {
+        log('判定异常（放行）：' + String(e?.message || e).slice(0, 60))
+      }
+    }
+
     // 防重复①：这句话（归一化后）最近已经回过 → 不再回
     // （群里常见"有人把同一句/同一个问题重复发"，复读式回答最不像人）
     const norm = normText(trigger.text)
@@ -3486,9 +3663,14 @@ ${cur.text}`
     const part = h < 5 ? '凌晨' : h < 8 ? '清早' : h < 11 ? '上午' : h < 13 ? '中午'
       : h < 17 ? '下午' : h < 19 ? '傍晚' : h < 23 ? '晚上' : '深夜'
     const hhmm = String(h).padStart(2, '0') + ':' + String(mn).padStart(2, '0')
+    // ★ 2026-11-11 前缀缓存优化（SpectreCore 思路）：system 里放"小时级"时间，
+    //   分钟级精确时间不进 system（否则每分钟都变 → 缓存永远不命中，白付输入费）。
+    const hourLine = String(h).padStart(2, '0') + ' 点多'
     return {
       hhmm, part, hour: h, weekday: WEEK_CN[d.getDay()],
       dateLine: d.getFullYear() + ' 年 ' + (d.getMonth() + 1) + ' 月 ' + d.getDate()
+        + ' 日 星期' + WEEK_CN[d.getDay()] + ' ' + hourLine + '（' + part + '）',
+      exactLine: d.getFullYear() + ' 年 ' + (d.getMonth() + 1) + ' 月 ' + d.getDate()
         + ' 日 星期' + WEEK_CN[d.getDay()] + ' ' + hhmm + '（' + part + '）',
     }
   }
@@ -3499,6 +3681,128 @@ ${cur.text}`
     const h = Math.floor(m / 60), r = m % 60
     if (h < 24) return r ? h + ' 小时 ' + r + ' 分钟' : h + ' 小时'
     return Math.floor(h / 24) + ' 天' + (h % 24 ? ' ' + (h % 24) + ' 小时' : '')
+  }
+
+  /**
+   * system 指纹：同一条前缀 → 同一个指纹。
+   * 用来在日志/自检里证明「这一轮 system 跟上一轮字节一致」→ 前缀缓存能命中。
+   */
+  function systemFingerprint(text) {
+    const t = String(text || '')
+    let h1 = 0x811c9dc5
+    for (let i = 0; i < t.length; i++) { h1 ^= t.charCodeAt(i); h1 = Math.imul(h1, 0x01000193) }
+    return (h1 >>> 0).toString(16).padStart(8, '0') + '-' + t.length
+  }
+
+  // ═══════════════════════════════════════════════════════════════════
+  //  梗百科：直接读 dsh-memewiki 的词库（只读、离线、毫秒级）
+  //  为什么不用插件那条注入链：DSH 的 systemPrompt 注入只作用于我（agent）的
+  //  模型调用，机器人调 bailian 时看不到。所以这里自己读同一份库。
+  // ═══════════════════════════════════════════════════════════════════
+  let _memeDb = null
+  let _memeDbBad = false
+
+  function memeDb() {
+    if (_memeDb || _memeDbBad) return _memeDb
+    try {
+      // 延迟导入：Node < 22 没有 node:sqlite，这时静默降级（不影响聊天）
+      const { DatabaseSync } = require('node:sqlite')
+      if (!existsSync(config.memeWikiDb)) { _memeDbBad = true; return null }
+      _memeDb = new DatabaseSync(config.memeWikiDb, { readOnly: true })
+      let n = 0
+      try { n = Number(_memeDb.prepare('SELECT count(*) AS n FROM memes').get()?.n) || 0 } catch { }
+      log('梗百科：词库已加载 ' + config.memeWikiDb + '（' + n + ' 条词目）')
+    } catch (e) {
+      _memeDbBad = true
+      log('梗百科：词库不可用（' + String(e?.message || e).slice(0, 80) + '）→ 跳过')
+    }
+    return _memeDb
+  }
+
+  /** 照搬 dsh-memewiki 的四级查法：精确 → 别名 → 前缀 → 反向包含 */
+  function lookupMeme(q) {
+    const db = memeDb()
+    const word = String(q || '').trim()
+    if (!db || !word || word.length > 20) return null
+    const blocked = String(config.memeWikiBlocklist || '').split(',')
+      .map((x) => x.trim()).filter(Boolean)
+    const rows = []
+    const push = (sql, ...args) => {
+      try {
+        const r = db.prepare(sql).get(...args)
+        if (r) rows.push(r)
+      } catch { /* ignore */ }
+    }
+    push('SELECT title, tags, usage, aliases FROM memes WHERE lower(title) = lower(?)', word)
+    if (!rows.length) {
+      push('SELECT title, tags, usage, aliases FROM memes WHERE aliases IS NOT NULL '
+        + "AND instr(',' || lower(aliases) || ',', ',' || lower(?) || ',') > 0 LIMIT 1", word)
+    }
+    if (!rows.length) {
+      push('SELECT title, tags, usage, aliases FROM memes WHERE lower(title) LIKE lower(?) || '%' '
+        + 'ORDER BY length(title) ASC LIMIT 1', word)
+    }
+    if (!rows.length && word.length >= 3) {
+      push('SELECT title, tags, usage, aliases FROM memes WHERE length(title) >= 2 AND instr(?, title) > 0 '
+        + 'ORDER BY length(title) DESC LIMIT 1', word)
+    }
+    const hit = rows[0]
+    if (!hit) return null
+    // 语义不对的条目丢掉（她的口癖不是那个梗）
+    if (blocked.some((b) => b && (String(hit.title).includes(b) || b.includes(String(hit.title))))) {
+      log('梗百科：「' + word + '」命中「' + hit.title + '」但语义不符（黑名单）→ 丢弃')
+      return null
+    }
+    return hit
+  }
+
+  // 口语停用词：这些不是梗，别拿去查（否则每条闲聊都触发一次查询）
+  const MEME_STOP = new Set(['我', '你', '他', '她', '它', '我们', '你们', '他们',
+    '好的', '好', '行', '是的', '对', '可以', '嗯', '哦', '啊', '在', '在吗',
+    '谢谢', '哈哈', '哈哈哈', '呵呵', '收到', 'ok', 'okay', 'hi', 'hello',
+    '早', '晚安', '拜拜', '不知道', '没有', '是什么', '怎么', '为什么',
+    '是不是', '真的', '假的', '这个', '那个', '嗯嗯', '好耶'])
+
+  /** 这句话像不像在问梗 / 提到梗（命中才查，闲聊零开销） */
+  function memeQueryOf(text) {
+    const t = String(text || '').trim()
+    if (!t || t.length > 60) return ''
+    // ① 明确问梗句式：抓关键词后去掉尾部粘连的助词/语气词
+    //   （踩过：'yyds是什么意思' 会抓成 'yyds是'，查不到）
+    const m = /([一-龥A-Za-z0-9·]{2,20}?)\s*(?:是什么梗|什么梗|啥梗|什么意思|啥意思|什么来头|梗是啥|是啥梗)/.exec(t)
+    if (m) {
+      const w = m[1].replace(/(是|的|了|啊|呀|呢|吧|这|那|个)+$/, '').trim()
+      if (w.length >= 2 && !MEME_STOP.has(w)) return w
+      return ''       // '这是什么梗' 这种抓不到实词 → 不查
+    }
+    // ② 整句就是一个短词：2~8 字、无标点空格、不是停用词
+    if (config.memeWikiBare !== false
+        && t.length >= 2 && t.length <= 8
+        && !/[\s，。,.!！?？、~～]/.test(t)
+        && /[一-龥A-Za-z0-9]/.test(t)
+        && !MEME_STOP.has(t)) {
+      return t
+    }
+    return ''
+  }
+
+  /** 生成要注入的梗百科上下文块（没命中就返回空串，一个 token 都不占） */
+  function memeWikiBlock(triggerText) {
+    if (config.memeWiki === false) return ''
+    const q = memeQueryOf(triggerText)
+    if (!q) return ''
+    const hit = lookupMeme(q)
+    if (!hit) {
+      log('梗百科：查「' + q + '」未收录 → 不注入（让她自己说不知道，别硬编）')
+      return ''
+    }
+    const max = Number(config.memeWikiMaxChars) || 260
+    const usage = String(hit.usage || '').replace(/\s+/g, ' ').trim().slice(0, max)
+    log('梗百科：命中「' + hit.title + '」（查的是「' + q + '」）→ 注入 ' + usage.length + ' 字')
+    return '\n【梗百科·这个概念你知道（别科普，直接用）】\n'
+      + '词条：' + hit.title + (hit.tags ? '（' + String(hit.tags).slice(0, 60) + '）' : '') + '\n'
+      + '怎么用/怎么接：' + usage + '\n'
+      + '要求：像本来就会一样顺口接一句，别念词条、别解释出处；不确定就别用。'
   }
 
   function buildSystem(r) {
@@ -3533,6 +3837,8 @@ ${cur.text}`
         + '**不要硬编内容**——编错了比说看不清更难堪。',
       '  · 别炫耀这些能力，也别解释你怎么看到的；就像普通人"看了一眼"那样自然。',
       known.length ? `群里的人：${known.join('、')}` : (names ? `群成员：${names}` : ''),
+      // 梗百科：只有命中才加一行，闲聊完全零开销
+      memeWikiBlock(trigger && trigger.text),
       // 长期记忆：每次都带上（用户要求"每次都通过记忆系统"）
       //  从 12 条提到 18 条 —— 单条上限同时放宽到 200 字，记忆能带更多细节；
       //  18×200 字约 3.6K 字符，仍在预算内。
@@ -4741,14 +5047,94 @@ ${cur.text}`
     return { text, diag }
   }
 
+  /**
+   * 解析判定模型的输出 → { ok, score, why }
+   * 纯函数，方便单测；解析不出就当"放行"（score=-1），绝不能变成"不说话了"。
+   */
+  function parseJudgeOutput(text) {
+    return parseJudgeOutputImpl(text)
+  }
+
+  function __unused_parseJudgeOutput(text) {
+    const m = String(text || '').match(/\{[\s\S]*?\}/)
+    if (!m) return { ok: true, score: -1, why: '判定输出不可解析（放行）' }
+    let obj = null
+    try { obj = JSON.parse(m[0]) } catch { return { ok: true, score: -1, why: '判定 JSON 坏了（放行）' } }
+    const raw = obj && (obj.score !== undefined ? obj.score : obj.Score)
+    const score = Math.max(0, Math.min(10, Number(raw)))
+    if (!Number.isFinite(score)) return { ok: true, score: -1, why: '判定分无效（放行）' }
+    return { ok: true, score, why: String((obj.why || obj.reason || '')).slice(0, 20) }
+  }
+
+  /**
+   * 「先判定再说话」（2026-11-11，抄自 heartflow 的双模型思路）
+   *
+   * 为什么不直接用概率：概率看不懂上下文 —— 群里在吵架它也按 0.8 插一句，
+   * 大家在认真讨论某件事它反而不接。这里让便宜模型先打 0-10 分：
+   *   ≥ 阈值 → 说；< 阈值 → 闭嘴（并记下理由，方便调参）
+   *
+   * 设计红线：
+   *   · 只判「闲聊 / 问句」——被@、被点名、对话延续不判（那几句必须回）
+   *   · 超时或报错 → **放行**（判定失败不能变成"不说话了"）
+   *   · 单次最多 ~1.5k 字符上下文，便宜
+   */
+  async function judgeReply(r, trigger, { energy = 0.7, social = 0.25, satiety = 0.7 } = {}) {
+    if (config.replyJudge === false) return { ok: true, score: -1, why: '判定关闭' }
+    const route = resolveRoute()
+    const judgeModel = String(config.replyJudgeModel || '').trim()
+    const route2 = judgeModel ? { ...route, model: judgeModel } : route
+    const recent = (r.msgs || []).slice(-6).map((m) => `${m.isSelf ? '她' : (m.senderName || '群友')}：${String(m.text || '').slice(0, 60)}`).join('\n')
+    const sys = '你是群聊里的"要不要接这句话"判定器。只输出一个 JSON：{"score":0-10,"why":"六个字以内"}。'
+    const usr = `群最近在聊：\n${recent || '（没有上下文）'}\n\n`
+      + `现在这条：${trigger.senderName || '群友'}：${String(trigger.text || '').slice(0, 150)}\n`
+      + `她的状态：精力 ${Math.round(energy * 100)}%，社交需求 ${Math.round(social * 100)}%，饱腹感 ${Math.round(satiety * 100)}%\n\n`
+      + `打分标准：\n`
+      + `- 8~10：明确冲她来的、有趣的话题、有人在问她、气氛适合插话\n`
+      + `- 5~7：能接但不接也行（一般的闲聊）\n`
+      + `- 0~4：别人在跟别人说话、情绪低落的话题、纯陈述没必要接、重复、无意义\n`
+      + `只输出 JSON，不要解释。`
+    const ac = new AbortController()
+    const killer = track(setTimeout(() => ac.abort(new Error('判定超时')), Math.max(800, Number(config.replyJudgeTimeoutMs) || 2500)))
+    try {
+      let text = ''
+      const stream = llmStreamTracked({
+        provider: route2.provider,
+        model: route2.model,
+        messages: [createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: usr }] })],
+        temperature: 0,
+        maxTokens: 80,
+        signal: ac.signal,
+        system: sys,
+      })
+      for await (const chunk of stream) if (chunk.type === 'text-delta') text += chunk.text
+      return parseJudgeOutput(text)
+    } catch (e) {
+      return { ok: true, score: -1, why: '判定失败放行：' + String(e?.message || e).slice(0, 40) }
+    } finally {
+      clearTimeout(killer)
+    }
+  }
+
   async function generateReply(r, batch, trigger, priority) {
     const route = resolveRoute()
     stats.llmCalls++
-    const systemText = buildSystem(r)
+    const sysFull = buildSystem(r)
+    // ★ 前缀缓存：稳定部分进 system，易变部分拼在本轮用户消息后面
+    const sp = splitSystemText(sysFull)
+    const systemText = sp.system
+    const volatileText = sp.volatile
     // 长记忆检索：提起以前的事就翻数据库，结果并进这次提示词（不额外调模型）
     trigger.historyHits = await lookupHistory(r, trigger)
-    const userText = buildUser(r, batch, trigger, priority)
+    let userText = buildUser(r, batch, trigger, priority)
+    if (volatileText) userText = userText + '\n\n【当前状态】\n' + volatileText
     const effort = config.reasoningEffort || undefined
+    try {
+      const fp = systemFingerprint(systemText)
+      if (fp !== r.__lastSysFp) {
+        r.__lastSysFp = fp
+        log(`system 前缀 ${fp}（变化 → 本次缓存会失效；同一小时内应保持不变）`)
+      }
+    } catch { /* ignore */ }
     let { text, diag } = await callLlm(route, systemText, userText, effort)
 
     // 空回复兜底：① 把系统提示并进用户消息（有的 provider 不吃 system 槽）
@@ -4980,7 +5366,17 @@ ${cur.text}`
       if (now - (r.lastProactiveAt || 0) < config.proactiveMinGapMs) continue
       const recentReplies = r.policy.replyTimes.filter((t) => now - t < 600_000).length
       if (recentReplies >= config.maxRepliesPer10Min) continue
-      if (Math.random() > config.proactiveChance) continue           // 没中就下次再掷
+      // ★ 2026-11-11 四状态接入行为：社交需求越高越憋不住（最高 ×1.35）；
+      //   饱腹感太低会略微降低"找话题"意愿（饿了先想吃的，不想聊天）—— 但不会归零。
+      let pPro = Number(config.proactiveChance) || 0.55
+      try {
+        const stP = personaOf(r)
+        const soc = Number(stP.social) || 0.25
+        const sat = Number(stP.satiety)
+        if (soc > 0.6) pPro *= 1 + Math.min(0.35, (soc - 0.6) * 1.0)
+        if (Number.isFinite(sat) && sat < 0.25) pPro *= 0.85
+      } catch { /* 状态读不到就按原概率 */ }
+      if (Math.random() > Math.min(0.95, pPro)) continue           // 没中就下次再掷
       log(`群「${r.roomName}」安静 ${Math.round((now - (r.lastActivityAt || 0)) / 60000)} 分钟 → 主动找话题`)
       try { await proactiveSay(r) } catch (e) { log('主动发言异常：' + String(e?.message || e)) }
       // 主动发出去就 +1（没人接会一直累加；有人说话会在 push() 里清零）
@@ -5398,12 +5794,18 @@ ${cur.text}`
             const nowR = Date.now()
             r.facts = (r.facts || []).map((m) => {
               if (!m || m.id !== chosen.id) return m
-              return {
+              const bumped = {
                 ...m,
                 recallCount: (Number(m.recallCount) || 0) + 1,
                 lastRecallAt: nowR,
                 strength: MV2.reinforceStrength(m, nowR, memCfg()),
               }
+              // ★ 2026-11-11 多层褪色：被重新想起 → 回亮一档（以前只会加强度，fade 不动）
+              const bright = MV2.brighten(bumped, { now: nowR, cfg: memCfg() })
+              if (bright && bright.fade !== undefined && bright.fade < (Number(m.fade) || 0)) {
+                log(`记忆回亮：「${String(m.text).slice(0, 26)}」褪色 ${Number(m.fade) || 0} → ${bright.fade}`)
+              }
+              return bright
             })
             try { saveFacts(r) } catch { }
             log(`她想起了「${String(chosen.text).slice(0, 34)}」（模型选中 #${parsed.index}）`)
@@ -5475,6 +5877,20 @@ ${cur.text}`
             if ([...pick].length + [...voiceText].length <= max) voiceText = pick + voiceText
             else voiceText = pick       // 原话太长 → 只发这句嫌弃（也是"极不情愿"的正确表达）
             log(`强制语音加"不情愿"前缀："${pick}"`)
+          }
+          // ★ 2026-11-16：语气词注入 —— 真人说话会有 [哼]/[笑]/[叹气] 这类非语言声音，
+          //   这正是 AI 语音"不像真人"的主要原因。按概率加在开头（不每条都加，否则腻）。
+          //   实测这几类会被 TTS 念成真实发声，不是念字。
+          {
+            const chance = Number(config.voiceFillerChance) || 0
+            const raw = String(config.voiceFillers || '').trim()
+            const fillers = raw ? raw.split(',').map((x) => x.trim()).filter(Boolean) : []
+            const already = /^\s*\[/.test(voiceText)      // 已经有语气词就不重复加
+            if (chance > 0 && fillers.length && !already && Math.random() < chance) {
+              const f = fillers[Math.floor(Math.random() * fillers.length)]
+              voiceText = f + ' ' + voiceText
+              log(`语音加语气词：${f}`)
+            }
           }
           const delay0 = humanDelayMs(voiceText, priority)
           log(`准备发语音气泡（${vd.why}）｜${Math.round(delay0 / 1000)}s 后发`)
@@ -5741,6 +6157,33 @@ ${cur.text}`
   // 避免频繁打 hook；连续 2 次异常（≈10 分钟）才告警，恢复也告警。
   ctx.effect(() => {
     const iv = setInterval(() => { void healthTick() }, Number(config.healthCheckMs) || 300_000)
+    // ★ 2026-11-14：看门狗宿主化 —— 外部 WMI 起的 powershell 常驻进程不可靠
+    //   （跑几轮就悄悄消失，没人拉）。插件进程本身 24/7 活着，在这里每 5 分钟
+    //   spawn 一次单次模式的看门狗主体（修复弹窗自动点击 / wal 检查 / 桥拉起）。
+    //   windowsHide=true 不弹窗口；失败只记日志，绝不影响消息主流程。
+    const wdIv = setInterval(() => {
+      try {
+        execFile('powershell.exe', [
+          '-NoProfile', '-ExecutionPolicy', 'Bypass',
+          '-File', 'D:\\微信deepseek\\scripts\\watchdog-wechat.ps1', '-LoopSec', '0',
+        ], { timeout: 110_000, windowsHide: true }, (err, stdout) => {
+          const out = String(stdout || '').trim()
+          if (err && !out.length) {
+            log('[看门狗] 执行失败：' + String(err?.message || err).slice(0, 120))
+          } else if (out) {
+            for (const line of out.split('\n')) {
+              log('[看门狗] ' + line.trim().slice(0, 140))
+            }
+          }
+        })
+      } catch (e) { log('[看门狗] 启动失败：' + String(e?.message || e).slice(0, 120)) }
+    }, 5 * 60_000)
+    track(wdIv)
+    log('[看门狗] 已并入插件心跳（每 5 分钟执行一次 watchdog-wechat.ps1）')
+    // 梗百科：启动就打开词库（只读），省掉第一条消息的首次加载延迟
+    if (config.memeWiki !== false) {
+      try { memeDb() } catch (e) { log('梗百科：预加载失败 ' + String(e?.message || e).slice(0, 80)) }
+    }
     // 记忆巡检：默认每天一次（memoryConsolidate=hourly 则每小时；off 不跑）
     const memEvery = config.memoryConsolidate === 'hourly' ? 3_600_000
       : (config.memoryConsolidate === 'off' ? 0 : 6 * 3_600_000)   // daily 但分散到 6h 一次，避免整点一起跑
@@ -5752,7 +6195,7 @@ ${cur.text}`
       track(memIv)
       log(`记忆巡检已启动：每 ${Math.round(memEvery / 3600000)} 小时一次（memoryConsolidate=${config.memoryConsolidate}）`)
     }
-    return () => clearInterval(iv)
+    return () => { clearInterval(iv); clearInterval(wdIv) }
   }, SHORT + ': health heartbeat')
 
   // ── 朋友圈自动发布（2026-10-26）────────────────────────────────────────────
@@ -7920,6 +8363,146 @@ ${cur.text}`
           },
         }
       }
+      case 'startAll': {
+        // ═══════════════════════════════════════════════════════════
+        //  一键启动（2026-11-11 用户要求："hook 经常挂不上，想一键起来"）
+        //
+        //  设计原则：**能跳过的就跳过**，只补缺的那一环。
+        //    ① 微信客户端：进程在 + hook 通 → 跳过；进程不在 → 启动（含 UIA 点「进入微信」）
+        //    ② hook：直接读 /QueryDB/status，IsLogin=1 才算就绪
+        //    ③ 桥：17300 能应答 → 跳过；不在 → spawn server.mjs 并等监听
+        //    ④ 插件↔桥：检查 WS 是否已 identify
+        //
+        //  为什么不在"hook 挂了但客户端在跑"时自动杀客户端：
+        //    R1 定了「绝不强杀微信」（杀一次 = 全部库句柄重来 + 可能丢未落盘数据）。
+        //    这里只**报告** needClientRestart，由用户在面板上再点一次「重启客户端」。
+        // ═══════════════════════════════════════════════════════════
+        const steps = []
+        const t0 = Date.now()
+        const push = (step, state, detail, extra = {}) => steps.push({ step, state, detail, at: Date.now() - t0, ...extra })
+
+        const httpUp = async (url, ms = 3000) => {
+          try {
+            const r = await fetch(url, { signal: AbortSignal.timeout(ms) })
+            return { up: true, status: r.status, text: (await r.text()).slice(0, 300) }
+          } catch { return { up: false } }
+        }
+        // ── ① 微信客户端 ────────────────────────────────────────
+        let procs = 0, hookAlive = false, isLogin = 0
+        try {
+          const st = await client.call('wechatPower', { action: 'status' }, 20000)
+          procs = Number(st?.procs) || 0
+          hookAlive = st?.hook === true || st?.hook === 1 || (Number(st?.isLogin) === 1)
+          isLogin = Number(st?.isLogin) || 0
+        } catch (e) {
+          push('微信客户端', 'warn', '状态查询失败（' + String(e?.message || e).slice(0, 60) + '），按未运行处理')
+        }
+        let needClientRestart = false
+        if (procs > 0 && hookAlive) {
+          push('微信客户端', 'skip', `已在运行（${procs} 个进程，已登录）→ 跳过`)
+        } else if (procs > 0 && !hookAlive) {
+          // 进程在但 hook 不通：**不杀**，只提示
+          needClientRestart = true
+          push('微信客户端', 'warn', `进程在（${procs} 个）但 hook 没挂上 → 需要重启客户端才能重新加载 version.dll`)
+        } else {
+          push('微信客户端', 'run', '未运行 → 正在启动（会等「进入微信」按钮点完 + hook 就绪，最长 3 分钟）')
+          try {
+            const r = await client.call('wechatPower', { action: 'start' }, 190000)
+            const ok = r?.ok !== false && (Number(r?.isLogin) === 1 || r?.hook === true)
+            push('微信客户端', ok ? 'ok' : 'fail',
+              ok ? `已启动（${Number(r?.procs) || '?'} 进程，hook=${r?.hook ? '就绪' : '未知'}）` : '启动失败：' + String(r?.error || r?.note || '未知').slice(0, 80))
+            if (ok) { procs = Number(r?.procs) || procs; hookAlive = true; isLogin = Number(r?.isLogin) || 1 }
+          } catch (e) {
+            push('微信客户端', 'fail', '启动异常：' + String(e?.message || e).slice(0, 80))
+          }
+        }
+
+        // ── ② hook ────────────────────────────────────────────
+        let hook = await httpUp('http://127.0.0.1:30001/QueryDB/status', 4000)
+        let hookLogin = 0
+        try { hookLogin = Number(JSON.parse(hook.text || '{}').IsLogin) || 0 } catch { hookLogin = 0 }
+        if (hook.up && hookLogin === 1) {
+          push('hook 接口', 'skip', '30001 已就绪（IsLogin=1）→ 跳过')
+        } else if (hook.up) {
+          push('hook 接口', 'warn', '30001 有应答但未登录（IsLogin=0）→ 可能还在登录页')
+        } else {
+          // 给 40 秒宽限（刚启动的客户端要时间加载 DLL）
+          let waited = 0
+          push('hook 接口', 'run', '30001 无应答 → 等待客户端加载 hook（最多 40 秒）')
+          while (waited < 40000) {
+            await new Promise((r) => setTimeout(r, 2000)); waited += 2000
+            hook = await httpUp('http://127.0.0.1:30001/QueryDB/status', 3000)
+            if (hook.up) break
+          }
+          if (hook.up) {
+            try { hookLogin = Number(JSON.parse(hook.text || '{}').IsLogin) || 0 } catch { /* ignore */ }
+            push('hook 接口', 'ok', '30001 已就绪' + (hookLogin === 1 ? '（已登录）' : '（未登录）'))
+          } else {
+            needClientRestart = true
+            push('hook 接口', 'fail', '30001 仍无应答：客户端没加载 version.dll（检查客户端目录里的 version.dll），或客户端在登录页')
+          }
+        }
+
+        // ── ③ 桥 ──────────────────────────────────────────────
+        let bridgeUp = (await httpUp('http://127.0.0.1:17300/api/status', 3000)).up
+        if (bridgeUp) {
+          push('接入层桥', 'skip', '17300 已在监听 → 跳过')
+        } else {
+          push('接入层桥', 'run', '17300 无应答 → 拉起 wx-bridge/server.mjs')
+          try {
+            const base = BOT_HOME
+            const bridgeDir = join(base, 'wx-bridge')
+            const wechatExe = process.env.WECHAT_EXE || (detectWechatDir() ? join(detectWechatDir(), 'Weixin.exe') : '')
+            const argv = ['server.mjs', '--transport=wechat-hook', '--api-port=30001', '--cb-port=18998',
+              '--data-dir=' + join(base, 'data')]
+            if (wechatExe) argv.push('--wechat=' + wechatExe)
+            const { spawn } = await import('node:child_process')
+            const child = spawn(process.execPath, argv, { cwd: bridgeDir, detached: true, stdio: 'ignore', windowsHide: true })
+            child.on('error', (e) => log('一键启动：拉起桥失败 ' + String(e?.message || e).slice(0, 120)))
+            child.unref()
+            let up = false
+            const tb = Date.now()
+            while (Date.now() - tb < 30000) {
+              await new Promise((r) => setTimeout(r, 1000))
+              if ((await httpUp('http://127.0.0.1:17300/api/status', 2000)).up) { up = true; break }
+            }
+            bridgeUp = up
+            push('接入层桥', up ? 'ok' : 'fail', up ? '已监听 17300' : '30 秒内没起来，看 wx-bridge 日志')
+          } catch (e) {
+            push('接入层桥', 'fail', '拉起失败：' + String(e?.message || e).slice(0, 80))
+          }
+        }
+
+        // ── ④ 插件 ↔ 桥 ────────────────────────────────────────
+        if (bridgeUp) {
+          let linked = !!bridge.loggedIn
+          if (!linked) {
+            // 给 WS 一点重连时间
+            for (let i = 0; i < 6 && !linked; i++) {
+              await new Promise((r) => setTimeout(r, 1000))
+              linked = !!bridge.loggedIn
+            }
+          }
+          push('插件↔桥', linked ? 'ok' : 'warn',
+            linked ? `已连上（self=${bridge.self || '?'}）` : '桥在但插件还没 identify（等几秒会自动重连；仍不行就重启 DSH）')
+        } else {
+          push('插件↔桥', 'skip', '桥没起来，跳过')
+        }
+
+        const bad = steps.filter((x) => x.state === 'fail').length
+        const warn = steps.filter((x) => x.state === 'warn').length
+        const summary = bad ? `有 ${bad} 步失败` : warn ? `起来了，但有 ${warn} 处要处理` : '全部就绪'
+        log('一键启动：' + steps.map((x) => `${x.step}=${x.state}`).join('｜'))
+        return {
+          ok: bad === 0,
+          summary, steps,
+          needClientRestart,
+          hint: needClientRestart
+            ? 'hook 没挂上时只有重启客户端才能重新加载 version.dll（点下面的「重启客户端」）'
+            : (warn ? '看下面哪一步是 ⚠️' : '都好了，去群里说句话试试'),
+          elapsedMs: Date.now() - t0,
+        }
+      }
       case 'wechatPower': {
         // ★ 2026-10-28：这条路径原来是"点了就重启"，既没有"已经在跑"的判断，
         //   也没有次数上限 —— 误触一次就是全部数据库句柄重来 + 一轮假崩溃记录
@@ -8235,9 +8818,14 @@ ${cur.text}`
         }
       }
       case 'selfcheck': {
-        const h = await healthCheck({ deep: true })
+        // ★ 2026-11-11：默认改成**轻量自检**（只查桥/登录/轮询/配置/模型路由，
+        //   不碰数据库）。深查要显式传 deep:true —— 深度探测会真读 message_0.db，
+        //   而 hook 这条路径崩过一次（VERSION.dll+0x84352，rip=0x0），
+        //   不能让"点一下看看"变成"把客户端搞崩"。
+        const deep = a && a.deep === true
+        const h = await healthCheck({ deep })
         healthLast = h
-        return h
+        return { ...h, deep }
       }
       case 'rooms': {
         const list = await client.call('rooms', {}, 10_000)
@@ -8306,7 +8894,7 @@ ${cur.text}`
         if (!text) throw new Error('text 不能为空')
         const r = await client.call('sayVoice', {
           roomId: room.roomId, text, emotion: String(a.emotion || 'main'),
-        }, 90_000)
+        }, 240_000)   // Breeze 后端合成慢（实时率约 8 倍），90s 不够
         if (r?.ok) {
           stats.sentVoice = (stats.sentVoice || 0) + 1
           push(roomState(room.roomId, room.name), { ts: Date.now(), isSelf: true, sender: 'self', senderName: '我', text })
@@ -8492,85 +9080,6 @@ ${cur.text}`
       case 'persona.selfReview': {
         const r = globalHostRoom()
         return await selfReview(r, { force: true })
-      }
-      case 'persona.astro': {
-        // 星盘数据：人际关系 × 记忆关联 × 性格（2026-11-02 加人-人关系）
-        const room0 = globalHostRoom()
-        const rv = panelRoomView(room0)
-        const st = personaOf(rv)
-        let facts = []
-        try { facts = JSON.parse(readFileSync(globalFactsPath, 'utf8')) || [] } catch { facts = [] }
-        facts = facts.filter((f) => f && !f.archived)
-        // 人名来源（按可靠度）：config.memberNames → contactNameCache → 各房间历史里的 senderName
-        const nameMap = new Map()
-        for (const [id, nm] of Object.entries(config.memberNames || {})) if (nm) nameMap.set(id, String(nm))
-        try { for (const [id, nm] of contactNameCache.entries()) if (nm && !nameMap.has(id)) nameMap.set(id, String(nm)) } catch { /* ignore */ }
-        for (const rr of rooms.values()) {
-          for (const m of (rr.msgs || []).slice(-200)) {
-            if (!m || m.isSelf || !m.sender) continue
-            const nm = String(m.senderName || '')
-            if (nm && !/^wxid_/i.test(nm) && !nameMap.has(m.sender)) nameMap.set(m.sender, nm)
-          }
-        }
-        // ★ 2026-11-02：没有名字的人不要拿 wxid 当显示名（用户要求"只显示名称）
-        const hashId = (id) => {
-          let h = 2166136261
-          for (let i = 0; i < String(id).length; i++) { h ^= String(id).charCodeAt(i); h = Math.imul(h, 16777619) }
-          return (h >>> 0) % 90 + 10
-        }
-        const list = [...nameMap.entries()].map(([id, name]) => {
-          const nm = String(name || '').trim()
-          const clean = nm && !/^wxid_/i.test(nm) && !nm.includes('@chatroom') ? nm : ''
-          return { id, name: clean || ('群友' + hashId(id)) }
-        })
-        // 人-人关系：缓存 30 分钟（要查群成员 + 消息历史，别每次开面板都打库）
-        let social = null
-        try {
-          // ★ 放在 facts 的**上一级**：facts 目录里的 json 会被记忆迁移测试当成记忆文件
-          const cachePath = join(dirname(dirname(globalFactsPath)), 'social-cache.json')
-          try {
-            const raw = JSON.parse(readFileSync(cachePath, 'utf8'))
-            if (raw && raw.at && Date.now() - raw.at < 30 * 60_000) social = raw
-          } catch { /* 没缓存 */ }
-          if (!social) {
-            const realRooms = [...rooms.values()].filter((r2) => r2 && r2.roomId && !String(r2.roomId).startsWith('_'))
-            const roomMembers = {}
-            const talkAcc = new Map()
-            for (const r2 of realRooms.slice(0, 4)) {
-              try {
-                const mm = await client.call('members', { roomId: r2.roomId }, 20_000)
-                const ids = ((mm && mm.members) || []).map((x) => String(x.wxid || '')).filter(Boolean)
-                if (ids.length) roomMembers[r2.roomId] = ids
-              } catch { /* 单群失败不影响 */ }
-              try {
-                const h = await client.call('searchMessages', { roomId: r2.roomId, query: '', limit: 600, scan: 1500 }, 30_000)
-                const msgs = ((h && h.items) || [])
-                  .filter((x) => x && !x.isSelf && x.sender && x.ts)
-                  .map((x) => ({ sender: String(x.sender), ts: Number(x.ts) }))
-                for (const p of SOCIAL.talkPairs(msgs)) {
-                  const k = [p.a, p.b].sort().join('|')
-                  talkAcc.set(k, (talkAcc.get(k) || 0) + p.n)
-                }
-              } catch { /* ignore */ }
-            }
-            const talkPairs = [...talkAcc.entries()].map(([k, n]) => { const [x, y] = k.split('|'); return { a: x, b: y, n } })
-            social = { at: Date.now(), roomMembers, talkPairs }
-            try { writeFileSync(cachePath, JSON.stringify(social)) } catch { /* ignore */ }
-            log(`星盘关系：${Object.keys(roomMembers).length} 个群 / ${talkPairs.length} 对"聊过"`)
-          }
-        } catch (e) {
-          log('星盘关系采集失败（不影响主图）：' + String(e?.message || e).slice(0, 80))
-        }
-        const chart = ASTRO.buildChartWithLayout({
-          persona: st,
-          facts,
-          people: list,
-          now: Date.now(),
-          retentionFn: (f, t) => { try { return MV2.retention(f, t) } catch { return 0.7 } },
-          selfName: String(config.botName || '蓝色大肥鱼'),
-          social,
-        })
-        return { ok: true, ...chart, at: Date.now() }
       }
       case 'persona.addTerm': {
         const w = String(args.term || args.text || '').trim()
