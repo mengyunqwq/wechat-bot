@@ -20,12 +20,12 @@ import { createRequire } from 'node:module'
 // 插件是 ESM（type: module），没有全局 require；node:sqlite 只能同步 require，
 // 所以这里造一个 require 出来（2026-11-16 接梗百科时踩到）
 const require = createRequire(import.meta.url)
-import * as MV2 from './memory-v2.mjs?v=vmwi2xhzp'   // 艾宾浩斯遗忘曲线 + 情绪加权（?v= 用于打破 ESM 缓存）
+import * as MV2 from './memory-v2.mjs?v=vmwikzq9a'   // 艾宾浩斯遗忘曲线 + 情绪加权（?v= 用于打破 ESM 缓存）
 import * as ST from './style.mjs'   // 口气：标点规约 / 口语碎片 / 情绪→语气
 import * as H3 from './human3.mjs'   // 第三轮：情景示例/幽默三招/不重复/收尾日记/羁绊
 import * as OB from './outbox.mjs'   // 统一出站队列（节流/去重/重试退避）
 import * as H2 from './human2.mjs'   // 第二轮人性化：承诺/纠错/沉默/追话/联想/自己的事
-import * as PS from './persona.mjs?v=vmwi2xhzp'      // 性格四件套 + 自传（?v= 打破 ESM 缓存）
+import * as PS from './persona.mjs?v=vmwikzq9a'      // 性格四件套 + 自传（?v= 打破 ESM 缓存）
 import net from 'node:net'
 import { request as httpsRequest } from 'node:https'
 import { join, dirname } from 'node:path'
@@ -531,7 +531,9 @@ const DEFAULT_CONFIG = {
   useDbMembers: true,             // 用数据库里的真实群成员昵称（我们修好了 hook 的 QueryDB）
   memoryExtract: true,            // 定期从群聊里提炼长期记忆（本地保存，每次对话都带上）
   // ── 记忆系统 v2（艾宾浩斯遗忘曲线 + 情绪加权）──────────────────
-  memoryCrossGroup: 'safe',        // ★ 跨群边界：safe=人事/身份可跨群但脱群名、事件只在本群｜none=只用本群｜all=完全互通
+  // ★ 2026-11-16 用户要求：她经常把别的群的事拿到这个群说（记忆串群），
+  //   默认改成 none = 严格只用本群记忆。safe 仍保留（人事可跨群、群名抹掉）。
+  memoryCrossGroup: 'none',        // none=只用本群｜safe=人事可跨群但脱群名｜all=完全互通
   memoryV2: true,                 // 总开关；false = 退回旧逻辑（slice(-18) 注入、不遗忘）
   memoryScope: 'global',          // global = 所有群共用一份记忆（她是一个人）；room = 每群独立
   memoryGlobalMax: 400,           // 全局记忆上限（比单群大，因为有多个群的来源）
@@ -541,7 +543,7 @@ const DEFAULT_CONFIG = {
   memoryKeepImportance: 0.85,     // 重要度 ≥ 此值 = 铁律记忆，永不自动归档
   memoryArchiveGraceDays: 30,     // 归档后保留多少天才真删
   memoryMaxActive: 120,           // 每群生效记忆上限（超了按 R×重要度 淘汰）
-  memoryInjectCount: 12,          // 每次带进上下文的记忆条数
+  memoryInjectCount: 8,           // 每次带进上下文的记忆条数（12→8：减少主动翻旧账的诱因）
   memoryEmotionBoost: 0.8,        // 情绪强度对初始强度的加成上限
   memoryRecallGamma: 1.2,         // 被用到一次 → 强度增益系数
   memoryPinnedMax: 3,             // 固定记忆必带条数上限
@@ -3848,9 +3850,9 @@ ${cur.text}`
         const facts = r.facts || []
         if (!facts.length) return ''
         if (config.memoryV2 === false) {
-          const gr0 = MV2.filterByRoom(facts, { roomId: r.roomId, mode: String(config.memoryCrossGroup || 'safe') })
-          return '\n【长期记忆（关于这个群和这些人，别忘）】\n'
-            + gr0.pool.slice(-18).map((f) => '- ' + f.text).join('\n')
+          const gr0 = MV2.filterByRoom(facts, { roomId: r.roomId, mode: String(config.memoryCrossGroup || 'none') })
+          return '\n【长期记忆】这些只在你心里：**对方没提到就不要主动说出来**，也不要提别的群/别的地方的事；对方问起再用，一两句带过。\n'
+            + gr0.pool.slice(-10).map((f) => '- ' + f.text).join('\n')
         }
         try {
           // 查询词 = 当前这条消息 + 最近 3 条（都在 evaluate 作用域里）
@@ -3858,7 +3860,7 @@ ${cur.text}`
           // ★ 跨群边界：记忆库是全局的，但"别的群发生的事"不能在这个群说出来。
           //   safe（默认）：关于人的认知（fact/pref/relation）可跨群，并把群名抹成"别的地方"；
           //   事件类（extract/event）只在本群用。
-          const gr = MV2.filterByRoom(facts, { roomId: r.roomId, mode: String(config.memoryCrossGroup || 'safe') })
+          const gr = MV2.filterByRoom(facts, { roomId: r.roomId, mode: String(config.memoryCrossGroup || 'none') })
           const groupNames = [...new Set(facts.map((x) => x && x.sourceRoomName).filter(Boolean))]
           const pool = gr.pool.map((x) => (x && x.sourceRoom && x.sourceRoom !== r.roomId
             ? { ...x, text: MV2.scrubRoomRefs(x.text, groupNames) } : x))
@@ -3890,9 +3892,12 @@ ${cur.text}`
             for (const x of graded) lines.push('- ' + x.text)
             return lines.join('\n')
           }
-          lines.push('\n【长期记忆】以下是你"记得"的事，按清晰度分了三档。'
-            + '**这些只供你心里有数：对方没提到，就不要主动说出来**（不翻旧账、不主动回忆）；'
-            + '只有对方问起或提到同一件事，才用它来接话。')
+          lines.push('\n【长期记忆】以下是你“记得”的事，按清晰度分了三档。\n'
+            + '**硬规矩（违反比忘记更糟）：**\n'
+            + '1. 这些只在你心里，**不要主动说出来**。对方这条消息没提到的事，一个字都别往回复里塞（不翻旧账、不主动回忆、不做“说起来…”式联想）。\n'
+            + '2. 对方问起或提到同一件事，才可以用它接话，一两句带过，别复述。\n'
+            + '3. **不要提别的群、别的房间、别的地方发生的事**，也不要说“上次在群里”“有人跟我说过”这类话——你只在当前这个群聊天。\n'
+            + '4. 记忆里没有的就是忘了，不要编。')
           if (sure.length) {
             lines.push('· 记得很清楚（对方问起时可以说）：')
             for (const x of sure) lines.push('  - ' + x.text)
@@ -3917,7 +3922,9 @@ ${cur.text}`
                 tastes: (st9.tastes && st9.tastes.likes) || [],
               })
               // ★ 跨群边界：联想也只从"本群 + 关于人的认知"里挑，别把别的群的事勾起来
-              const grA = MV2.filterByRoom(facts || [], { roomId: r.roomId, mode: String(config.memoryCrossGroup || 'safe') })
+              const grA = MV2.filterByRoom(facts || [], { roomId: r.roomId, mode: String(config.memoryCrossGroup || 'none') })
+              // ★ 2026-11-16（用户追加要求）：跨群默认 none，且**绝不主动提旧事**；
+              //   线索只认当前这条消息里的实词，候选只在被提到时才给。
               // ★ 2026-10-29（用户要求）：**别人不提，她不要主动提旧事**
               //   所以线索必须来自"当前这条消息"（不是最近几条拼起来），且必须是实词；
               //   候选只在被提到时才给，并且措辞改成"被问到才说"。

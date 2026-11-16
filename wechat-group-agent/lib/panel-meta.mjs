@@ -493,8 +493,10 @@ export const CONFIG_META = {
   },
   memoryCrossGroup: {
     group: 'memory', label: '跨群边界', type: 'select',
-    options: [['safe', '安全（人事可跨群、事件只在本群）'], ['none', '严格（只用本群）'], ['all', '完全互通（会串群）']],
-    help: '记忆库是全局的，但"别的群发生的事"不该在本群说出来。safe=关于人的认知可跨群（群名会被抹掉），事件只在本群。',
+    options: [['none', '严格（只用本群，推荐）'], ['safe', '安全（人事可跨群、事件只在本群）'], ['all', '完全互通（会串群）']],
+    help: '记忆库是全局的。默认 none=只用本群记忆，彻底不串群。'
+        + 'safe=关于人的认知可跨群（群名抹成"别的地方"），事件只在本群。'
+        + '如果她老提别的群的事，就保持 none。',
   },
   memoryBaseDays: {
     group: 'memory', label: '基准半衰天数', type: 'number', min: 0.5, max: 90, step: 0.5, unit: '天',
