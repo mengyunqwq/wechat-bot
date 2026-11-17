@@ -55,6 +55,10 @@ function Resolve-DbRoot([string]$Current) {
   return $Current
 }
 
+# 立刻解析出真实路径（后面 WAL 采样要用）
+$DbRoot = Resolve-DbRoot $DbRoot
+Write-Host ('  数据库根目录: ' + $(if ($DbRoot) { $DbRoot } else { '（未找到）' }))
+
 
 $ErrorActionPreference = 'Stop'
 

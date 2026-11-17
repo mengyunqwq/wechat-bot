@@ -132,7 +132,7 @@ function Log([string]$msg) {
 }
 
 function Read-State {
-  try { return (Get-Content $StateFile -Raw | ConvertFrom-Json) } catch { return [pscustomobject]@{ lastClientStart = 0; lastWalAlert = 0; lastRepairClick = 0 } }
+  try { return (Get-Content $StateFile -Raw | ConvertFrom-Json) } catch { return [pscustomobject]@{ lastClientStart = 0; lastWalAlert = 0; lastRepairClick = 0; lastClientRestart = 0 } }
 }
 function Write-State($s) {
   try { $s | ConvertTo-Json -Compress | Set-Content $StateFile -Encoding UTF8 } catch { }
@@ -263,6 +263,71 @@ if (-not (Test-Bridge -TimeoutSec 6)) {
       if (-not $bres.ok) { Log ('桥重启失败：' + $bres.why) }
     }
   } catch { }
+}
+
+
+# ── ③.7 消息库搬家 / 句柄过期检测（2026-11-17）───────────────────────
+#   微信可能把消息库搬到 db_storage\<子目录>\message_0.db，
+#   而 hook 按名字缓存的句柄还指着旧文件 → 桥读冻结快照：
+#     polls 一直涨（自转）、msgs 不涨、用户发什么她都不回（实际故障）。
+#   判据（要求 10 分钟没涨，避免"群里刚好没人说话"误判）：
+#     真实库文件 mtime ≤15 分钟（客户端在写）
+#     + 桥 msgs 连续 10 分钟没变化
+#   → 判定句柄过期 → deploy-hook 重启客户端（限频 6 小时）
+$msgsNow = -1
+try { $msgsNow = [int](Invoke-RestMethod -Uri 'http://127.0.0.1:17300/api/pollStatus' -TimeoutSec 6).msgs } catch { }
+
+$state2 = Read-State
+$lastMsgs = -1
+try { $lastMsgs = [int]$state2.lastMsgs } catch { $lastMsgs = -1 }
+$lastMsgsAt = 0
+try { $lastMsgsAt = [int64]$state2.lastMsgsAt } catch { $lastMsgsAt = 0 }
+
+$nowMs3 = [int64]((Get-Date).ToUniversalTime() - (Get-Date '1970-01-01')).TotalMilliseconds
+if ($msgsNow -ge 0 -and $msgsNow -ne $lastMsgs) {
+  # 有新数据 → 记录时间点，判定为健康
+  $state2 | Add-Member -NotePropertyName lastMsgs -NotePropertyValue $msgsNow -Force
+  $state2 | Add-Member -NotePropertyName lastMsgsAt -NotePropertyValue $nowMs3 -Force
+  Write-State $state2
+} elseif ($msgsNow -ge 0 -and $lastMsgsAt -gt 0) {
+  $staleMin = [int](($nowMs3 - $lastMsgsAt) / 60000)
+  if ($staleMin -ge 10) {
+    # msgs 10 分钟没动 —— 看真实库文件是不是还在写
+    $dbRoot2 = Resolve-DbRoot $DbRoot
+    $cands2 = @()
+    if ($dbRoot2 -and (Test-Path $dbRoot2)) {
+      $cands2 += Get-ChildItem -Path $dbRoot2 -File -Filter 'message_0.db' -ErrorAction SilentlyContinue
+      $cands2 += Get-ChildItem -Path $dbRoot2 -Directory -ErrorAction SilentlyContinue |
+        ForEach-Object { Get-ChildItem $_.FullName -File -Filter 'message_0.db' -ErrorAction SilentlyContinue }
+    }
+    $newest2 = $cands2 | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+    if ($newest2) {
+      $dbAgeMin = [int]((Get-Date) - $newest2.LastWriteTime).TotalMinutes
+      if ($dbAgeMin -le 15) {
+        Log ('桥 msgs 已 ' + $staleMin + ' 分钟没涨（' + $msgsNow + '），但消息库在写（' + $dbAgeMin + ' 分钟前）→ 判定 hook 句柄过期')
+        $lastRestart = 0
+        try { $lastRestart = [int64]$state2.lastClientRestart } catch { $lastRestart = 0 }
+        if (($nowMs3 - $lastRestart) -gt 6 * 3600 * 1000) {
+          Log '→ 重启客户端（deploy-hook，限频 6 小时）'
+          try {
+            & (Join-Path (Split-Path $PSScriptRoot -Parent) 'scripts\deploy-hook.ps1') `
+              -Dll 'E:\wxhook-src\WeChat-Hook\x64\Release\version.dll' 2>&1 |
+              ForEach-Object { Log ('  deploy: ' + $_) }
+            $state2 | Add-Member -NotePropertyName lastClientRestart -NotePropertyValue $nowMs3 -Force
+            $state2 | Add-Member -NotePropertyName lastMsgsAt -NotePropertyValue $nowMs3 -Force
+            Write-State $state2
+            Log '客户端已重启（等下一轮确认 msgs 是否恢复）'
+          } catch {
+            Log ('客户端重启失败：' + $_.Exception.Message)
+          }
+        } else {
+          Log ('→ 需要重启，但 ' + [int](($nowMs3 - $lastRestart) / 60000) + ' 分钟前刚重启过（限频 6 小时）→ 跳过')
+        }
+      } else {
+        Log ('桥 msgs ' + $staleMin + ' 分钟没涨，消息库也 ' + $dbAgeMin + ' 分钟没写 → 群安静，正常')
+      }
+    }
+  }
 }
 
 # ── ③ wal 新鲜度 ───────────────────────────────────────────────────

@@ -91,10 +91,21 @@ def bili_pick(query):
     rows.sort(key=score, reverse=True)
     # ★ 标题必须对得上歌名，否则宁可不唱（曾经把「猫尾巴科普」当成歌转了一遍）
     keys = [k for k in re.split(r'[\s，。,.!！?？、\-—_]', query) if len(k) >= 2]
-    def matches(r):
+    # 放宽（2026-11-17）：原来要求「所有关键词都在标题里」，但像「月声尽，心灯明」
+    # 这种歌词名几乎不可能完全命中。现在只要**最长那段关键词**命中就认。
+    main_key = max(keys, key=len) if keys else ''
+
+    def tier1(r):
+        """所有关键词都命中（最可信）"""
         t = str(r.get('title') or '')
         return all(k in t for k in keys) if keys else True
-    hit = next((r for r in rows if matches(r)), None)
+
+    def tier2(r):
+        """退一步：最长关键词命中"""
+        t = str(r.get('title') or '')
+        return bool(main_key and main_key in t)
+    hit = (next((r for r in rows if tier1(r)), None)
+           or next((r for r in rows if tier2(r)), None))
     if not hit:
         raise SystemExit('搜到的视频标题都对不上「%s」，不唱了（避免转错视频）' % query)
     log('  选中：%s ｜ %s ｜ %s ｜ 播放 %s'
@@ -103,15 +114,62 @@ def bili_pick(query):
 
 
 def stage_download(url, work):
-    """yt-dlp 扒音频（只取音频流，转 wav）"""
+    """yt-dlp 扒音频（只取音频流，转 wav）
+
+    ★ 2026-11-17 加固：B 站会挑到很慢的 CDN 节点（实测 1.4 KiB/s，
+      重试 10 次后放弃 → 整条唱歌流程失败）。这里加超时/重试，
+      并且第一次失败就换低码率格式再试一次（30216 通常更快）。
+    """
     log('═══ 阶段 1：扒音频 ═══')
+    # ★ 2026-11-17：优先用 bili-download.py（自己拿 playurl、并行测速挑最快 CDN）。
+    #   yt-dlp 会取 B 站返回的第一个地址，而那个常常是 P2P 的 mcdn 节点：
+    #   实测 25 KiB/s（一首歌 10 分钟且常超时）；正规 upos 节点 3260 KiB/s（14 秒下完）。
+    m_bv = re.search(r'(BV[0-9A-Za-z]{10})', url)
+    if m_bv:
+        try:
+            import importlib.util as _u
+            _p = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'bili-download.py')
+            _spec = _u.spec_from_file_location('bili_dl', _p)
+            _mod = _u.module_from_spec(_spec)
+            _spec.loader.exec_module(_mod)
+            out = _mod.fetch_audio(m_bv.group(1), work, _ffmpeg(), log=log)
+            log('  快速下载完成：' + out)
+            return out
+        except Exception as e:
+            log('  ⚠️ 快速下载失败（%s）→ 退回 yt-dlp' % str(e)[:70])
+
     out_tpl = os.path.join(work, 'src.%(ext)s')
-    run([PY311, '-m', 'yt_dlp', '-x', '--audio-format', 'wav',
-         '--audio-quality', '0', '-o', out_tpl, '--no-playlist', url])
-    cands = glob.glob(os.path.join(work, 'src.*'))
-    if not cands:
-        raise SystemExit('没扒到音频文件')
-    return cands[0]
+    base = ['-m', 'yt_dlp', '-x', '--audio-format', 'wav',
+            '--no-playlist', '--socket-timeout', '30',
+            '--retries', '30', '--fragment-retries', '30',
+            '--extractor-retries', '5',
+            '-o', out_tpl]
+    # ★ 2026-11-17 实测：B 站 CDN 对这台机器限速到 7~50 KiB/s。
+    #   资产是"变声"不是"听原曲"，音质无所谓 —— 所以**优先下最小流**（53k/1.26MB），
+    #   不行再退回默认最佳音质。这样正常情况下 1~3 分钟就能下完。
+    attempts = [
+        base + ['-f', '30216/ba/b', '--audio-quality', '9', url],
+        base + ['-f', '30232/ba/b', '--audio-quality', '5', url],
+        base + ['--audio-quality', '0', url],
+    ]
+    last_err = None
+    for i, cmd in enumerate(attempts, 1):
+        try:
+            run([PY311] + cmd)
+            cands = glob.glob(os.path.join(work, 'src.*'))
+            if cands:
+                return cands[0]
+            last_err = '没扒到音频文件'
+        except SystemExit:
+            last_err = '第 %d/%d 次下载失败' % (i, len(attempts))
+            log('  ⚠️ ' + last_err + '，' + ('换低码率格式重试' if i == 1 else '放弃'))
+            for f in glob.glob(os.path.join(work, 'src.*')):
+                try:
+                    os.remove(f)
+                except Exception:
+                    pass
+    raise SystemExit('B 站音频下载失败（网络/CDN 问题，不是唱歌功能坏了）：'
+                     + str(last_err)[:80])
 
 
 def stage_separate(src, work):
@@ -186,7 +244,7 @@ def wait_vram(need_mb=6000, tries=10, gap=6):
 def probe_secs(path):
     """音频时长（秒）"""
     try:
-        FF = _ffmpeg().replace('ffmpeg.exe', 'ffprobe.exe')
+        FF = _ffprobe()
         r = subprocess.run([FF, '-v', 'error', '-show_entries', 'format=duration',
                             '-of', 'csv=p=0', path], capture_output=True, text=True, timeout=30)
         return float(r.stdout.strip())
@@ -297,6 +355,24 @@ def make_silk(audio, out_silk, start=0.0, duration=SILK_MAX_SEC):
         return None, 0
 
 
+def _ffprobe():
+    """ffprobe 路径：环境变量 > PATH > 由 ffmpeg 推。
+
+    ★ 2026-11-17 踩坑：shutil.which('ffmpeg') 在 Windows 返回的是 'ffmpeg.EXE'（大写），
+    原来用 .replace('ffmpeg.exe','ffprobe.exe') 替换不到 → 拿 ffmpeg 去跑 ffprobe 的参数
+    → 读不到时长 → 整条唱歌流程失败（连续两次）。
+    """
+    e = os.environ.get('FFPROBE')
+    if e and os.path.exists(e):
+        return e
+    w = shutil.which('ffprobe')
+    if w:
+        return w
+    ff = _ffmpeg()
+    # 大小写不敏感地替换末尾的 ffmpeg(.exe) → ffprobe(.exe)
+    return re.sub(r'ffmpeg(\.exe)?$', lambda m: 'ffprobe' + (m.group(1) or ''), ff, flags=re.I)
+
+
 def _ffmpeg():
     """ffmpeg 路径：环境变量 FFMPEG > PATH > 常见安装位置"""
     e = os.environ.get('FFMPEG')
@@ -314,7 +390,7 @@ def _ffmpeg():
 
 def probe_duration(path):
     try:
-        FF = _ffmpeg().replace('ffmpeg.exe', 'ffprobe.exe')
+        FF = _ffprobe()
         r = subprocess.run([FF, '-v', 'error', '-show_entries', 'format=duration',
                             '-of', 'csv=p=0', path], capture_output=True, text=True, timeout=30)
         return float(r.stdout.strip())
