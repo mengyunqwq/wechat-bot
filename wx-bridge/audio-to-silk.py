@@ -15,6 +15,14 @@ import json
 import os
 import shutil
 import subprocess
+
+# Windows 下不弹控制台窗口（2026-11-17：唱歌一次会起 yt-dlp/demucs/ffmpeg/RVC 多个子进程，
+# 不加这个标志就会连续闪好几个黑窗）
+if os.name == 'nt':
+    _NO_WIN = subprocess.CREATE_NO_WINDOW
+else:
+    _NO_WIN = 0
+
 import sys
 
 def find_ffmpeg():
@@ -43,7 +51,7 @@ def to_pcm(src, dst_pcm, start=0.0, duration=None):
     if duration:
         cmd += ['-t', str(duration)]
     cmd += ['-ar', str(PCM_RATE), '-ac', '1', '-f', 's16le', dst_pcm]
-    subprocess.run(cmd, check=True)
+    subprocess.run(cmd, check=True, creationflags=_NO_WIN)
     return dst_pcm
 
 

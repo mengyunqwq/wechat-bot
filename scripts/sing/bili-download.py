@@ -14,6 +14,14 @@ import hashlib
 import json
 import os
 import subprocess
+
+# Windows 下不弹控制台窗口（2026-11-17：唱歌一次会起 yt-dlp/demucs/ffmpeg/RVC 多个子进程，
+# 不加这个标志就会连续闪好几个黑窗）
+if os.name == 'nt':
+    _NO_WIN = subprocess.CREATE_NO_WINDOW
+else:
+    _NO_WIN = 0
+
 import threading
 import time
 import urllib.parse
@@ -185,7 +193,7 @@ def fetch_audio(bvid, work_dir, ffmpeg, log=print):
     download(best, m4a, log=log)
     wav = os.path.join(work_dir, 'src.wav')
     subprocess.run([ffmpeg, '-y', '-loglevel', 'error', '-i', m4a,
-                    '-ar', '44100', '-ac', '1', wav], check=True)
+                    '-ar', '44100', '-ac', '1', wav], check=True, creationflags=_NO_WIN)
     try:
         os.remove(m4a)
     except Exception:

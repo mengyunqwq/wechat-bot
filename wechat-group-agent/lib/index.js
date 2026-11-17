@@ -20,12 +20,12 @@ import { createRequire } from 'node:module'
 // 插件是 ESM（type: module），没有全局 require；node:sqlite 只能同步 require，
 // 所以这里造一个 require 出来（2026-11-16 接梗百科时踩到）
 const require = createRequire(import.meta.url)
-import * as MV2 from './memory-v2.mjs?v=vmwkat93l'   // 艾宾浩斯遗忘曲线 + 情绪加权（?v= 用于打破 ESM 缓存）
+import * as MV2 from './memory-v2.mjs?v=vmwkqpcgj'   // 艾宾浩斯遗忘曲线 + 情绪加权（?v= 用于打破 ESM 缓存）
 import * as ST from './style.mjs'   // 口气：标点规约 / 口语碎片 / 情绪→语气
 import * as H3 from './human3.mjs'   // 第三轮：情景示例/幽默三招/不重复/收尾日记/羁绊
 import * as OB from './outbox.mjs'   // 统一出站队列（节流/去重/重试退避）
 import * as H2 from './human2.mjs'   // 第二轮人性化：承诺/纠错/沉默/追话/联想/自己的事
-import * as PS from './persona.mjs?v=vmwkat93l'      // 性格四件套 + 自传（?v= 打破 ESM 缓存）
+import * as PS from './persona.mjs?v=vmwkqpcgj'      // 性格四件套 + 自传（?v= 打破 ESM 缓存）
 import net from 'node:net'
 import { request as httpsRequest } from 'node:https'
 import { join, dirname } from 'node:path'
@@ -3905,6 +3905,7 @@ ${cur.text}`
         cwd: dirname(script),
         detached: true,
         stdio: ['ignore', logFd, logFd],
+        windowsHide: true,        // 不弹黑窗（2026-11-17 用户反馈：唱歌时 cmd 面板开太多）
         env: { ...process.env, PYTHONIOENCODING: 'utf-8', PYTHONPATH: 'E:\\rvc\\RVC' },
       })
       proc.unref?.()
@@ -4033,40 +4034,51 @@ ${cur.text}`
   /**
    * 从消息里识别「唱个 xx」这类请求，返回歌名；识别不到返回空串。
    *
-   * 踩过的坑（2026-11-17，都在真日志里出现过）：
-   *   · 「行，认了就去唱歌，别研究肚子了。」→ 歌名被吞成《，别甩尾巴就行。》
-   *   · 「喊我，不想唱就不唱了」→ 歌名《就不唱了》
-   *   · 「唱个歌」→ 歌名《个歌》
-   * 所以规则收紧成三条：
-   *   ① 有书名号最可信（唱《后来》）
-   *   ② 没书名号就必须是「唱个/唱一首/来一首 + 名字」且**名字在句尾**
-   *   ③ 名字里不许有标点、不许含动词（唱说听看想要不别来去）
+   * 踩坑记录（都是真日志）：
+   *   · 「行，认了就去唱歌，别研究肚子了。」→ 歌名被吞成《别甩尾巴就行。》
+   *   · 「喊我，不想唱就不唱了」→《就不唱了》／「唱个歌」→《个歌》
+   *   · 「@蓝色大肥鱼 唱个月声尽，心灯明」→ 没触发（@前缀没剥 + 歌名带逗号被挡）
+   * 规则（2026-11-17 第三版）：
+   *   ① 先剥掉 @某人 前缀
+   *   ② **句首**就是动词（唱/来一首…）时：后面整段当歌名（允许逗号，≤30 字）
+   *   ③ 句中才出现动词时：仍要「唱个/唱一首/来一首 + 名字收在句尾」，且名字不许有标点
    */
   function singQueryOf(text) {
-    const t = String(text || '').trim()
-    if (!t || t.length > 40) return ''
+    let t = String(text || '').trim()
+    if (!t || t.length > 60) return ''
+    // ① 剥 @前缀（可能多个）
+    t = t.replace(/^(@[^\s@]+\s*)+/, '').trim()
+    if (!t) return ''
 
-    const clean = (raw) => {
-      let q = String(raw || '').trim().replace(/[吧呗嘛啊呀哦啦]+$/, '').trim()
-      if (q.length < 2 || q.length > 24) return ''
-      if (/[，。,.!！?？；;：:、~～\n《》「」『』]/.test(q)) return ''
-      if (/^(歌|歌曲|唱歌|一个|一首|一下|什么|啥|这个|那个|个歌|就不唱了)$/.test(q)) return ''
-      if (/[唱说听看想要不别来去]/.test(q)) return ''      // 歌名里一般不含这些动词
+    const VERB = '(?:唱一首歌|唱一首|唱一个|唱一支|唱一下|唱个|唱|来一首|来一个)'
+    const cleanTail = (q) => q.replace(/[吧呗嘛啊呀哦啦]+$/, '').trim()
+
+    // ② 句首动词：整段当歌名（允许逗号/顿号，但不许句号问号，避免吞句子）
+    const mHead = new RegExp('^' + VERB + '\\s*[《「『]?(.+?)[》」』]?\\s*$').exec(t)
+    if (mHead) {
+      let q = cleanTail(mHead[1])
+      if (/[。！？!?；;\\n]/.test(q)) return ''
+      if (q.length < 2 || q.length > 30) return ''
+      if (/^(歌|歌曲|唱歌|一个|一首|一下|什么|啥|这个|那个|个歌)$/.test(q)) return ''
       return q
     }
 
-    // ① 书名号（最可信）：唱《后来》 / 唱一首「晴天」
-    if (/唱|来一首|来一个/.test(t)) {
-      const m = /[《「『]([^》」』\n]{2,24})[》」』]/.exec(t)
-      if (m) {
+    // ③ 句中动词：书名号优先
+    if (/[《「『]([^》」』\n]{2,30})[》」』]/.test(t)) {
+      const m = /[《「『]([^》」』\n]{2,30})[》」』]/.exec(t)
+      if (m && new RegExp('唱|来一首|来一个').test(t)) {
         const q = m[1].trim()
-        if (q.length >= 2 && q.length <= 24) return q
+        if (q.length >= 2) return q
       }
     }
-
-    // ② 无书名号：必须「唱个/唱一首/来一首 + 名字」且名字收在句尾
-    const m2 = /(?:唱(?:一首歌|一首|一支|一下|个)|来一首|来一个)\s*([^\s，。,.!！?？；:：、~～]{2,24})\s*$/.exec(t)
-    if (m2) return clean(m2[1])
+    // ④ 句中动词 + 名字收在句尾，且没标点
+    const m2 = new RegExp(VERB + '\\s*([^\\s，。,.!！?？；:：、~～《》「」『』]{2,24})\\s*$').exec(t)
+    if (m2) {
+      const q = cleanTail(m2[1])
+      if (q.length < 2) return ''
+      if (/[唱说听看想要不别来去]/.test(q)) return ''
+      return q
+    }
     return ''
   }
 

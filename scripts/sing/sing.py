@@ -21,6 +21,14 @@ import os
 import re
 import shutil
 import subprocess
+
+# Windows 下不弹控制台窗口（2026-11-17：唱歌一次会起 yt-dlp/demucs/ffmpeg/RVC 多个子进程，
+# 不加这个标志就会连续闪好几个黑窗）
+if os.name == 'nt':
+    _NO_WIN = subprocess.CREATE_NO_WINDOW
+else:
+    _NO_WIN = 0
+
 import sys
 import time
 
@@ -56,12 +64,12 @@ def run(cmd, cwd=None, timeout=3600, env_extra=None, capture=True):
         # 否则日志里全是乱码（实测："銆愬崟娆℃帹鐞嗐€"）
         p = subprocess.run(cmd, cwd=cwd, timeout=timeout, env=env,
                            capture_output=True, text=True,
-                           encoding='utf-8', errors='replace')
+                           encoding='utf-8', errors='replace', creationflags=_NO_WIN)
         merged = ((p.stdout or '') + chr(10) + (p.stderr or '')).strip().split(chr(10))
         for ln in [x for x in merged if x.strip()][-8:]:
             log('    | ' + ln.strip()[:150])
     else:
-        p = subprocess.run(cmd, cwd=cwd, timeout=timeout, env=env)
+        p = subprocess.run(cmd, cwd=cwd, timeout=timeout, env=env, creationflags=_NO_WIN)
     log('  → 退出码 %d（%.1f 分钟）' % (p.returncode, (time.time() - t0) / 60))
     if p.returncode != 0:
         raise SystemExit('阶段失败（退出码 %d）' % p.returncode)
@@ -221,7 +229,7 @@ def free_vram_mb():
     try:
         r = subprocess.run(['nvidia-smi', '--query-gpu=memory.free',
                             '--format=csv,noheader,nounits'],
-                           capture_output=True, text=True, timeout=20)
+                           capture_output=True, text=True, timeout=20, creationflags=_NO_WIN)
         return int(r.stdout.strip().split()[0])
     except Exception:
         return -1
@@ -246,7 +254,7 @@ def probe_secs(path):
     try:
         FF = _ffprobe()
         r = subprocess.run([FF, '-v', 'error', '-show_entries', 'format=duration',
-                            '-of', 'csv=p=0', path], capture_output=True, text=True, timeout=30)
+                            '-of', 'csv=p=0', path], capture_output=True, text=True, timeout=30, creationflags=_NO_WIN)
         return float(r.stdout.strip())
     except Exception:
         return 0.0
@@ -294,7 +302,7 @@ def stage_convert(vocals, out_path, pitch, model, index_rate, index=None, chunk_
         seg_in = '%s_in%02d.wav' % (base, i)
         seg_out = '%s_out%02d.wav' % (base, i)
         subprocess.run([FF, '-y', '-loglevel', 'error', '-ss', str(st),
-                        '-t', str(chunk_sec), '-i', vocals, seg_in], check=True)
+                        '-t', str(chunk_sec), '-i', vocals, seg_in], check=True, creationflags=_NO_WIN)
         wait_vram(6000)
         convert_one(seg_in, seg_out, pitch, model, index_rate, index)
         parts.append(seg_out)
@@ -310,7 +318,7 @@ def stage_convert(vocals, out_path, pitch, model, index_rate, index=None, chunk_
         for pth in parts:
             f.write("file '%s'\n" % pth.replace('\\', '/'))
     subprocess.run([FF, '-y', '-loglevel', 'error', '-f', 'concat', '-safe', '0',
-                    '-i', listfile, '-ar', '40000', '-ac', '1', out_path], check=True)
+                    '-i', listfile, '-ar', '40000', '-ac', '1', out_path], check=True, creationflags=_NO_WIN)
     for pth in parts + [listfile]:
         try:
             os.remove(pth)
@@ -333,7 +341,7 @@ def mix_with_inst(vocals, work, out_mp3):
     subprocess.run([FF, '-y', '-loglevel', 'error', '-i', inst, '-i', vocals,
                     '-filter_complex',
                     '[1:a]volume=0.95[v];[0:a][v]amix=inputs=2:duration=longest:dropout_transition=0[a]',
-                    '-map', '[a]', '-b:a', '192k', out_mp3], check=True)
+                    '-map', '[a]', '-b:a', '192k', out_mp3], check=True, creationflags=_NO_WIN)
     return out_mp3
 
 
@@ -346,7 +354,7 @@ def make_silk(audio, out_silk, start=0.0, duration=SILK_MAX_SEC):
         return None, 0
     r = subprocess.run([PY311, SILK_TOOL, '--in', audio, '--out', out_silk,
                         '--start', str(start), '--duration', str(duration)],
-                       capture_output=True, text=True, timeout=300)
+                       capture_output=True, text=True, timeout=300, creationflags=_NO_WIN)
     try:
         j = json.loads((r.stdout or '').strip().split('\n')[-1])
         return j.get('silk'), int(j.get('durationMs') or 0)
@@ -392,7 +400,7 @@ def probe_duration(path):
     try:
         FF = _ffprobe()
         r = subprocess.run([FF, '-v', 'error', '-show_entries', 'format=duration',
-                            '-of', 'csv=p=0', path], capture_output=True, text=True, timeout=30)
+                            '-of', 'csv=p=0', path], capture_output=True, text=True, timeout=30, creationflags=_NO_WIN)
         return float(r.stdout.strip())
     except Exception:
         return 0.0
@@ -401,7 +409,7 @@ def probe_duration(path):
 def report_vram(tag):
     try:
         r = subprocess.run(['nvidia-smi', '--query-gpu=memory.used', '--format=csv,noheader,nounits'],
-                           capture_output=True, text=True)
+                           capture_output=True, text=True, creationflags=_NO_WIN)
         log('  显存（%s）：%s MiB' % (tag, r.stdout.strip()))
     except Exception:
         pass

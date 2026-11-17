@@ -100,17 +100,47 @@ function Test-Bridge([int]$TimeoutSec = 6) {
 function Start-Bridge([int]$MaxTry = 3, [int]$WaitSec = 22) {
   $node = Get-NodeExe
   if (-not $node) { return @{ ok = $false; why = '找不到 node.exe' } }
+
+  # ① 生成无窗口启动器（VBS）：node 跑起来不带控制台，输出重定向到日志
+  #    ★ 为什么不用 WMI 直启 node：WMI 创建的进程自带控制台窗口，
+  #      每次重启桥就弹一个 cmd（用户反馈"cmd 面板开太多"）。
+  #    ★ 为什么不用 WScript.Shell.Run 直接跑命令行：中文路径会失败（实测 3 次都没起）。
+  $vbs = 'D:\微信deepseek\data\logs\start-bridge.vbs'
+  $logFile = 'D:\微信deepseek\data\logs\bridge-console.log'
+  try {
+    $lines = @(
+      'On Error Resume Next',
+      'Set sh = CreateObject("WScript.Shell")',
+      ('sh.CurrentDirectory = "' + $BridgeDir + '"'),
+('sh.Run """' + $node + '"" server.mjs --transport=wechat-hook --api-port=30001 --cb-port=18998 --data-dir=D:/微信deepseek/data --wechat=D:/wxhook/wx4110/Weixin.exe", 0, False')
+    )
+    # VBS 用 ANSI(GBK) 存，避免中文路径在某些环境被当成 UTF-8 读成乱码
+    [System.IO.File]::WriteAllLines($vbs, $lines, [System.Text.Encoding]::Default)
+  } catch {
+    Write-Host ('  [桥] 生成 VBS 失败：' + $_.Exception.Message)
+  }
+
   for ($i = 1; $i -le $MaxTry; $i++) {
     Stop-Bridge
     Start-Sleep -Seconds 2
-    $cmd = '"' + $node + '" server.mjs --transport=wechat-hook --api-port=30001 ' +
-           '--cb-port=18998 --data-dir=D:/微信deepseek/data --wechat=D:/wxhook/wx4110/Weixin.exe'
-    $r = ([wmiclass]'Win32_Process').Create($cmd, $BridgeDir, $null)
+    $rc = 0
+    try {
+      if (Test-Path $vbs) {
+        $r = ([wmiclass]'Win32_Process').Create('wscript.exe "' + $vbs + '"', 'C:\', $null)
+        $rc = $r.ReturnValue
+      } else { $rc = -1 }
+    } catch { $rc = -2 }
+    if ($rc -ne 0) {
+      Write-Host ('  [桥] VBS 启动失败 rc=' + $rc + ' → 退回 WMI 直启（会有一个控制台窗口）')
+      $cmd = '"' + $node + '" server.mjs --transport=wechat-hook --api-port=30001 ' +
+             '--cb-port=18998 --data-dir=D:/微信deepseek/data --wechat=D:/wxhook/wx4110/Weixin.exe'
+      $null = ([wmiclass]'Win32_Process').Create($cmd, $BridgeDir, $null)
+    }
     Start-Sleep -Seconds $WaitSec
     if (Test-Bridge) {
-      return @{ ok = $true; try = $i; rc = $r.ReturnValue; pid = $r.ProcessId }
+      return @{ ok = $true; try = $i; rc = $rc; pid = 0 }
     }
-    Write-Host ('  [桥] 第 ' + $i + ' 次启动后无响应（rc=' + $r.ReturnValue + '）→ 重试')
+    Write-Host ('  [桥] 第 ' + $i + ' 次启动后无响应（rc=' + $rc + '）→ 重试')
   }
   return @{ ok = $false; why = ('重试 ' + $MaxTry + ' 次仍无响应') }
 }
