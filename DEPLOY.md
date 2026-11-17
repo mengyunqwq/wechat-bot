@@ -1,438 +1,373 @@
 # 部署指南
 
-> 目标：从零把机器人跑起来。**约 30 分钟**（不含下载 VS 编译环境）。
->
-> 🤖 **一键部署（推荐）**：把 **[docs/AI-一键部署.md](docs/AI-一键部署.md)** 第 2 节整段复制给任意 AI 客户端
-> （豆包电脑版 / Claude Desktop / Cursor / Cline / DSH…），它会自己查环境 → 装依赖 → 复制独立微信 →
-> 拿 Hook → 改配置 → 启动 → 逐项验证。人类只需提供 **2 样东西**（微信安装目录 + 一个可以牺牲的微信号）。
-> 本文档是人读的完整版；AI 版含**逐字段配置说明、完整验证清单、装好之后怎么用**。
-> 文末第 7 节保留了简版「AI 一键部署」段落。
+> 面向「从零把这套机器人跑起来」的人。所有命令都在 **Windows PowerShell** 里执行。
+> 文中 `D:\微信deepseek` 是**参考路径**，你可以换成任何位置，但要注意有个**中文路径相关的坑**（见 §7）。
 
 ---
 
-## 0. 前置条件
+## 0. 你会得到什么
 
-| 需要 | 版本 | 说明 |
+一台自己跑的微信机器人，具备：
+
+| 能力 | 说明 | 依赖 |
 |---|---|---|
-| Windows | 10/11 x64 | Hook 只支持 Windows |
-| Node.js | **18+**（建议 20+） | 跑接入层 |
-| Python | **3.10+** | 解密图片 / 画气泡 |
-| 微信客户端 | **4.1.10.27** | Hook 只适配这个版本 |
-| Visual Studio | 2022 Build Tools（含 C++ 工作负载）+ Windows SDK | **仅当你要自己编译 Hook 时**需要 |
-| 一个微信小号 | — | ⚠️ **强烈建议用小号，不要用你日常微信** |
-
-```powershell
-# 装 Python 依赖
-python -m pip install pycryptodome zstandard
-# 装 Node 依赖（在 wx-bridge 目录）
-npm install
-```
+| 群聊对话 | 人格/记忆/情绪/主动冒泡 | 必装 |
+| 语音收发 | 收语音转文字、发语音气泡（云端合成，约 3 秒） | 必装 + 可选云端 key |
+| **唱歌** | 群里说「唱个 X」→ 扒 B 站音频 → 分离人声 → RVC 变声成她的声线 → 发语音条 | 可选（要 GPU） |
+| 梗百科 | 群里冒出不懂的梗先查词库再接话 | 可选 |
+| 表情包 | 收藏/生成/挑图发表情 | 必装 |
+| 朋友圈 | AI 写内容 + 配图发布 | 必装 |
+| 控制面板 | `/wechat-bot` 网页调所有参数 | 必装 |
+| 自愈 | 桥挂了/客户端句柄过期 自动修 | 必装 |
 
 ---
 
-## 1. 准备一份独立的微信客户端（重要）
+## 1. 前置条件
 
-**绝对不要**直接改你日常用的微信目录 —— 万一出问题会影响你正常使用。
+### 1.1 系统
 
-```powershell
-# 假设你的微信装在 D:\Program Files\Tencent\Weixin
-# 复制一份到独立目录（例如 D:\wxhook\wx4110）
-robocopy "D:\Program Files\Tencent\Weixin" "D:\wxhook\wx4110" /E
-```
+| 项 | 要求 | 说明 |
+|---|---|---|
+| 系统 | Windows 10/11 **64 位** | hook 是 x64 DLL，32 位不行 |
+| 内存 | ≥ 16 GB | 微信 + node + python 同时在跑 |
+| 磁盘 | ≥ 30 GB 空闲 | 唱歌要存 RVC 环境（约 6GB）+ 训练素材 |
+| 显卡 | 可选，**唱歌需要** | 8GB 显存够用（实测 RTX 2060 SUPER 8G 跑得动） |
 
-复制完**先确认版本是 4.1.10.27**（客户端目录下有 `4.1.10.27\` 文件夹）。
+### 1.2 软件
 
-> 微信会自动更新，更新后 Hook 可能失效。接入层内置了「防更新守卫」，会周期性禁用更新器。
-
----
-
-## 2. 获取微信 Hook（version.dll）
-
-> ⚠️ **上游官方的预编译版不能用**：`QueryDB` 是坏的（`g_IsLogin` 恒为 0），也没有回调推送实现
-> → 收不到群消息、拿不到群昵称。必须用本项目构建的 DLL。
-
-### 方案 A：下载成品包（推荐，不用编译）
-
-1. 拿成品：**克隆仓库后直接用 `release/` 目录里的文件**（或从 [Releases 页](https://github.com/mengyunqwq/wechat-bot/releases/latest) 下载同样 4 个文件）：`version.dll`、`install.ps1`（一键安装）、`rollback.ps1`（一键回滚）、`SHA256.txt`
-2. **完全退出微信**（任务管理器里 `Weixin.exe` 进程数为 0）
-3. 解压到任意目录（**不要解压到 `%TEMP%`**，Defender 可能删掉里面的 dll），运行 `install.ps1`（一键安装）
-   —— 它会自动备份旧 DLL、覆盖、配置重放开关
-4. 启动微信 → 登录后**点一次左侧「通讯录」**（让 `contact.db` 打开）
-
-成品包里有什么：
-
-```
-version.dll        编译好的 Hook（含语音发送 + 数据库 late-arm 修复）
-install.ps1         退出微信 → 备份 → 覆盖 → 配重放
-rollback.ps1        还原到安装前的 DLL
-README.txt / SHA256.txt
-```
-
-> 想用一条命令走完部署：
-> ```powershell
-> 手动步骤见本文第 1~4 节；也可以把 [docs/AI-一键部署.md](docs/AI-一键部署.md) 整段交给 AI 代为执行。
-> ```
-
-### 方案 B：自行编译（我们自己的 hook 仓库，想改代码时用）
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\build-hook.ps1
-```
-
-本项目的 hook 已开源在 **https://github.com/mengyunqwq/wechat-hook**（衍生自 aixed/WeChat-Hook）。
-脚本会：检查 VS Build Tools → 克隆/更新我们的仓库 → 编译 → 备份并部署旧 DLL。
-
-<details>
-<summary>手动编译（等价于脚本做的事）</summary>
-
-```powershell
-# 1) 克隆我们的 hook 仓库
-git clone https://github.com/mengyunqwq/wechat-hook.git C:\wxhook-src\wechat-hook
-cd C:\wxhook-src\wechat-hook
-git submodule update --init --recursive
-
-# 2) 装编译环境（若没有）
-winget install --id Microsoft.VisualStudio.2022.BuildTools --override "--quiet --wait --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended"
-
-# 3) 编译（或直接 pwsh -File scripts\build.ps1）
-$vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
-$msbuild = & $vswhere -latest -requires Microsoft.Component.MSBuild -find "MSBuild\**\Bin\MSBuild.exe" | Select-Object -First 1
-& $msbuild x64_Version_dll.sln /p:Configuration=Release /p:Platform=x64 /m
-
-# 4) 部署（先停微信和 bridge）
-Copy-Item .\x64\Release\version.dll C:\wxhook-src\..\version.dll.new
-# 备份后替换目标客户端的 version.dll
-
-# 5) 验证
-Invoke-RestMethod http://127.0.0.1:30001/QueryDB/status
-```
-
-</details>
-
-> **成品在哪？**
-> 仓库 `release/` 目录里直接放了编译好的 `version.dll`（克隆即得），Release 页也有附件；
-> 想自己编译就从 [mengyunqwq/wechat-hook](https://github.com/mengyunqwq/wechat-hook) 拉源码。
-
----
-
-## 3. 配置接入层
-
-复制模板并填写：
-
-```powershell
-copy config.example.json config.json
-notepad config.json
-```
-
-```jsonc
-{
-  "wechatExe": "D:\\wxhook\\wx4110\\Weixin.exe",   // 机器人专用微信（工作目录必须是它所在目录）
-  "apiPort": 30001,                                 // Hook 的 HTTP 端口
-  "cbPort": 18998,                                  // 回调端口（本版 Hook 用不到，但保留兼容）
-  "bridgePort": 17300,                              // 接入层端口
-  "pythonExe": "python",                            // 或写绝对路径
-  "dataDir": "./data",
-  "hosted": {
-    "enabled": false,                               // 用外部 agent 时才开
-    "webhookUrl": ""
-  }
-}
-```
-
-也可以用环境变量（优先级更高）：`WECHAT_EXE` / `PYTHON_EXE` / `WECHAT_ATTACH_DIR` / `WX_BRIDGE_URL`。
-
-> **`WECHAT_ATTACH_DIR`**：微信数据目录下的 `msg\attach`，例如
-> `D:\Users\<你>\xwechat_files\wxid_xxx_hash\msg\attach`
-> 用于解密群图片。不知道在哪？启动微信后运行 `python wx-bridge/list-sessions.py` 会打印出来（或看 `docs/` 里的说明）。
-
----
-
-## 3.1 接入你自己的图片生成 key（表情包 / 视频，可选）
-
-**本仓库不含任何密钥。** 表情包的"现场生成"和视频生成都需要**你自己**接入一个图像服务。
-
-### 用哪个服务
-
-| 用途 | 后端 | 环境变量 | 说明 |
+| 软件 | 版本 | 用途 | 检查 |
 |---|---|---|---|
-| 表情包（图生图） | Agnes AI | `AGNES_API_KEY` | 主要用途；接口 `POST https://apihub.agnes-ai.com/v1/images/generations` |
-| 视频（可选） | Agnes AI | `AGNES_API_KEY` | 同一个 key 即可 |
-| 视频（可选） | xAI (Grok Imagine) | `XAI_API_KEY` | 想换后端时用 |
+| **Node.js** | **≥ 22.13**（推荐 24） | 桥 + 插件；`node:sqlite` 需要 22.13+ | `node -v` |
+| **Python** | **3.11** | 唱歌工具链（yt-dlp / demucs / RVC） | `python -V` |
+| **ffmpeg + ffprobe** | 任意近期版本 | 音频转码、SILK 编码前置 | `ffmpeg -version` |
+| **DeepSeek Harness（DSH）** | 已装并可用 | 插件宿主 + 控制面板 | 能打开 `http://127.0.0.1:3080` |
+| Visual Studio Build Tools | 可选 | 只有要自己编译 hook 才需要 | `MSBuild -version` |
 
-### 怎么配（二选一，推荐环境变量）
+> **ffmpeg 必须在 PATH 里**。仓库里的脚本会先查环境变量 `FFMPEG`，再查 PATH，最后查常见安装位置。
 
-```powershell
-# 方式一：环境变量（推荐 —— key 不落进任何文件）
-$env:AGNES_API_KEY = "你自己的key"                                            # 只对当前会话
-[Environment]::SetEnvironmentVariable('AGNES_API_KEY','你自己的key','User')   # 永久（用户级）
-```
+### 1.3 微信客户端
 
-```yaml
-# 方式二：写进 DSH 的凭据文件 ~/.dsh/.credentials.yaml（与其它凭据放一起）
-refs:
-  AGNES_API_KEY: 你自己的key
-```
+| 项 | 要求 |
+|---|---|
+| 版本 | **4.1.10.27**（hook 的偏移量是按这个版本定的，别的版本会崩） |
+| 账号 | **必须用小号**，不绑支付、不加重要好友 |
 
-**取用顺序**：环境变量优先，没有才读凭据文件（两个插件都是这个逻辑，改完立即生效、不用重启）。
-
-### 不配会怎样
-
-- **表情包**：只用图库里**现成的图**（挑选 + 发送都正常）→ 功能完整可用，只是不会现场生成
-- **视频**：工具会显示"缺凭据"，调用报错 → 不影响其它功能
-
-### 两个必须知道的点
-
-1. **参考图要自己准备**：表情包走的是"**图生图**"，会把一张角色基准图作为主体参考（`genSticker` 的 `refImage` 参数）。
-   你得自己准备这个角色的基准图；不提供的话，生成出来的角色会飘（换脸/换配色）。
-2. **存在后台自动生成**：当"群里有话题但图库里没有合适表情"时，接入层会**自动排队补生成**
-   （见 `wx-bridge/server.mjs` 的后台补生成队列）。**不想让它自动消耗额度的话，把那段关掉即可。**
-
-⚠️ **不要把 key 写进仓库、也不要提交到 git。** 也**不建议**把 key 放进 `config.json` ——
-本项目的设计就是"**环境变量 / 本地凭据文件**"，仓库里永远只有占位符。
+> ⚠️ 封号风险真实存在：hook 属非官方协议。**绝不要在日常微信上跑**。
 
 ---
 
-## 4. 启动
-
-### 4.1 一键启动脚本（推荐）
-
-仓库自带启动器：会**按正确参数**拉起微信（`RecvType=1` + 回调地址）再启动 bridge；
-已经在跑的两端都会**跳过**（避免开出第二个 bridge 抢同一个端口）。
+## 2. 装依赖
 
 ```powershell
-# 只需设置一次微信客户端路径（就是第 1、2 节准备好的那份）
-setx WECHAT_EXE "D:\wxhook\wx4110\Weixin.exe"
+# ① 桥的 Node 依赖
+cd D:\微信deepseek\wx-bridge
+npm install
 
-# 之后双击 scripts\start-bot.cmd，或：
-powershell -ExecutionPolicy Bypass -File .\scripts\start-bot.ps1
+# ② 唱歌用的 Python 依赖（不唱歌可跳过）
+D:\Python311\python.exe -m pip install -i https://pypi.tuna.tsinghua.edu.cn/simple `
+  yt-dlp demucs pillow
 ```
 
-可选环境变量（都有默认值）：
+---
 
-| 变量 | 默认 | 说明 |
+## 3. 准备独立的微信客户端
+
+**不要动你日常那个微信。** 复制一份独立副本：
+
+```powershell
+# 找到已安装的微信（4.1.10.27）
+# 复制整个目录到独立位置
+robocopy "D:\Program Files\Tencent\Weixin" "D:\wxhook\wx4110" /E
+
+# 确认目录里有 Weixin.exe
+Test-Path D:\wxhook\wx4110\Weixin.exe
+```
+
+---
+
+## 4. 拿到 hook（`version.dll`）
+
+hook 是注入到微信进程里的 DLL，负责读数据库、发消息。
+
+### 方案 A：直接编译（推荐）
+
+```powershell
+cd <hook 源码目录>\WeChat-Hook
+# 用 VS2022 BuildTools 的 MSBuild
+& "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\MSBuild\Current\Bin\MSBuild.exe" `
+  x64_Version_dll.sln -p:Configuration=Release -p:Platform=x64 -m
+
+# 产物：x64\Release\version.dll
+```
+
+### 方案 B：GitHub Actions 构建
+
+推代码后去 Actions 页面下载 artifact（`.github/workflows/build-hook.yml` 已配好）。
+
+### 部署 DLL
+
+用仓库自带脚本（**它会等数据库写入静止再结束进程，避免 WAL 损坏**）：
+
+```powershell
+cd D:\微信deepseek
+powershell -ExecutionPolicy Bypass -File scripts\deploy-hook.ps1 `
+  -Dll "E:\wxhook-src\WeChat-Hook\x64\Release\version.dll"
+```
+
+脚本会依次做：停桥 → 清队列 → **等 WAL 稳定（连续 3 次采样不变）** → 结束微信 → 备份旧 DLL → 替换 → 启动客户端（带端口参数）→ 登录 → 重启桥。
+
+> **绝不要手动 `taskkill` 微信**。库正在写的时候强杀会损坏数据库（我们踩过，连续导致 6 次崩溃）。
+
+---
+
+## 5. 启动客户端 + 桥
+
+### 5.1 客户端参数（必须带，否则收不到消息）
+
+```powershell
+Start-Process 'D:\wxhook\wx4110\Weixin.exe' -ArgumentList `
+  'StartPort=30001','RecvType=1','CallBackURL=http://127.0.0.1:18998' `
+  -WorkingDirectory 'D:\wxhook\wx4110'
+```
+
+### 5.2 桥
+
+```powershell
+cd D:\微信deepseek\wx-bridge
+node server.mjs --transport=wechat-hook --api-port=30001 --cb-port=18998 `
+  --data-dir=D:\微信deepseek\data --wechat=D:\wxhook\wx4110\Weixin.exe
+```
+
+> ⚠️ 两个**必踩的坑**：
+> 1. `--transport=wechat-hook` **不能省**。默认值是 `wxhelper`（另一套已废弃链路），省了就连不上。
+> 2. 参数只认 `--key=value`，**不能写 `--key value`**。
+
+### 5.3 验证
+
+```powershell
+Invoke-RestMethod http://127.0.0.1:17300/api/pollStatus | Select polls,msgs,shard,consecFail
+```
+
+正常输出形如：
+
+```
+polls : 48
+msgs  : 480
+shard : message_0.db
+consecFail : 0
+```
+
+`polls` 要持续增长；`msgs` 在有人说话时才涨。
+
+---
+
+## 6. 装 DSH 插件
+
+插件本体在 `wechat-group-agent/`，通过 **junction + profile bundles** 挂进 DSH。
+
+```powershell
+# ① 建 junction（把插件目录链进 profile 的 node_modules）
+$dest = "$env:USERPROFILE\.dsh\profiles\web\node_modules\@dsh-external\dsh-wechat-bot"
+New-Item -ItemType Directory -Force -Path (Split-Path $dest) | Out-Null
+cmd /c mklink /J "$dest" "D:\微信deepseek\wechat-group-agent"
+
+# ② 登记到 profile（package.json 的 dsh.profile.bundles 里加一项）
+#    "dsh-wechat-bot": "link:D:\\微信deepseek\\wechat-group-agent"
+```
+
+也可以直接用 DSH 的插件管理界面注入（若装了 `dsh-super-injector`）：
+
+```
+dev_install_package dir=D:\微信deepseek\wechat-group-agent profile=web
+```
+
+装好后打开控制面板：`<你的 DSH 地址>/wechat-bot`。
+
+---
+
+## 7. 配置（面板里点，或改 `config.json`）
+
+配置文件：`%USERPROFILE%\.dsh\wechat-bot\config.json`
+
+### 7.1 必配
+
+| 键 | 示例 | 说明 |
 |---|---|---|
-| `WECHAT_EXE` | —（必填） | 你复制的 hooked 微信的 `Weixin.exe` |
-| `WECHAT_BOT_DATA` | `<仓库>\wx-bridge\data` | 数据目录（表情包库、日志等） |
-| `WECHAT_BOT_PORT` | `17300` | bridge 的 WS/HTTP 端口（插件连这个） |
-| `WECHAT_HOOK_PORT` | `30001` | Hook 的 HTTP 端口 |
-| `WECHAT_CB_PORT` | `18998` | Hook 的回调端口 |
+| `bridgeUrl` | `ws://127.0.0.1:17300` | 桥地址 |
+| `botName` | `蓝色大肥鱼` | 群里显示的名字 |
+| `rooms` | `12345678@chatroom` | **群白名单**，不在里面不响应 |
+| `memberNames` | `{"wxid_xxx":"小明"}` | 认人（面板「群与人」页可改） |
 
-> ⚠️ **为什么是「一个 `.ps1` + 一个纯 ASCII 的 `.cmd` 壳」，而不是单个 `.cmd`**：
-> 批处理是按**控制台当前码页**解析文件字节的。只要路径里出现中文，双击运行（码页 936）
-> 和从 PowerShell 里调用（码页 65001）就会一个正常一个乱码，严重时中文碎片还会被当成命令执行。
-> PowerShell 脚本用 UTF-8+BOM，与码页无关，所以中文路径交给它。
+### 7.2 语音（可选，但强烈建议）
 
-### 4.2 手动启动
+| 键 | 示例 | 说明 |
+|---|---|---|
+| `voiceSay` | `true` | 允许发语音气泡 |
+| `voiceBackend` | `breeze-cloud` | 云端合成（约 3 秒、不占显存） |
+| `voiceCloudVoice` | `voc_xxx` | 音色 id（云端控制台里建） |
+| `voiceStyle` | `用居高临下的嘲讽语气说话…` | **自然语言描述说话方式**（官方推荐的写法） |
+| `voiceSpeed` | `1.05` | 语速倍率 |
+| `voiceGuidanceScale` | `4` | 贴合度（越低越松散自然） |
+| `voiceFillerChance` | `0.5` | 语气词概率（`[哼]`/`[笑]`/`[叹气]`） |
 
-```powershell
-cd wx-bridge
-npm start
-# 或指定参数：
-# node server.mjs --transport=wechat-hook --api-port=30001 --wechat="D:\wxhook\wx4110\Weixin.exe"
-```
+云端 key 放在 `D:\微信deepseek\data\.breeze-key`（**不要进仓库**）。
 
-启动后它会：
-1. 拉起微信客户端（若没在跑）并等 Hook 就绪
-2. 启动**数据库轮询**（收消息 + 取真实昵称）
-3. 启动 WebSocket + REST + MCP 服务
-4. 周期性**禁用微信自动更新**
+### 7.3 梗百科（可选）
 
-**验证**：
-
-```powershell
-curl http://127.0.0.1:17300/api/status          # 应看到 loggedIn: true
-curl http://127.0.0.1:30001/QueryDB/debug       # 补丁版才有这条路由（官方版没有）
-curl "http://127.0.0.1:17300/api/members?room=<群id>"   # 群成员真实昵称
-```
-
----
-
-## 5. 接入大脑（二选一）
-
-### 5.1 用 DSH 插件（人设 + LLM + 记忆）
-
-见 [wechat-group-agent/README.md](wechat-group-agent/README.md)（装进 DSH profile 的 node_modules 并在 patch 里启用）。
-**记得保持 `hosted.enabled = false`**，否则双重回复。
-
-> **控制面板（v1.2.0 起是 DSH 原生插件 UI）**
->
-> 插件把 `panel/index.html` 注册进了 DSH 界面本体 —— DSH 左侧面板列表会出现
-> **🐋 微信机器人**，点开就是完整控制面板；独立地址 `/wechat-bot` 保留（手机/局域网用）。
->
-> **三个必须知道的点**：
->
-> 1. **必须走官方装配**（profile `bundles` / cordis patch）。运行时 `loader.create`
->    注入的 entry 名是随机 hex，`dsh-client-modules` 不会扫描它 → 图标不出现；
-> 2. 装好后**重启一次 `dsh web`** —— 宿主只在启动时组合 client 启动图；
-> 3. 改过面板源码要重跑 `node build-client.mjs`（在 `wechat-group-agent/` 下，
->    生成 `lib/client.js`）。
->
-> 验证：`curl "http://127.0.0.1:3080/plugins/??@dsh-external/dsh-wechat-bot/client.js&rev=<rev>"`
-> 返回 200 表示已进组合图；404 表示宿主没扫到（回查上面三条）。
-
-### 5.2 用外部 agent（托管模式）
-
-桥替 agent 管节流/作息/记忆/打字节奏，agent 只需回一段文字：
-
-```powershell
-# 打开托管模式，指向你的 agent
-curl -X POST http://127.0.0.1:17300/api/hosted -H 'content-type: application/json' -d '{
-  "enabled": true,
-  "webhookUrl": "http://127.0.0.1:9999/reply",
-  "botName": "我的机器人"
-}'
-```
-
-桥会在**判定该回**时 POST 给你（详见 [wx-bridge/PROTOCOL.md](wx-bridge/PROTOCOL.md) 第四节），你回：
-
-```json
-{ "text": "在呢，咋了", "sticker": { "subject": "摸鱼", "bubble": "别叫我" } }
-```
-
-### 5.3 用 MCP 客户端（Claude Desktop / Cursor / Cline …）
-
-```json
-{
-  "mcpServers": {
-    "wechat": {
-      "command": "node",
-      "args": ["<绝对路径>/wx-bridge/mcp-server.mjs"]
-    }
-  }
-}
-```
-
-### 5.4 用豆包电脑版（让 AI 自己装 / 手动加连接器）
-
-豆包电脑版支持挂 **MCP 连接器**。注意：**本项目自带的 MCP 服务是 `stdio` 的**
-（本地子进程，不是 HTTP 服务），所以按下面两种方式接入。
-
-#### 方式一：让豆包自己装（推荐，最省事）
-
-新建一个对话，把下面这**整段**（含花括号，看起来像代码但直接发就行）发给它：
-
-```
-帮我安装一个本机微信机器人的 MCP，配置信息如下：
-{
-  "mcpServers": {
-    "wechat": {
-      "command": "node",
-      "args": ["<绝对路径>\\wx-bridge\\mcp-server.mjs"]
-    }
-  }
-}
-```
-
-把 `<绝对路径>` 换成你 clone 本项目的路径（例如 `D:\dsh-wechat-bot`）。
-过程中它若请求确认，选同意即可。**装好的标志**：连接器列表里出现名为 `wechat` 的条目。
-
-#### 方式二：手动新建自定义连接器
-
-左侧进入「**技能 · 连接器 · 伙伴**」→ 右上角「**新建**」→「**新建自定义连接器**」，
-然后按界面实际提供的字段填：
-
-| 界面字段 | 填什么 |
+| 键 | 说明 |
 |---|---|
-| 服务名称 | `wechat` |
-| 传输类型 | 若有 **stdio / 本地命令 / command** 之类的选项 → 选它；命令填 `node`，参数填 `<绝对路径>\wx-bridge\mcp-server.mjs` |
-| 传输类型 | 若**只有 HTTP / SSE** → 见下面「⚠️ 只支持 HTTP 怎么办」 |
+| `memeWiki` | 总开关 |
+| `memeWikiDb` | 词库路径（SQLite，6792 条） |
+| `memeWikiBlocklist` | 语义冲突的条目（如「杂鱼」在库里是健身梗，要挡掉） |
 
-保存后按提示启用（若有「去授权」就点一下），确认 `wechat` 右侧开关已打开即接入完成。
+词库来源：`thawline/dsh-memewiki`（82★）。装上那个插件后，词库在它的 `data/memes.db`。
 
-#### ⚠️ 只支持 HTTP 怎么办
+### 7.4 唱歌（可选，要 GPU）
 
-部分版本的豆包（以及「豆包工作」）的自定义连接器**只接受 HTTP 类型的 MCP**，
-而本项目的 `mcp-server.mjs` 是 **stdio**。遇到这种情况：
-
-1. **先试方式一** —— 不少客户端能识别 `command` / `args` 这种本地命令配置；
-2. **不行就换入口**（都不需要 MCP）：
-   - **REST API**：桥自带 HTTP 接口，任何能发 HTTP 请求的工具都能用；
-   - **托管模式**：桥把消息 webhook 给你的 agent，agent 回一个 HTTP 请求就能发言（见 §5.2）；
-   - **DSH 插件**：直接用本项目自带的大脑（见 §5.1）。
-
-> 如果你的豆包版本确实只收 HTTP，可以在 issue 里提一句 —— 给桥加一个 HTTP 版 MCP 端点是可行的。
-
-#### 接好之后怎么验证
-
-在对话里说：
-
-```
-请用 wechat MCP 列出当前有哪些群。
-```
-
-能列出群名就说明通了。之后可以自然语言驱动它发言：
-
-```
-请用 wechat MCP 往「XXX 群」发一条：大家好，我来了。
-```
-
-⚠️ **安全提醒**：这个 MCP 能让 AI **以你的微信身份发消息**。不要把它暴露到公网，
-也不要在不受信任的对话里挂着它。用完随手关掉连接器开关。
+| 键 | 示例 | 说明 |
+|---|---|---|
+| `singEnabled` | `true` | 总开关 |
+| `singPython` | `D:/Python311/python.exe` | 跑 yt-dlp/demucs 的 python |
+| `singScript` | `D:/微信deepseek/data/sing.py` | 流水线脚本 |
+| `singModel` | `E:/rvc/RVC/assets/weights/her2.pth` | RVC 模型 |
+| `singIndex` | `E:/rvc/RVC/logs/her2/added_*.index` | 检索索引 |
+| `singHerF0` | `309` | 她的音高基准（自动移调用） |
+| `singTimeoutMin` | `25` | 整条流程超时 |
 
 ---
 
-## 6. 排错
+## 8. 唱歌环境（可选）
 
-| 现象 | 原因 / 解决 |
-|---|---|
-| `/api/status` 里 `loggedIn: false` | 微信没登录完，等 30 秒；或看 `wx-bridge` 日志 |
-| `GetAllDBName` 返回 `[]` | **Hook 没加载或被系统 `version.dll` 抢了**：确认客户端加载的是你放的那份；用 `/QueryDB/debug` 判断（404 = 不是补丁版）。桥内置自愈：连续 3 次探测失败会自动重启客户端 |
-| 收不到消息 | 数据库轮询没起来 → 看日志 `数据库轮询就绪`；DB 坏了会导致收不到消息（同上一条） |
-| 群里回复两次 | DSH 插件和托管模式同时开着 → 关掉一个 |
-| 图片识别失败 | 原图没下载（微信只拉了缩略图）或解密密钥失效 → 在微信里点开一次图片可让密钥进内存，然后 `python wx-bridge/decode-wechat-image.py --find-key` |
-| 微信自动更新导致 Hook 失效 | 换回 4.1.10.27，或重新编译适配新版（见 `docs/`） |
-
----
-
-## 7. 🤖 AI 一键部署（把这段直接喂给 AI）
-
-> 📄 **完整版见 [docs/AI-一键部署.md](docs/AI-一键部署.md)** —— 那份是自包含的，含：
-> 逐字段配置说明（`config.json` 每个字段 + 环境变量 + hook 开关文件 + 插件热改键）、
-> 完整验证清单（24 项可勾选）、装好之后怎么用、12 条常见问题、**已知文档/代码不一致清单**。
-> 下面这段是**精简版**，赶时间可以用它，但更容易在细节上卡住。
-> ⚠️ **AI 同时看到两段时，以 [docs/AI-一键部署.md](docs/AI-一键部署.md) 第 2 节为准** ——
-> 那段包含本段缺失的「起桥前必须先补的两个缺失模块」，否则 `npm start` 会直接退出。
->
-> 下面是一段给 AI agent 的可执行说明。**请逐条执行并在每步后验证**，不要跳步。
-> 适用任何能读写本机文件的 AI 客户端（豆包电脑版 / Claude Desktop / Cursor / Cline …）。
-> 在**豆包电脑版**里就是新建对话 → 把下面整段贴进去 → 它自己一步步做（见 §5.4 的截图同款流程）。
-
-```
-任务：在本机部署 dsh-wechat-bot（微信群聊机器人）。系统是 Windows。请按顺序执行，每步验证后再继续。
-前置检查：
-1. 确认 node -v >= 18、python --version >= 3.10；缺则用 winget 安装。
-2. python -m pip install pycryptodome zstandard
-3. 确认本机有微信 4.1.10.27 客户端（目录下有 4.1.10.27\ 子目录）。没有则停止并告知用户。
-
-准备独立的微信副本：
-4. robocopy "<用户日常微信目录>" "D:\wxhook\wx4110" /E
-   （严禁直接修改用户日常微信目录）
-
-获取 Hook：
-5. git clone https://github.com/aixed/WeChat-Hook.git C:\wxhook-src\WeChat-Hook
-6. 应用补丁（补丁需另行获取）：git apply <补丁目录>\wechat-hook-querydb-fix.patch
-7. 若无 MSBuild：winget install --id Microsoft.VisualStudio.2022.BuildTools --override "--quiet --wait --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended"
-8. 用 MSBuild 编译 x64_Version_dll.vcxproj（Release|x64），把产物复制到 D:\wxhook\wx4110\version.dll
-   （复制前先备份原文件为 version.dll.bak）
-
-配置与启动：
-9. 复制 config.example.json 为 config.json，把 wechatExe 改成 D:\wxhook\wx4110\Weixin.exe
-10. cd wx-bridge && npm install && npm start（后台运行，日志重定向到文件）
-11. 等待 40 秒，验证：
-    - curl http://127.0.0.1:17300/api/status  → loggedIn 应为 true
-    - curl http://127.0.0.1:30001/QueryDB/debug → 应有 JSON（若无此路由说明加载的不是补丁版 DLL，
-      需停掉客户端、确认 version.dll 就位、重新启动客户端）
-    - curl http://127.0.0.1:17300/api/rooms → 应列出群
-
-完成标准：/api/status 返回 loggedIn=true 且 /api/rooms 能列出至少一个群。
-若失败，请按 DEPLOY.md 第 6 节排错，并把日志贴给用户。
-```
-
----
-
-## 8. 可选：常驻运行
+### 8.1 装 RVC
 
 ```powershell
-# 用任务计划程序开机自启（示例）
-schtasks /create /tn "wx-bridge" /tr "node <绝对路径>\wx-bridge\server.mjs" /sc onlogon /rl highest
+# ① 建 venv（复用系统 torch 可以省 2.5GB 下载）
+D:\Python311\python.exe -m venv E:\rvc\venv-rvc --system-site-packages
+
+# ② 装 RVC 依赖（用国内镜像；注意 torch 要单独装 cu124 版，否则会被装成 CPU 版）
+E:\rvc\venv-rvc\Scripts\python.exe -m pip install -i https://pypi.tuna.tsinghua.edu.cn/simple `
+  -r E:\rvc\RVC\requirements.txt
+E:\rvc\venv-rvc\Scripts\python.exe -m pip install `
+  --index-url https://mirrors.nju.edu.cn/pytorch/whl/cu124 `
+  "torch==2.6.0+cu124" "torchaudio==2.6.0+cu124"
 ```
+
+> 新版 RVC **不再需要 fairseq**（已改用 transformers），Windows 上装得干净。
+
+### 8.2 下载预训练模型
+
+国内直连 `huggingface.co` 不通，用镜像：
+
+```powershell
+$base = 'https://hf-mirror.com/lj1995/VoiceConversionWebUI/resolve/main'
+$dst  = 'E:\rvc\RVC\assets'
+# hubert_base 要 transformers 目录格式（不是单个 .pt）
+curl.exe -L "$base/hubert_base/config.json"             -o "$dst\hubert_base\config.json"
+curl.exe -L "$base/hubert_base/preprocessor_config.json" -o "$dst\hubert_base\preprocessor_config.json"
+curl.exe -L "$base/hubert_base/pytorch_model.bin"        -o "$dst\hubert_base\pytorch_model.bin"
+curl.exe -L "$base/rmvpe.pt"                             -o "$dst\rmvpe\rmvpe.pt"
+curl.exe -L "$base/pretrained_v2/f0G40k.pth"             -o "$dst\pretrained_v2\f0G40k.pth"
+curl.exe -L "$base/pretrained_v2/f0D40k.pth"             -o "$dst\pretrained_v2\f0D40k.pth"
+```
+
+### 8.3 训练她自己的模型
+
+素材要求：**干净的单一说话人录音 ≥ 10 分钟**（RVC 建议值；我们有 4.63 分钟也训出来了，但质量打折）。
+
+```powershell
+# ① 准备素材：放到 E:\rvc\dataset-her（wav，44.1k 或 16k 都行）
+#    也可以用云端 TTS 批量生成（scripts/sing/gen-voice-corpus.py），
+#    ⚠️ 但 TTS 音色必须和真实录音音高一致，否则会训成另一个人（我们踩过：TTS 239Hz vs 真实 309Hz）
+
+# ② 一条命令跑完：切分 → 抽音高 → 抽特征 → 训练 → 建索引
+$env:RVC_EXP='her'; $env:RVC_EPOCHS='400'
+$env:RVC_DATASETS='E:/rvc/dataset-her'
+D:\Python311\python.exe scripts\sing\rvc-train.py
+```
+
+> 训练完如果报 `assets/weights 不存在`，手动 `mkdir` 一下再跑
+> `scripts\sing\rvc-export-model.py` 把检查点转成推理模型。
+
+显存参考：8GB 卡用 `bs=4`、峰值得 5.4GB；**长音频必须分块**（`sing.py` 已按 45 秒自动分块，
+一次转 2 分钟人声会被系统杀掉且不留报错）。
+
+### 8.4 验证
+
+```powershell
+D:\Python311\python.exe D:\微信deepseek\data\sing.py --query "小跳蛙" `
+  --model E:/rvc/RVC/assets/weights/her2.pth `
+  --index E:/rvc/RVC/logs/her2/added_IVF289_Flat_nprobe_1_her2_v2.index `
+  --out E:/rvc/sing-jobs/test/her-sing.wav
+```
+
+正常会看到：搜歌 → 测速挑节点 → 下载 → demucs 分离 → 自动移调 → 分块变声 → 混伴奏 → 切 58s → 编 SILK。
+
+---
+
+## 9. 自愈与监控
+
+### 9.1 看门狗
+
+`scripts/watchdog-wechat.ps1` 由插件每 5 分钟调一次，做这些事：
+
+| 检查 | 动作 |
+|---|---|
+| 微信修复弹窗 | 自动点击「开始修复」 |
+| 桥存活 | 死了就用 **VBS 无窗口启动器**拉起（完整 node 路径 + 起后自检重试 3 次） |
+| 桥在跑但 `polls` 不涨 | 重启桥 |
+| **消息库在写但 `msgs` 10 分钟不涨** | 判定 hook 句柄过期 → `deploy-hook` 重启客户端（限频 6 小时） |
+| WAL 停摆 | **只在桥/轮询真异常时告警**（群安静不打扰） |
+
+并发锁：60 秒内已有实例在跑就直接退出，避免重复重启。
+
+### 9.2 日志位置
+
+```
+D:\微信deepseek\data\logs\bridge-YYYY-MM-DD.log     桥
+D:\微信deepseek\data\logs\watchdog.log             看门狗
+D:\微信deepseek\data\logs\deploy-hook.log          DLL 部署
+D:\微信deepseek\data\logs\watchdog-state.json      状态（msgs/告警/重启时间）
+%USERPROFILE%\.dsh\logs\...                         插件侧（或在 DSH 面板看）
+```
+
+---
+
+## 10. 一键脚本速查
+
+| 脚本 | 作用 |
+|---|---|
+| `scripts/start-bot.ps1` | 按正确参数拉起微信 + 桥 |
+| `scripts/deploy-hook.ps1 -Dll <path>` | 换 DLL / 干净重启客户端（等 WAL 静止） |
+| `scripts/watchdog-wechat.ps1 -LoopSec 0` | 手动跑一次自愈检查 |
+| `scripts/check-panel-ops.mjs` | 校验面板用到的操作都在白名单 |
+| `wechat-group-agent/scripts/test-all.mjs` | 插件单测（25 项） |
+| `wechat-group-agent/build-client.mjs` | 从 `panel/index.html` 重新生成 `lib/client.js` |
+| `scripts/sing/*.py` | 唱歌工具链（见 §8） |
+| `scripts/push-via-api.mjs` | **github.com:443 不通时**用 Git Data API 推送 |
+
+---
+
+## 11. 已知的坑（都是实测踩出来的）
+
+1. **中文路径**：`node:sqlite` 不认反斜杠，路径要用正斜杠；WMI 创建进程带中文 cwd 有时 `rc=8`。
+2. **`--transport=wechat-hook` 不能省**，否则桥去连另一套已废弃适配层，`getContactList` 全部 fetch failed。
+3. **不要 `taskkill` 微信**：库在写时强杀会损坏数据库。用 `deploy-hook.ps1`。
+4. **消息库会搬家**：微信有时把 `db_storage\message_0.db` 移到 `db_storage\message\message_0.db`，
+   hook 的句柄会指着旧文件 → 桥读到冻结快照（`polls` 涨、`msgs` 不涨、用户发什么她都不回）。
+5. **B 站下载别用 yt-dlp 默认节点**：它取第一个候选地址，而那个常是 P2P 的 `mcdn`
+   （实测 25 KiB/s vs 正规 `upos` 节点 3290 KiB/s）。用 `scripts/sing/bili-download.py` 自己挑。
+6. **RVC 只换音色不改音高**：`--pitch 0` 时输出音高 = 输入音高。要贴合她的音域必须先测源 F0 再算移调。
+7. **PowerShell 脚本要存 BOM**：无 BOM 会被 PowerShell 5.1 按 ANSI 读，中文全乱码、语法报错。
+8. **VBS 启动器不要加 `cmd /c` 重定向**：引号会让 VBS 语法错误，`wscript` 会弹一堆报错对话框。
+9. **插件是 ESM**：没有全局 `require`，要用 `createRequire(import.meta.url)` 才能同步 `require('node:sqlite')`。
+
+---
+
+## 12. 排错
+
+- 她不回复：先看桥 `pollStatus`（`polls`/`msgs`/`consecFail`），再看插件日志有没有 `决定回`。
+- 收不到消息：查 `message_0.db` 的真实路径和 mtime（可能在 `message\` 子目录），见 §11.4。
+- 唱歌失败：看 `E:\rvc\sing-jobs\<时间戳>\sing.log`，里面有每一步的退出码和错误尾部。
+- 语音发不出：确认 SILK 文件路径**全是 ASCII 字符**（hook 用 ANSI 读文件，中文路径会"找不到"）。
+
+更多：[docs/常见错误与排错.md](docs/常见错误与排错.md)、[docs/安装流程.md](docs/安装流程.md)

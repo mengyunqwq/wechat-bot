@@ -45,7 +45,8 @@
 | 收消息 | **数据库轮询**（默认 6s，`WECHAT_POLL_MS`）+ 可选 hook 即时推送（`hook-push.on` + `WECHAT_PUSH=1`）；SQL 走令牌桶限速（`WECHAT_DB_QPS`，默认 12/秒） | — |
 | 发文字 / 真 @ | `/SendTextMsg`，@ 必须填 `atuserlist` 才有红点提醒 | — |
 | 发图片 | `/SendImgMsg` | — |
-| 发语音气泡 | `/SendVoiceMsg`（type 34，真气泡），需 `hook-voice-send.on` | `voiceSay=false`（默认关） |
+| 发语音气泡 | `/SendVoiceMsg`（type 34，真气泡），合成走 **Breeze 云端**（约 3 秒、不占显存）；支持音色/语气/语速/贴合度/语气词（`[哼][笑][叹气]`） | `voiceSay=false` |
+| **唱歌** | 群里说「唱个 X」→ 搜 B 站 → **自选最快 CDN** 下载 → demucs 分离人声 → **自动移调**到她音域 → RVC 分块变声（冷启动，跑完释放显存）→ 混伴奏 → 切 58 秒副歌 → 发语音条 | `singEnabled=false` |
 | 识图 | 解密微信本地加密图（V2/AES）→ 视觉模型 | `visionOnImage=false` |
 | 识表情 | 表情 XML → 下载图片 → 视觉模型 | `visionOnEmoticon=false` |
 | 识视频 | 客户端点开后抽 6 帧拼"联系表" + 抽音轨转写 | `visionOnVideo=false` |
@@ -58,6 +59,7 @@
 | 拟人策略 | 概率、同群冷却、10 分钟上限、安静时段、拆句、补表情、主动找话题、**精力高低**（低→少说/说困，高→多说） | 见面板「回复节奏/主动行为」 |
 | 人际关系星盘 | 面板「🌌 星盘」：人-人关系（对话共现 / 同框记忆 / 同话题 / 同群）四路加权 → 社区分团 → 星座式渲染；点人看朋友圈、点线看关系强度 | 面板里关掉图层的勾选 |
 | 自我复盘 | 每天一次回顾自己的表现（`humanSelfReviewDays=1`），结论只进后续提示词、不往群里发；面板「内心」可看「仍在犯 ×N」 | `humanSelfReview=false` |
+| **梗百科** | 群里出现不懂的词先查本地词库（6792 条）再接话；查不到就不注入、不硬编；语义冲突条目走黑名单 | `memeWiki=false` |
 
 ## 朋友圈
 
@@ -174,6 +176,13 @@ node server.mjs --self-test
 > `server.mjs` 的 `--transport` 默认是 `wxhelper`（另一套已废弃的链路），**必须显式加 `--transport=wechat-hook`**。
 > 参数只认 `--key=value` 形式，不能写 `--key value`。
 
+> **重启客户端不要手动 taskkill**：库正在写的时候强杀会损坏数据库（我们踩过，连续 6 次崩溃）。
+> 一律用 `scripts/deploy-hook.ps1 -Dll <version.dll>`，它会等 WAL 连续 3 次采样不变才动手。
+
+> **桥挂了怎么自愈**：`scripts/watchdog-wechat.ps1` 由插件每 5 分钟调一次。
+> 它检测桥存活、轮询是否卡住、**消息库在写但 msgs 不涨（hook 句柄过期）**，
+> 并用 VBS 无窗口启动器拉起桥（不弹任何黑窗）。
+
 ## 一键脚本
 
 | 脚本 | 作用 |
@@ -185,6 +194,12 @@ node server.mjs --self-test
 | `.github/workflows/build-hook.yml` | 不装 VS 也能拿 DLL：push 后去 Actions 下载 artifact |
 | `scripts/check-panel-ops.mjs` | 校验"面板用到的操作是否都在白名单"（加 `-v` 列未用项） |
 | `scripts/wechat-power.ps1` | 客户端开关机（UIA 点「进入微信」） |
+| `scripts/watchdog-wechat.ps1` | 自愈：桥存活/轮询卡住/句柄过期/修复弹窗（每 5 分钟由插件调） |
+| `scripts/deploy-hook.ps1 -Dll <path>` | 换 DLL、干净重启客户端（等 WAL 静止） |
+| `scripts/sing/sing.py` | 唱歌流水线（能命令行单跑，见 DEPLOY §8） |
+| `scripts/sing/rvc-train.py` | RVC 训练流水线（切分→f0→特征→训练→索引） |
+| `scripts/sing/bili-download.py` | B 站音频下载（自选最快 CDN，比 yt-dlp 快 40 倍） |
+| `scripts/push-via-api.mjs` | github.com:443 不通时用 Git Data API 推送 |
 
 ## 安全与风险
 
