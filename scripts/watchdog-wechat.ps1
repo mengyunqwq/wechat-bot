@@ -106,6 +106,25 @@ function Start-Bridge([int]$MaxTry = 3, [int]$WaitSec = 22) {
 
 if (-not (Test-Path $LogDir)) { New-Item -ItemType Directory -Path $LogDir -Force | Out-Null }
 
+# ── 并发锁（2026-11-17）─────────────────────────────────────────────
+#   插件的 5 分钟心跳和手动运行可能撞在一起，导致同一个故障被重启两次。
+#   这里用「状态文件里的时间戳」做 60 秒节流：太频繁就只记一行日志后退出。
+$lockPath = Join-Path $LogDir 'watchdog.lock'
+$nowMs = [int64]((Get-Date).ToUniversalTime() - (Get-Date '1970-01-01')).TotalMilliseconds
+$skipRun = $false
+if (Test-Path $lockPath) {
+  try {
+    $last = [int64]((Get-Content $lockPath -Raw).Trim())
+    if (($nowMs - $last) -lt 60000) { $skipRun = $true }
+  } catch { }
+}
+if ($skipRun) {
+  # 同一分钟内已有实例跑过：静默退出（不写日志刷屏）
+  exit 0
+}
+try { Set-Content -Path $lockPath -Value $nowMs -Encoding ASCII } catch { }
+
+
 function Log([string]$msg) {
   $line = '[' + (Get-Date).ToString('MM-dd HH:mm:ss') + '] ' + $msg
   Write-Output $line
@@ -259,17 +278,47 @@ if ($walAgeMin -ge 0 -and $walAgeMin -le 90) {
 
 Log ('消息库 ' + $(if ($walAgeMin -lt 0) { 'wal 文件缺失' } else { '已 ' + $walAgeMin + ' 分钟没写入' }) + ' → 进入自愈流程')
 
-# ── ⑤ 告警（每 2 小时最多一次，别刷屏）─────────────────────────────
-if ($now - $state.lastWalAlert -gt 2 * 3600 * 1000) {
-  try {
-    $body = @{ room = 'filehelper'; text = ('⚠️ 机器人看门狗：消息库已 ' + $walAgeMin + ' 分钟没写入，已尝试自动修复/重启，若持续失聪请人工检查微信是否弹修复窗。') } | ConvertTo-Json -Compress
-    Invoke-WebRequest -Uri 'http://127.0.0.1:17300/api/send' -Method POST -ContentType 'application/json' -Body $body -TimeoutSec 20 -UseBasicParsing | Out-Null
-    Log '已发告警到 filehelper'
-  } catch {
-    Log ('告警发送失败（桥可能还没就绪）: ' + $_.Exception.Message)
+
+# ── ⑤ 告警（2026-11-17 降噪）─────────────────────────────────────────
+#   群里没人说话也会让 WAL 停摆 —— 这不是故障。所以先判"是不是真异常"：
+#     桥在线 + polls 在涨 + 连续失败 0  → 只是安静，只写日志
+#     桥不在线 / 轮询卡住 / 连续失败>0  → 真异常，才告警
+$realTrouble = $false
+$why = @()
+try {
+  $ps1 = Invoke-RestMethod -Uri 'http://127.0.0.1:17300/api/pollStatus' -TimeoutSec 6
+  if (-not $ps1) { $realTrouble = $true; $why += 'pollStatus 空' }
+  else {
+    $pA = [int]$ps1.polls
+    Start-Sleep -Seconds 12
+    $ps2 = Invoke-RestMethod -Uri 'http://127.0.0.1:17300/api/pollStatus' -TimeoutSec 6
+    $pB = [int]$ps2.polls
+    if ([int]$ps2.consecFail -gt 0) { $realTrouble = $true; $why += ('轮询连续失败 ' + $ps2.consecFail) }
+    if ($pB -le $pA -and -not $ps2.maintaining) { $realTrouble = $true; $why += ('polls 停住 ' + $pA + '→' + $pB) }
+    if ($realTrouble -eq $false) { $why += ('桥正常 polls=' + $pA + '→' + $pB + '，判定为群安静') }
   }
-  $state.lastWalAlert = $now
-  Write-State $state
+} catch {
+  $realTrouble = $true
+  $why += '桥无响应'
+}
+$wxProcs = @(Get-Process Weixin -ErrorAction SilentlyContinue)
+if ($wxProcs.Count -eq 0) { $realTrouble = $true; $why += '微信进程不在' }
+
+if ($realTrouble) {
+  Log ('WAL ' + $walAgeMin + ' 分钟未写入 + 真异常（' + ($why -join '；') + '）→ 告警')
+  if ($now - $state.lastWalAlert -gt 2 * 3600 * 1000) {
+    try {
+      $body = @{ room = 'filehelper'; text = ('⚠️ 机器人看门狗：消息库已 ' + $walAgeMin + ' 分钟没写入；异常：' + ($why -join '；')) }
+      Invoke-WebRequest -Uri 'http://127.0.0.1:17300/api/send' -Method POST -ContentType 'application/json' -Body $body -TimeoutSec 20 -UseBasicParsing | Out-Null
+      Log '已发告警到 filehelper'
+    } catch {
+      Log ('告警发送失败（桥可能还没就绪）: ' + $_.Exception.Message)
+    }
+    $state.lastWalAlert = $now
+    Write-State $state
+  }
+} else {
+  Log ('WAL ' + $walAgeMin + ' 分钟未写入，但桥与轮询正常（' + ($why -join '；') + '）→ 群安静，不告警')
 }
 
 if ($asService) {
