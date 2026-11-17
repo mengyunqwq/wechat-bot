@@ -24,11 +24,14 @@ const ALLOWED_OPS = new Set([
   'stickers', 'genSticker', 'genEmotions',
   'memory.list', 'memory.add', 'memory.clear', 'memory.extract',
   'names.set', 'names.add', 'names.refresh',
+  // 2026-11-17：唱歌（扒歌 + RVC 变声）
+  'sing', 'singStatus', 'singJobs', 'singCatchUp',
   // 2026-10-22 新增：用量统计 / 环境诊断 / 自动更新
   'usage', 'diag', 'diagCleanHires',
 
   'checkUpdate', 'updateInfo', 'applyUpdate',
   // 2026-10-22：微信客户端电源（关进程 / 开进程+自动点进入微信）
+  'startAll',          // 一键启动（检测哪一环缺就补哪一环）
   'wechatPower',
   // 2026-10-26：发朋友圈（hook 内 /Moment/Post，进程内自动操作）
   'postMoment', 'momentStatus', 'momentNow',
@@ -40,7 +43,6 @@ const ALLOWED_OPS = new Set([
   'persona.state', 'persona.diaryWrite', 'persona.tasteAdd', 'persona.tasteRemove', 'persona.goalReroll',   // ★ 性格四件套
   'persona.narrativeWrite', 'persona.narrativeRestore',   // ★ 自传（她自己写人设）
   'persona.traits', 'persona.traitsReset', 'persona.load',   // ★ 方案⑥ 反馈驱动漂移 + 精力负荷
-  'persona.astro',        // ★ 星盘数据
   'persona.selfReview',   // ★ G 自我复盘
   'persona.settleNow',    // ★ 反馈队列立即结算
   'outbox.stats',          // ★ 出站队列状态

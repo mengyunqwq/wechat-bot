@@ -30,6 +30,7 @@ export const GROUPS = [
   { id: 'voiceIn', title: '语音识别（听）', icon: '🎧', desc: '群里语音 → 文字' },
   { id: 'voiceOut', title: '语音发送（说）', icon: '🎙', desc: '把回复合成微信语音气泡（Breeze 云端）' },
   { id: 'meme', title: '梗百科', icon: '📚', desc: '6792 条网络梗词库，群里冒生词不硬猜' },
+  { id: 'sing', title: '唱歌', icon: '🎤', desc: '扒歌 + RVC 变声，用她的声线唱一段' },
   { id: 'memory', title: '记忆与检索', icon: '🧠', desc: '上下文、长期记忆、历史查询' },
   { id: 'identity', title: '群与人', icon: '👥', desc: '群白名单、昵称、成员名字' },
   { id: 'model', title: '人设与模型', icon: '🐟', desc: '人格、模型、温度、长度' },
@@ -423,6 +424,24 @@ export const CONFIG_META = {
               ['voc_8yud7hz7c9q2', '大肥鱼·迷糊版'],
               ['voc_u3nxkd5578wc', '大肥鱼·机灵版']],
     help: 'BreezeBlue 控制台里已经建好的三个她的音色。换音色只影响新合成的语音。',
+  },
+  singEnabled: {
+    group: 'sing', label: '可以唱歌', type: 'bool',
+    help: '群里说「唱个 小跳蛙」她就去 B 站扒音频、分离人声、用自己的声线唱一遍。'
+        + '每次都是独立进程（冷启动），不唱歌时完全不占显存。',
+  },
+  singHerF0: {
+    group: 'sing', label: '她的音高基准 (Hz)', type: 'number', min: 150, max: 450, step: 1,
+    help: 'RVC 只换音色不改音高，所以要先测源音频音高、自动算移调到这个基准。'
+        + '309 是从她真实录音测得的中位值，一般不用改。',
+  },
+  singTimeoutMin: {
+    group: 'sing', label: '整条流程超时 (分钟)', type: 'number', min: 5, max: 60, step: 1,
+    help: '扒音频 + 分离人声 + 变声的合计上限。实测一首 3 分钟的歌约 6~8 分钟。',
+  },
+  singModel: {
+    group: 'sing', label: 'RVC 模型路径', type: 'text', advanced: true,
+    help: '纯真实素材训练出来的 her2.pth（400 轮）。换模型改这里。',
   },
   memeWiki: {
     group: 'meme', label: '启用梗百科', type: 'bool',

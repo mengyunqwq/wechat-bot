@@ -20,12 +20,12 @@ import { createRequire } from 'node:module'
 // 插件是 ESM（type: module），没有全局 require；node:sqlite 只能同步 require，
 // 所以这里造一个 require 出来（2026-11-16 接梗百科时踩到）
 const require = createRequire(import.meta.url)
-import * as MV2 from './memory-v2.mjs?v=vmwikzq9a'   // 艾宾浩斯遗忘曲线 + 情绪加权（?v= 用于打破 ESM 缓存）
+import * as MV2 from './memory-v2.mjs?v=vmwkat93l'   // 艾宾浩斯遗忘曲线 + 情绪加权（?v= 用于打破 ESM 缓存）
 import * as ST from './style.mjs'   // 口气：标点规约 / 口语碎片 / 情绪→语气
 import * as H3 from './human3.mjs'   // 第三轮：情景示例/幽默三招/不重复/收尾日记/羁绊
 import * as OB from './outbox.mjs'   // 统一出站队列（节流/去重/重试退避）
 import * as H2 from './human2.mjs'   // 第二轮人性化：承诺/纠错/沉默/追话/联想/自己的事
-import * as PS from './persona.mjs?v=vmwikzq9a'      // 性格四件套 + 自传（?v= 打破 ESM 缓存）
+import * as PS from './persona.mjs?v=vmwkat93l'      // 性格四件套 + 自传（?v= 打破 ESM 缓存）
 import net from 'node:net'
 import { request as httpsRequest } from 'node:https'
 import { join, dirname } from 'node:path'
@@ -441,6 +441,18 @@ const DEFAULT_CONFIG = {
   // ── 梗百科（2026-11-16 接入 thawline/dsh-memewiki 的 6792 条词库）──────
   //   直接读那份 SQLite（只读），群里冒出不懂的梗就查一条塞进上下文，
   //   让她先接梗、别硬编。DSH 侧的注入链管不到机器人自己的模型调用，所以这里单独接。
+  // ── 唱歌（2026-11-17）：RVC 冷启动，只在要唱歌时加载模型 ──────────
+  //   流程：搜 B 站 → yt-dlp 扒 → demucs 分离人声 → RVC 变声 → 发文件
+  //   每一步都是独立子进程，跑完退出 → 显存回到基线（不唱歌时 0 占用）
+  singEnabled: true,
+  singPython: 'D:/Python311/python.exe',
+  singScript: 'D:/微信deepseek/data/sing.py',
+  singModel: 'E:/rvc/RVC/assets/weights/her2.pth',
+  singIndex: 'E:/rvc/RVC/logs/her2/added_IVF289_Flat_nprobe_1_her2_v2.index',
+  singHerF0: 309,               // 她的真实音高中位（sing.py 自动移调的基准）
+  singTimeoutMin: 25,           // 整条流程超时（分钟）
+  singKitchen: 'E:/rvc/sing-jobs',   // 任务目录（日志与成品）
+  singFfmpeg: 'ffmpeg',
   memeWiki: true,
   memeWikiDb: 'E:/memewiki/dsh-memewiki-main/data/memes.db',
   memeWikiMaxChars: 260,        // 单条词条注入上限（太长会挤掉别的上下文）
@@ -3516,6 +3528,45 @@ ${cur.text}`
       stats.skipped++
       return
     }
+
+    // ★ 唱歌请求优先拦截：识别到「唱个 xx」就直接安排任务，不走正常回话流程
+    //   （唱歌要几分钟，不能让她卡在那里等生成）
+    {
+      const _sq = singQueryOf(trigger.text)
+      if (_sq && config.singEnabled !== false) {
+        const _st = singStatus()
+        if (_st.running) {
+          await getOutbox().sendText(r.roomId, `还在唱《${_st.query}》，等它唱完再说`)
+          log(`唱歌：已有任务在跑（${_st.query}），拒绝重复请求「${_sq}」`)
+          return
+        }
+        const _r = singStart(r.roomId, _sq)
+        if (_r.ok) {
+          await getOutbox().sendText(r.roomId, `好，《${_sq}》我去找找，唱好了发你`)
+          log(`唱歌：已安排《${_sq}》，等进程结束后自动发送`)
+          // 盯着这条任务：结束就把成品发出去
+          const _watch = setInterval(async () => {
+            const st = singStatus()
+            if (st.state === 'running') return
+            clearInterval(_watch)
+            if (st.state === 'done') {
+              const d = await singDeliver()
+              if (!d.ok) {
+                log('唱歌：发送失败 ' + String(d.error || '').slice(0, 100))
+                await getOutbox().sendText(r.roomId, `《${_sq}》唱完了但发不出去（${String(d.error || '').slice(0, 40)}）`)
+              }
+            } else {
+              log('唱歌：《' + _sq + '》失败 state=' + st.state)
+              await getOutbox().sendText(r.roomId, `《${_sq}》没唱成（${st.state}），换个歌试试`)
+            }
+          }, 5000)
+          _watch.unref?.()
+          return
+        }
+        await getOutbox().sendText(r.roomId, '唱不了：' + String(_r.error || '').slice(0, 60))
+        return
+      }
+    }
     // 对话延续判定：① 上一条我回过的人又说话 ② 我刚主动冒泡后有人接话
     // ── 4：沉默的艺术（知道什么时候不该说话）──
     //   以前"不回"只靠概率和模型吐 [不回]；现在先按情境判断：
@@ -3805,6 +3856,218 @@ ${cur.text}`
       + '词条：' + hit.title + (hit.tags ? '（' + String(hit.tags).slice(0, 60) + '）' : '') + '\n'
       + '怎么用/怎么接：' + usage + '\n'
       + '要求：像本来就会一样顺口接一句，别念词条、别解释出处；不确定就别用。'
+  }
+
+  // ═══════════════════════════════════════════════════════════════════
+  //  唱歌（RVC 冷启动）
+  //  冷启动的实现方式：每首歌都是一条独立 python 进程，结束即退出，
+  //  torch 随进程销毁 → 显存立刻归还。她不唱歌时显存占用为 0。
+  // ═══════════════════════════════════════════════════════════════════
+  let _singJob = null
+
+  function singStatus() {
+    if (!_singJob) return { running: false, state: 'idle' }
+    const j = _singJob
+    const secs = Math.round((Date.now() - j.startedAt) / 1000)
+    let tail = ''
+    try {
+      tail = readFileSync(j.logPath, 'utf8').split('\n').filter(Boolean).slice(-4)
+        .join(' / ').slice(-200)
+    } catch { }
+    return { running: j.state === 'running', state: j.state, query: j.query,
+      seconds: secs, outPath: j.outPath, pid: j.pid, tail }
+  }
+
+  function singStart(roomId, query) {
+    if (config.singEnabled === false) return { ok: false, error: '唱歌没开启（singEnabled）' }
+    if (_singJob && _singJob.state === 'running') {
+      return { ok: false, error: '正在唱《' + _singJob.query + '》，等它唱完' }
+    }
+    const script = String(config.singScript || '')
+    if (!existsSync(script)) return { ok: false, error: 'sing.py 不存在：' + script }
+    const model = String(config.singModel || '')
+    if (!existsSync(model)) return { ok: false, error: 'RVC 模型不存在：' + model }
+
+    const stamp = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 12)
+    const dir = join(String(config.singKitchen || '.'), stamp)
+    try { mkdirSync(dir, { recursive: true }) } catch { }
+    const logPath = join(dir, 'sing.log')
+    const outPath = join(dir, 'her-sing.wav')
+
+    const args = [script, '--query', query,
+      '--model', model,
+      '--index', String(config.singIndex || ''),
+      '--out', outPath]
+    let proc
+    try {
+      const logFd = openSync(logPath, 'a')
+      proc = spawnCb(String(config.singPython || 'python'), args, {
+        cwd: dirname(script),
+        detached: true,
+        stdio: ['ignore', logFd, logFd],
+        env: { ...process.env, PYTHONIOENCODING: 'utf-8', PYTHONPATH: 'E:\\rvc\\RVC' },
+      })
+      proc.unref?.()
+      try { closeSync(logFd) } catch { }
+    } catch (e) {
+      return { ok: false, error: '启动失败：' + String(e?.message || e).slice(0, 120) }
+    }
+
+    // ★ 任务信息落盘：插件重启后靠它补发（2026-11-17 踩到：定时器随重启丢失，
+    //   《晴天》唱好了却一直没发出去）
+    try {
+      writeFileSync(join(dir, 'job.json'),
+        JSON.stringify({ roomId, query, outPath, startedAt: Date.now() }, null, 1))
+    } catch { }
+
+    const jobQuery = query          // 闭包绑定，避免多个任务的日志互相串
+    const jobId = proc.pid
+    _singJob = { roomId, query, proc, startedAt: Date.now(), outPath, logPath,
+      state: 'running', pid: proc.pid, dir }
+    log('唱歌：开工《' + jobQuery + '》pid=' + jobId + '（冷启动，跑完自动释放显存）')
+
+    const tmo = (Number(config.singTimeoutMin) || 25) * 60_000
+    const timer = setTimeout(() => {
+      if (_singJob && _singJob.state === 'running') {
+        try { proc.kill() } catch { }
+        _singJob.state = 'timeout'
+        log('唱歌：《' + query + '》超时，已终止')
+      }
+    }, tmo)
+    timer.unref?.()
+
+    proc.on('exit', (code) => {
+      // 只更新属于这条进程的状态（旧任务的 exit 不能改新任务的状态）
+      if (_singJob && _singJob.pid === jobId) {
+        _singJob.state = code === 0 ? 'done' : 'failed'
+        _singJob.exitCode = code
+      }
+      log('唱歌：《' + jobQuery + '》进程结束 code=' + code)
+    })
+    return { ok: true, pid: proc.pid, dir, outPath }
+  }
+
+  /**
+   * 补发：扫任务目录里「已经唱完但还没发出去」的成品
+   *
+   * 为什么需要：投递原来只靠内存里的 setInterval，插件一重启就没了
+   * —— 2026-11-17 的《晴天》就是这样唱好了却一直没发出去。
+   * 现在每个任务都落盘 job.json + result.json，发送成功后写 .sent 标记，
+   * 所以只要磁盘上还有没标记的，重启后也能补发。
+   */
+  async function singCatchUp() {
+    const root = String(config.singKitchen || '')
+    if (!root || !existsSync(root)) return { sent: 0 }
+    let dirs = []
+    try {
+      dirs = readdirSync(root, { withFileTypes: true })
+        .filter((d) => d.isDirectory()).map((d) => d.name)
+        .sort().reverse().slice(0, 12)
+    } catch { return { sent: 0 } }
+
+    let sent = 0
+    for (const name of dirs) {
+      const dir = join(root, name)
+      const resPath = join(dir, 'result.json')
+      const sentFlag = join(dir, '.sent')
+      if (!existsSync(resPath) || existsSync(sentFlag)) continue
+      let res = {}
+      let job = {}
+      try {
+        res = JSON.parse(readFileSync(resPath, 'utf8'))
+        job = JSON.parse(readFileSync(join(dir, 'job.json'), 'utf8'))
+      } catch { continue }
+      if (!res.silk || !existsSync(res.silk)) continue
+      const roomId = job.roomId || ''
+      if (!roomId) continue
+      try {
+        const r = await client.call('sendVoice',
+          { roomId, path: res.silk, durationMs: Number(res.silkMs) || 0 }, 120_000)
+        if (r?.ret === 0) {
+          try { writeFileSync(sentFlag, String(Date.now())) } catch { }
+          sent++
+          log('唱歌：补发《' + (job.query || '?') + '》到 ' + roomId
+            + '（' + Math.round((Number(res.silkMs) || 0) / 1000) + ' 秒）')
+        } else {
+          log('唱歌：补发失败 ret=' + (r?.ret) + ' ' + String(r?.retmsg || '').slice(0, 60))
+        }
+      } catch (e) {
+        log('唱歌：补发异常 ' + String(e?.message || e).slice(0, 80))
+      }
+    }
+    return { sent }
+  }
+
+  /**
+   * 唱歌成品投递
+   * 微信这边可用的音频通道只有「语音条（SILK ≤60 秒）」——
+   * /SendImgMsg 不吃 mp3，也没有通用文件发送接口。所以 sing.py 已经
+   * 混好伴奏、切出 ≤58 秒的副歌、编成 SILK 并写了 result.json，
+   * 这里只负责读结果 → sendVoice。
+   */
+  async function singDeliver() {
+    const j = _singJob
+    if (!j) return { ok: false, error: '没有任务' }
+    if (j.state !== 'done') return { ok: false, error: '任务状态：' + j.state }
+    let res = {}
+    try {
+      res = JSON.parse(readFileSync(join(dirname(j.outPath), 'result.json'), 'utf8'))
+    } catch (e) {
+      return { ok: false, error: '读不到 result.json' }
+    }
+    if (!res.silk || !existsSync(res.silk)) {
+      return { ok: false, error: '没有可发的语音条（SILK）', mixed: res.mixed || '' }
+    }
+    const r = await client.call('sendVoice',
+      { roomId: j.roomId, path: res.silk, durationMs: Number(res.silkMs) || 0 }, 120_000)
+    if (r?.ret === 0 && j.dir) {
+      try { writeFileSync(join(j.dir, '.sent'), String(Date.now())) } catch { }
+    }
+    const totalMin = (Number(res.totalSec) || 0) / 60
+    log('唱歌：《' + j.query + '》语音条已发（' + String(Math.round((res.silkMs || 0) / 1000))
+      + ' 秒，整首 ' + totalMin.toFixed(1) + ' 分钟存在 ' + (res.mixed || '') + '）')
+    return { ok: r?.ret === 0, ret: r?.ret, silkMs: res.silkMs,
+      totalSec: res.totalSec, mixed: res.mixed, error: r?.retmsg || '' }
+  }
+
+  /**
+   * 从消息里识别「唱个 xx」这类请求，返回歌名；识别不到返回空串。
+   *
+   * 踩过的坑（2026-11-17，都在真日志里出现过）：
+   *   · 「行，认了就去唱歌，别研究肚子了。」→ 歌名被吞成《，别甩尾巴就行。》
+   *   · 「喊我，不想唱就不唱了」→ 歌名《就不唱了》
+   *   · 「唱个歌」→ 歌名《个歌》
+   * 所以规则收紧成三条：
+   *   ① 有书名号最可信（唱《后来》）
+   *   ② 没书名号就必须是「唱个/唱一首/来一首 + 名字」且**名字在句尾**
+   *   ③ 名字里不许有标点、不许含动词（唱说听看想要不别来去）
+   */
+  function singQueryOf(text) {
+    const t = String(text || '').trim()
+    if (!t || t.length > 40) return ''
+
+    const clean = (raw) => {
+      let q = String(raw || '').trim().replace(/[吧呗嘛啊呀哦啦]+$/, '').trim()
+      if (q.length < 2 || q.length > 24) return ''
+      if (/[，。,.!！?？；;：:、~～\n《》「」『』]/.test(q)) return ''
+      if (/^(歌|歌曲|唱歌|一个|一首|一下|什么|啥|这个|那个|个歌|就不唱了)$/.test(q)) return ''
+      if (/[唱说听看想要不别来去]/.test(q)) return ''      // 歌名里一般不含这些动词
+      return q
+    }
+
+    // ① 书名号（最可信）：唱《后来》 / 唱一首「晴天」
+    if (/唱|来一首|来一个/.test(t)) {
+      const m = /[《「『]([^》」』\n]{2,24})[》」』]/.exec(t)
+      if (m) {
+        const q = m[1].trim()
+        if (q.length >= 2 && q.length <= 24) return q
+      }
+    }
+
+    // ② 无书名号：必须「唱个/唱一首/来一首 + 名字」且名字收在句尾
+    const m2 = /(?:唱(?:一首歌|一首|一支|一下|个)|来一首|来一个)\s*([^\s，。,.!！?？；:：、~～]{2,24})\s*$/.exec(t)
+    if (m2) return clean(m2[1])
+    return ''
   }
 
   function buildSystem(r) {
@@ -6191,6 +6454,10 @@ ${cur.text}`
     if (config.memeWiki !== false) {
       try { memeDb() } catch (e) { log('梗百科：预加载失败 ' + String(e?.message || e).slice(0, 80)) }
     }
+    // 唱歌兜底：启动补发一次，之后每 2 分钟扫一遍（防止任务跑完时插件刚好重启）
+    setTimeout(() => { singCatchUp().catch(() => { }) }, 15_000)
+    const singTimer = setInterval(() => { singCatchUp().catch(() => { }) }, 120_000)
+    singTimer.unref?.()
     // 记忆巡检：默认每天一次（memoryConsolidate=hourly 则每小时；off 不跑）
     const memEvery = config.memoryConsolidate === 'hourly' ? 3_600_000
       : (config.memoryConsolidate === 'off' ? 0 : 6 * 3_600_000)   // daily 但分散到 6h 一次，避免整点一起跑
@@ -8250,6 +8517,61 @@ ${cur.text}`
     switch (op) {
       case 'status':
         return await client.call('status', {}, 8000)
+      case 'sing': {
+        // 手动让她唱一首（面板/调试用）：{ query, room? }
+        const q = String(a.query || a.text || a.song || '').trim()
+        if (!q) return { ok: false, error: '缺少歌名（query）' }
+        const r0 = singStart(a.room || a.roomId || 'filehelper', q)
+        if (!r0.ok) return r0
+        return { ...r0, status: singStatus() }
+      }
+      case 'singStatus': {
+        return singStatus()
+      }
+      case 'singJobs': {
+        // 面板「唱歌」页的历史列表：读任务目录，标出是否已发送
+        const root = String(config.singKitchen || '')
+        if (!root || !existsSync(root)) return { jobs: [] }
+        let names = []
+        try {
+          names = readdirSync(root, { withFileTypes: true })
+            .filter((d) => d.isDirectory() && /^\d/.test(d.name))
+            .map((d) => d.name).sort().reverse().slice(0, 12)
+        } catch { return { jobs: [] } }
+        const jobs = names.map((name) => {
+          const dir = join(root, name)
+          let query = ''
+          let totalSec = 0
+          let hasResult = false
+          try { query = JSON.parse(readFileSync(join(dir, 'job.json'), 'utf8')).query || '' } catch { }
+          // 旧任务没有 job.json（后加的机制）→ 从日志里把歌名捞出来
+          if (!query) {
+            try {
+              const lg = readFileSync(join(dir, 'sing.log'), 'utf8')
+              const m = /自动搜索[:：]\s*(.+)/.exec(lg)
+              if (m) query = m[1].trim()
+            } catch { }
+          }
+          try {
+            const r = JSON.parse(readFileSync(join(dir, 'result.json'), 'utf8'))
+            totalSec = Number(r.totalSec) || 0
+            hasResult = !!r.silk
+          } catch { }
+          return {
+            dir: name, query, totalSec, hasResult,
+            sent: existsSync(join(dir, '.sent')),
+            when: name.length >= 12 ? (name.slice(4, 6) + '-' + name.slice(6, 8) + ' '
+              + name.slice(8, 10) + ':' + name.slice(10, 12)) : '',
+          }
+        })
+        return { jobs }
+      }
+      case 'singCatchUp': {
+        return await singCatchUp()
+      }
+      case 'singDeliver': {
+        return await singDeliver()
+      }
       case 'postMoment': {
         // 手动发一条（面板「立即发一条」/ 指定文案两条路都走这里）
         const text = String(a.text || '').trim()
