@@ -1,4 +1,4 @@
-# backup-full.ps1 —— 全量备份（换组件 / 高危实验前的保险）
+﻿# backup-full.ps1 —— 全量备份（换组件 / 高危实验前的保险）
 #
 # 设计原则：**不写死任何本机路径**，全部自动探测，或用参数覆盖。
 #
@@ -103,7 +103,7 @@ New-Item -ItemType Directory -Path $OutRoot -Force | Out-Null
 # ── robocopy 封装（rc<8 视为成功；-Tolerant 允许部分文件被占用）────────────
 function Mirror($src, $dst, [string[]]$xd = @(), [string[]]$xf = @(), [switch]$Tolerant) {
   if (-not $src -or -not (Test-Path $src)) { Warn "源不存在，跳过: $src"; return }
-  $args = @($src, $dst, '/E', '/R:0', '/W:0', '/NFL', '/NDL', '/NJH', '/NJS', '/NP')
+  $rcArgs = @($src, $dst, '/E', '/R:0', '/W:0', '/NFL', '/NDL', '/NJH', '/NJS', '/NP')
   if ($xd.Count -gt 0) { $args += '/XD'; $args += $xd }
   if ($xf.Count -gt 0) { $args += '/XF'; $args += $xf }
   & robocopy @args | Out-Null

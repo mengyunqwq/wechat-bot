@@ -46,6 +46,34 @@ function Stop-WechatHard {
   $ErrorActionPreference = $old
 }
 
+# ── 回车登录（2026-11-11 用户实测：坐标点击对这版客户端无效，按回车能进）──
+#   两路都发：① PostMessage 给登录窗口（不抢焦点，窗口不在最前也能收）
+#             ② SendKeys 兜底（有些 Qt 版本只认真实键盘输入）
+function Send-EnterToLogin {
+  param([IntPtr]$Hwnd)
+  # ★ 2026-11-11 实测结论（三次试验）：
+  #   · PostMessage(WM_KEYDOWN) → Qt 主循环**收不到**，进程数不变
+  #   · 只发 KeyDown 不发 KeyUp → 无效
+  #   · 【有效】ShowWindow 恢复 + SetForegroundWindow + keybd_event(0x0D down/up)
+  #     + SendKeys 兜底 → 实测 1 个进程（登录页）→ 5 个进程（进主界面）
+  if ($Hwnd -ne [IntPtr]0) {
+    try { $w32::ShowWindow($Hwnd, 9) | Out-Null } catch { }
+    try { $w32::SetForegroundWindow($Hwnd) | Out-Null } catch { }
+    Start-Sleep -Milliseconds 500
+    try {
+      $zero = [System.UIntPtr]::Zero
+      $w32::keybd_event(0x0D, 0, 0, $zero)     # VK_RETURN down
+      Start-Sleep -Milliseconds 150
+      $w32::keybd_event(0x0D, 0, 2, $zero)     # VK_RETURN up（KEYEVENTF_KEYUP）
+    } catch { }
+  }
+  Start-Sleep -Milliseconds 400
+  try {
+    Add-Type -AssemblyName System.Windows.Forms -EA SilentlyContinue
+    [System.Windows.Forms.SendKeys]::SendWait('{ENTER}')
+  } catch { }
+}
+
 function Get-WechatProcs {
   return @(Get-Process -Name Weixin -EA SilentlyContinue)
 }
@@ -156,12 +184,17 @@ if ($Action -eq 'start') {
   }
 
   # 启动（带 hook 参数；这些参数决定 version.dll 的 hook 能收到消息）
-  $args = @(
+  # ★ 2026-11-18 严重 bug 修复：这里原来叫 $args —— PowerShell 的**自动变量**，
+  #   赋值会被吞掉，于是 Start-Process -ArgumentList $args 拿到空值 →
+  #   客户端以「完全无参数」启动 → hook 收不到 StartPort/CallBackURL →
+  #   读库全部失败（"消息库分片暂不可用 / 句柄还没挂载"）→ 机器人静默失聪。
+  #   症状现场：Weixin.exe 命令行只有 exe 路径，后面什么都没有。
+  $argList = @(
     'StartPort=' + $ApiPort,
     'RecvType=1',
-    'CallBackURL=http://127.0.0.1:' + $CbPort + '/recv'
+    'CallBackURL=http://127.0.0.1:' + $CbPort      # 不带 /recv：桥只认根路径
   )
-  Start-Process -FilePath $exe -ArgumentList $args -WorkingDirectory $ClientDir | Out-Null
+  Start-Process -FilePath $exe -ArgumentList $argList -WorkingDirectory $ClientDir | Out-Null
 
   # ── 等登录窗口 → 点「进入微信」 ──────────────────────────────────────
   $entered = $false
@@ -173,6 +206,8 @@ if ($Action -eq 'start') {
 [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
 [DllImport("user32.dll")] public static extern void mouse_event(uint f, uint dx, uint dy, uint d, IntPtr e);
 [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
+[DllImport("user32.dll")] public static extern bool PostMessage(IntPtr hWnd, uint Msg, IntPtr wParam, IntPtr lParam);
+[DllImport("user32.dll")] public static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, System.UIntPtr dwExtraInfo);
 [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int c);
 '@
     $w32 = Add-Type -MemberDefinition $sig -Name WxPower -Namespace WxPow -PassThru -EA SilentlyContinue
@@ -248,7 +283,33 @@ if ($Action -eq 'start') {
         }
         $np = (Get-WechatProcs).Count
         if ((-not $stillLogin) -and $np -ge 3) { $entered = $true; break }
-        $note = '点击后仍在登录页，重试中'
+
+        # ★ 2026-11-11：点击没进去 → 补一次回车（用户实测有效）
+        if ($stillLogin -and $hwnd -ne [IntPtr]0) {
+          Send-EnterToLogin -Hwnd $hwnd
+          $note = '点击无效 → 已按回车重试'
+          Start-Sleep -Seconds 8
+          $stillLogin2 = $false
+          foreach ($proc in (Get-WechatProcs)) {
+            try {
+              $cond = New-Object System.Windows.Automation.PropertyCondition(
+                [System.Windows.Automation.AutomationElement]::ProcessIdProperty, $proc.Id)
+              foreach ($w in $rootEl.FindAll([System.Windows.Automation.TreeScope]::Children, $cond)) {
+                if ($w.Current.ClassName -match 'LoginWindow') { $stillLogin2 = $true; break }
+              }
+            } catch { }
+            if ($stillLogin2) { break }
+          }
+          $np2 = (Get-WechatProcs).Count
+          # ★ 只认「进程数 >= 3」：UIA 找不到窗口不等于登录成功
+          #   （之前用 -not $stillLogin2 判，窗口枚举抛异常时会误判成功）
+          if ($np2 -ge 3) {
+            $entered = $true
+            $note = '回车登录成功'
+            break
+          }
+        }
+        $note = '点击/回车后仍在登录页，重试中'
         Start-Sleep -Seconds 3
       } else {
         # 没有登录窗口：可能已经进入主界面
@@ -256,8 +317,45 @@ if ($Action -eq 'start') {
         Start-Sleep -Seconds 2
       }
     }
+    # ★ 兜底：整轮结束还没进去（可能一直没找到「进入微信」按钮），再来一次回车
+    if (-not $entered) {
+      $hwnd2 = [IntPtr]0
+      foreach ($proc in (Get-WechatProcs)) {
+        try {
+          $cond = New-Object System.Windows.Automation.PropertyCondition(
+            [System.Windows.Automation.AutomationElement]::ProcessIdProperty, $proc.Id)
+          foreach ($w in $rootEl.FindAll([System.Windows.Automation.TreeScope]::Children, $cond)) {
+            if ($w.Current.ClassName -match 'LoginWindow') { $hwnd2 = [IntPtr]$w.Current.NativeWindowHandle; break }
+          }
+        } catch { }
+        if ($hwnd2 -ne [IntPtr]0) { break }
+      }
+      if ($hwnd2 -ne [IntPtr]0) {
+        Send-EnterToLogin -Hwnd $hwnd2
+        Start-Sleep -Seconds 8
+        if ((Get-WechatProcs).Count -ge 3) { $entered = $true; $note = '兜底回车后进程数已增长' }
+      } else {
+        $note = '没找到登录窗口（可能已经在主界面或界面类名变了）'
+      }
+    }
   } catch {
     $note = ('UIA 异常：' + $_.Exception.Message)
+  }
+
+  # ── 回车登录（独立脚本：实测 1 个进程 → 5 个进程，最多重试 5 次）──────
+  if (-not $entered) {
+    $enterScript = Join-Path $PSScriptRoot 'wechat-login-enter.ps1'
+    if (Test-Path $enterScript) {
+      try {
+        $out2 = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $enterScript -WaitSec 60 -MaxTry 5 2>&1
+        $line2 = ($out2 | Where-Object { $_ -match '^JSON:' } | Select-Object -Last 1)
+        if ($line2) {
+          $j2 = ($line2 -replace '^JSON:\s*', '') | ConvertFrom-Json
+          if ($j2.ok) { $entered = $true; $note = ('回车登录成功（第 ' + $j2.tries + ' 次，进程 ' + $j2.procs + '）') }
+          else { $note = ('回车登录未成功：' + $j2.note) }
+        }
+      } catch { $note = ('回车登录脚本异常：' + $_.Exception.Message) }
+    }
   }
 
   # ── 等 hook 就绪 ────────────────────────────────────────────────────

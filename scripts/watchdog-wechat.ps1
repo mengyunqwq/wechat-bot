@@ -192,6 +192,26 @@ if ($procs.Count -lt 3) {
       [System.Windows.Forms.SendKeys]::SendWait('{ENTER}')
       Log '已回车登录'
     }
+    # ★ 2026-11-18：代启之后必须验证 hook 真的活着。
+    #   踩过：客户端被「无参数」启动（$args 自动变量 bug）→ hook 起不来 →
+    #   读库全失败、机器人静默失聪，而这里当时直接 break 了，没人知道。
+    $hookOk = $false
+    $dl2 = (Get-Date).AddSeconds(45)
+    while ((Get-Date) -lt $dl2) {
+      if (Test-Bridge -TimeoutSec 5) { $hookOk = $true; break }
+      Start-Sleep -Seconds 3
+    }
+    if ($hookOk) {
+      Log '代启成功：桥与 hook 已就绪'
+    } else {
+      Log '⚠️ 代启后 hook 仍未就绪 → 改用 deploy-hook 完整重启（带齐参数 + 换 DLL）'
+      try {
+        & (Join-Path (Split-Path $PSScriptRoot -Parent) 'scripts\deploy-hook.ps1') 2>&1 |
+          ForEach-Object { Log ('  deploy: ' + $_) }
+      } catch {
+        Log ('deploy-hook 失败：' + $_.Exception.Message)
+      }
+    }
     $state.lastClientStart = $now
     Write-State $state
     break
