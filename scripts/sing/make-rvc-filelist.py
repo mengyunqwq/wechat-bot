@@ -5,7 +5,7 @@ import json
 import os
 
 RVC = r'E:\rvc\RVC'
-EXP = 'her'
+EXP = os.environ.get('RVC_EXP', 'her')
 EXP_DIR = os.path.join(RVC, 'logs', EXP)
 SR = '40k'
 VERSION = 'v2'                 # 768 维 HuBERT 特征
