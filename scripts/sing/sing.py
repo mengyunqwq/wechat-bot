@@ -191,7 +191,7 @@ def stage_separate(src, work):
     return hits[0]
 
 
-HER_F0 = 309.0      # 她的真实音高中位（从 cn-a.wav 测得）
+HER_F0 = 327.0  # 2026-11-18 校准：实测她 343Hz，+0 输出 323Hz，+1 落在 329Hz 最接近      # 她的真实音高中位（从 cn-a.wav 测得）
 
 
 def measure_f0(path, dur=45):
@@ -266,7 +266,10 @@ def convert_one(src, dst, pitch, model, index_rate, index):
     cmd = [RVC_PY, '-m', 'infer.cli', '--model', model,
            '--input', src, '--output', dst,
            '--pitch', str(pitch), '--f0-method', 'rmvpe',
-           '--index-rate', str(index_rate), '--protect', '0.33']
+           '--index-rate', str(index_rate), '--protect', '0.33',
+           # ★ 2026-11-18：原来没传 rms-mix-rate，走默认 1.0 —— 输出音量包络跟训练集走，
+           #   演唱动态被压平（听感发闷、不像真人在唱）。0.25 保留原始动态。
+           '--rms-mix-rate', '0.25']
     if idx:
         cmd += ['--index', idx[-1]]
     run(cmd, cwd=RVC_ROOT, env_extra={'PYTHONPATH': RVC_ROOT})
@@ -422,7 +425,7 @@ def main():
     ap.add_argument('--file')
     ap.add_argument('--pitch', type=int, default=None,
                     help='半音移调。不给就自动测源音高、算到她的 309Hz；给了就强制用')
-    ap.add_argument('--index-rate', type=float, default=0.75)
+    ap.add_argument('--index-rate', type=float, default=0.85)  # 0.85：实测比 0.75 更贴她的音色
     ap.add_argument('--index', help='RVC 检索索引路径（不给就自动找 EXP 的）')
     ap.add_argument('--model', default=MODEL)
     ap.add_argument('--out', help='输出路径（默认 E:\\rvc\\sing-work\\her-<时间>.wav）')
