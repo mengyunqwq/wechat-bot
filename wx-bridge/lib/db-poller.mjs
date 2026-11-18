@@ -217,7 +217,15 @@ export class DbPoller {
         if (!table || !info) continue
         const lastId = Number(info.lastId) || 0
         if (lastId <= 0) continue
-        this.tables.set(table, { roomId: info.roomId || '', lastId })
+        // ★ 2026-11-18：恢复时**退一格**。
+        //   原因：微信做完增量备份（*.material）后有时会回滚消息库，
+        //   把已经读到的那条消息弄丢，而游标记着它的 id。
+        //   之后新消息复用同一个 local_id → 查询用 `WHERE local_id > lastId`
+        //   就会永久跳过它（表现为：polls 一直涨、msgs 不动、用户发什么她都不回）。
+        //   退一格让最后一条重新读一次；重复的由 msgid 去重兜住。
+        const safeLast = lastId > 1 ? lastId - 1 : 0
+        this.tables.set(table, { roomId: info.roomId || '', lastId: safeLast })
+        if (safeLast !== lastId) this.log(`轮询游标：${table.slice(0, 24)} 退一格 ${lastId} → ${safeLast}（防 material 回滚后漏读）`)
         n++
       }
       if (n) this.log(`轮询游标：从磁盘恢复 ${n} 个表的进度（${f}）`)
@@ -433,7 +441,7 @@ export class DbPoller {
     //      contact.db.Name2Id        message_0.db.Name2Id
     //        rid=1 notifymessage       rid=1 wxid_SELF  ← 自己
     //        rid=2 weixin              rid=2 某个群
-    //        rid=5 wxid_MASTER...   rid=5 wxid_MEMBER_A
+    //        rid=5 wxid_urirqbcdh...   rid=5 wxid_MEMBER_A
     //
     //    实测对账（碧桂园集团最近消息）：
     //      lid=180 rsid=1 → message_0: wxid_SELF（自己 ✓）

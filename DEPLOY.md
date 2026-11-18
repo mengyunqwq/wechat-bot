@@ -360,6 +360,12 @@ D:\微信deepseek\data\logs\watchdog-state.json      状态（msgs/告警/重启
 7. **PowerShell 脚本要存 BOM**：无 BOM 会被 PowerShell 5.1 按 ANSI 读，中文全乱码、语法报错。
 8. **VBS 启动器不要加 `cmd /c` 重定向**：引号会让 VBS 语法错误，`wscript` 会弹一堆报错对话框。
 9. **插件是 ESM**：没有全局 `require`，要用 `createRequire(import.meta.url)` 才能同步 `require('node:sqlite')`。
+10. **客户端会「活着但不写消息库」**：`message_0.db` 停写数小时，而 `contact.db`/`session.db` 照常写，
+    桌面微信看着一切正常，但桥读到的是冻结库 → 用户发什么她都不回。
+    实测两次都紧跟微信自己的增量备份（`*.material` 更新时间吻合）。
+    判定：`message_0.db` mtime > 120 分钟 **且** `contact.db` mtime < 15 分钟 → 客户端消息写入冻结。
+    看门狗已内置该检测，命中就 `deploy-hook` 重启客户端（限频 6 小时）。
+    **别只看 `polls`**：它只证明桥在自转，不证明在读新数据；要看 `msgs` 有没有涨。
 
 ---
 

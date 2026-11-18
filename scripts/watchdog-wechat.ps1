@@ -360,6 +360,65 @@ if ($msgsNow -ge 0 -and $msgsNow -ne $lastMsgs) {
   }
 }
 
+# ── ③.8 消息库冻结检测（客户端活着但不写消息 → 自动重启）────────────
+#   2026-11-18 实测：11-17 23:00 起 message_0.db 停写 17 小时，
+#   而 contact.db / session.db 一直在写（客户端活得好好的）。
+#   两次都紧跟微信自己的增量备份（*.material 更新）—— 客户端侧 bug，只能靠重启恢复。
+$frozenRestart = $false
+try {
+  $root3 = Resolve-DbRoot $DbRoot
+  if ($root3 -and (Test-Path $root3)) {
+    # ① 消息库（两种布局取最新）
+    $msgCands = @()
+    $msgCands += Get-ChildItem -Path $root3 -File -Filter 'message_0.db' -ErrorAction SilentlyContinue
+    $msgCands += Get-ChildItem -Path $root3 -Directory -ErrorAction SilentlyContinue |
+      ForEach-Object { Get-ChildItem $_.FullName -File -Filter 'message_0.db' -ErrorAction SilentlyContinue }
+    $msgDb = $msgCands | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+
+    # ② 客户端「活性」证据：contact.db / session.db
+    $liveCands = @()
+    foreach ($n in @('contact.db', 'session.db')) {
+      $liveCands += Get-ChildItem -Path $root3 -File -Filter $n -ErrorAction SilentlyContinue
+      $liveCands += Get-ChildItem -Path $root3 -Directory -ErrorAction SilentlyContinue |
+        ForEach-Object { Get-ChildItem $_.FullName -File -Filter $n -ErrorAction SilentlyContinue }
+    }
+    $liveDb = $liveCands | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+
+    if ($msgDb -and $liveDb) {
+      $msgAgo = [int]((Get-Date) - $msgDb.LastWriteTime).TotalMinutes
+      $liveAgo = [int]((Get-Date) - $liveDb.LastWriteTime).TotalMinutes
+      if ($msgAgo -ge 120 -and $liveAgo -le 15) {
+        $frozenRestart = $true
+        Log ('消息库已 ' + $msgAgo + ' 分钟没写（' + $msgDb.FullName.Replace($root3, '...') + '），但 ' + $liveDb.Name + ' ' + $liveAgo + ' 分钟前刚写过 → 判定客户端消息写入冻结')
+      }
+    }
+  }
+} catch {
+  Log ('消息库冻结检测失败：' + $_.Exception.Message)
+}
+
+if ($frozenRestart) {
+  $st3 = Read-State
+  $now4 = [int64]((Get-Date).ToUniversalTime() - (Get-Date '1970-01-01')).TotalMilliseconds
+  $lastR = 0
+  try { $lastR = [int64]$st3.lastClientRestart } catch { $lastR = 0 }
+  if (($now4 - $lastR) -gt 6 * 3600 * 1000) {
+    Log '→ 重启客户端恢复写入（deploy-hook，限频 6 小时）'
+    try {
+      & (Join-Path (Split-Path $PSScriptRoot -Parent) 'scripts\deploy-hook.ps1') `
+        -Dll 'E:\wxhook-src\WeChat-Hook\x64\Release\version.dll' 2>&1 |
+        ForEach-Object { Log ('  deploy: ' + $_) }
+      $st3 | Add-Member -NotePropertyName lastClientRestart -NotePropertyValue $now4 -Force
+      Write-State $st3
+      Log '客户端已重启（下一轮确认消息库是否恢复写入）'
+    } catch {
+      Log ('客户端重启失败：' + $_.Exception.Message)
+    }
+  } else {
+    Log ('→ 需要重启，但 ' + [int](($now4 - $lastR) / 60000) + ' 分钟前刚重启过（限频 6 小时）→ 跳过')
+  }
+}
+
 # ── ③ wal 新鲜度 ───────────────────────────────────────────────────
 $walAgeMin = -1
 if (Test-Path $WalPath) {
