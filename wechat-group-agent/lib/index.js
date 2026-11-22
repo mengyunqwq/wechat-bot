@@ -20,12 +20,12 @@ import { createRequire } from 'node:module'
 // 插件是 ESM（type: module），没有全局 require；node:sqlite 只能同步 require，
 // 所以这里造一个 require 出来（2026-11-16 接梗百科时踩到）
 const require = createRequire(import.meta.url)
-import * as MV2 from './memory-v2.mjs?v=vmwkqpcgj'   // 艾宾浩斯遗忘曲线 + 情绪加权（?v= 用于打破 ESM 缓存）
+import * as MV2 from './memory-v2.mjs?v=vmwrwsut1'   // 艾宾浩斯遗忘曲线 + 情绪加权（?v= 用于打破 ESM 缓存）
 import * as ST from './style.mjs'   // 口气：标点规约 / 口语碎片 / 情绪→语气
 import * as H3 from './human3.mjs'   // 第三轮：情景示例/幽默三招/不重复/收尾日记/羁绊
 import * as OB from './outbox.mjs'   // 统一出站队列（节流/去重/重试退避）
 import * as H2 from './human2.mjs'   // 第二轮人性化：承诺/纠错/沉默/追话/联想/自己的事
-import * as PS from './persona.mjs?v=vmwkqpcgj'      // 性格四件套 + 自传（?v= 打破 ESM 缓存）
+import * as PS from './persona.mjs?v=vmwrwsut1'      // 性格四件套 + 自传（?v= 打破 ESM 缓存）
 import net from 'node:net'
 import { request as httpsRequest } from 'node:https'
 import { join, dirname } from 'node:path'
@@ -3929,7 +3929,11 @@ ${cur.text}`
 
     const tmo = (Number(config.singTimeoutMin) || 25) * 60_000
     const timer = setTimeout(() => {
-      if (_singJob && _singJob.state === 'running') {
+      // ★ 2026-11-22 修：必须校验 pid 是我们这一条。
+      //   以前只判断 state==='running'，于是**旧任务的定时器会去改新任务的状态**：
+      //   实际现象是「新任务刚开始就被标 timeout」，日志里出现
+      //   《月声尽》超时，已终止 之后紧接《大笨钟》状态变成 timeout（进程其实还在正常跑）。
+      if (_singJob && _singJob.pid === jobId && _singJob.state === 'running') {
         try { proc.kill() } catch { }
         _singJob.state = 'timeout'
         log('唱歌：《' + query + '》超时，已终止')
@@ -3938,6 +3942,8 @@ ${cur.text}`
     timer.unref?.()
 
     proc.on('exit', (code) => {
+      // 进程结束就取消定时器，避免残留定时器在很久之后误伤新任务
+      try { clearTimeout(timer) } catch { }
       // 只更新属于这条进程的状态（旧任务的 exit 不能改新任务的状态）
       if (_singJob && _singJob.pid === jobId) {
         _singJob.state = code === 0 ? 'done' : 'failed'

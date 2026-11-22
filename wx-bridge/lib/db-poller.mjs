@@ -217,15 +217,12 @@ export class DbPoller {
         if (!table || !info) continue
         const lastId = Number(info.lastId) || 0
         if (lastId <= 0) continue
-        // ★ 2026-11-18：恢复时**退一格**。
-        //   原因：微信做完增量备份（*.material）后有时会回滚消息库，
-        //   把已经读到的那条消息弄丢，而游标记着它的 id。
-        //   之后新消息复用同一个 local_id → 查询用 `WHERE local_id > lastId`
-        //   就会永久跳过它（表现为：polls 一直涨、msgs 不动、用户发什么她都不回）。
-        //   退一格让最后一条重新读一次；重复的由 msgid 去重兜住。
-        const safeLast = lastId > 1 ? lastId - 1 : 0
-        this.tables.set(table, { roomId: info.roomId || '', lastId: safeLast })
-        if (safeLast !== lastId) this.log(`轮询游标：${table.slice(0, 24)} 退一格 ${lastId} → ${safeLast}（防 material 回滚后漏读）`)
+        // ★ 2026-11-18 遇到过的坑：微信做完增量备份（*.material）会回滚消息库，
+        //   把已读到的那条弄丢，而游标还记着它的 local_id → 新消息复用同一个 id
+        //   就会被 `WHERE local_id > lastId` 永久跳过（polls 涨、msgs 不动）。
+        //   这里**不无条件退一格**（会让最后一条被重复读），改由 _clampCursors()
+        //   在表建好后跟真实 MAX(local_id) 比对，只在"游标跑到数据前面"时修正。
+        this.tables.set(table, { roomId: info.roomId || '', lastId })
         n++
       }
       if (n) this.log(`轮询游标：从磁盘恢复 ${n} 个表的进度（${f}）`)
@@ -234,6 +231,36 @@ export class DbPoller {
       this.log('轮询游标：读取失败（按新装处理）：' + String(e?.message || e).slice(0, 80))
       return 0
     }
+  }
+
+  /**
+   * 把「跑到数据前面」的游标拉回来（2026-11-18 实际故障的精确修法）。
+   * 场景：微信增量备份（*.material）回滚了消息库，把已读到的那条弄丢，
+   * 而游标还停在被回滚掉的 id 上；之后新消息复用同一个 local_id →
+   * 查询 `WHERE local_id > lastId` 就永远跳过它：polls 一直涨、msgs 一动不动。
+   * 只在 lastId 严格大于表内 MAX(local_id) 时修正，不会重复读旧消息。
+   */
+  async _clampCursors() {
+    if (!this.tables || this.tables.size === 0) return 0
+    let fixed = 0
+    for (const [table, info] of this.tables) {
+      try {
+        const r = await this.q('message_0.db', `SELECT MAX(local_id) AS m FROM ${table}`, 15000)
+        const max = Number((r && r[0] && r[0].m) || 0)
+        const lastId = Number(info.lastId) || 0
+        if (max > 0 && lastId > max) {
+          info.lastId = max
+          this._dirtyCursor = true
+          fixed++
+          this.log(`轮询游标：${table.slice(0, 24)} 超过表内最大 id（${lastId} > ${max}）→ 拉回到 ${max}（防回滚后永久漏读）`)
+        }
+      } catch { /* 单表失败不影响其它 */ }
+    }
+    if (fixed && this._dirtyCursor) {
+      this._dirtyCursor = false
+      try { this._saveCursor() } catch { /* ignore */ }
+    }
+    return fixed
   }
 
   _saveCursor() {
@@ -529,6 +556,8 @@ export class DbPoller {
       this.tables.set(table, { roomId, lastId })
     }
     if (this.tables.size > 0) this._hadTablesOnce = true
+    // 游标跑到数据前面 → 拉回来（异步，不阻塞本轮）
+    try { void this._clampCursors() } catch { /* ignore */ }
     // 建表/回补之后把游标落盘（重启不丢进度）
     if (this._dirtyCursor) {
       this._dirtyCursor = false
