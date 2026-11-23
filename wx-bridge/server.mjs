@@ -103,20 +103,43 @@ try {
 const clients = new Set()
 const counters = { msgsIn: 0, msgsOut: 0, stickersCaptured: 0, drops: 0, errors: 0 }
 
-const LOG_MAX_BYTES = Number(process.env.WECHAT_LOG_MAX_MB || 100) * 1048576
+// ── 日志轮转（2026-11-24）───────────────────────────────────────────
+//   以前是「超过 100MB 就丢弃后续日志」：11-17 那次 EPIPE 刷屏一天写到 103MB，
+//   之后整天日志全没了 —— 出问题时恰好查不到最需要的那段。
+//   改成按大小轮转：bridge-YYYY-MM-DD.log → .1 → .2 …（保留 LOG_KEEP 份），
+//   同一天的日志也能滚动，既不丢也不打爆磁盘。
+const LOG_MAX_BYTES = Number(process.env.WECHAT_LOG_MAX_MB || 20) * 1048576
+const LOG_KEEP = Number(process.env.WECHAT_LOG_KEEP || 5)
 let logSize = -1
 let logPath = ''
+function rotateLog(p) {
+  try {
+    for (let i = LOG_KEEP - 1; i >= 1; i--) {
+      const a = p + '.' + i
+      const b = p + '.' + (i + 1)
+      if (existsSync(a)) {
+        if (i + 1 > LOG_KEEP) { try { unlinkSync(b) } catch { /* ignore */ } }
+        try { renameSync(a, b) } catch { /* ignore */ }
+      }
+    }
+    if (existsSync(p)) renameSync(p, p + '.1')
+  } catch { /* ignore */ }
+}
 function log(...args) {
   const line = '[' + new Date().toISOString() + '] ' + args.map(String).join(' ')
   console.log(line)
   try {
     const p = join(LOG_DIR, 'bridge-' + new Date().toISOString().slice(0, 10) + '.log')
-    // 每次重新 stat（多进程/追加安全）；超过阈值直接丢弃，防止日志打爆磁盘
+    // 每次重新 stat（多进程/追加安全）
     if (p !== logPath) { logPath = p; logSize = existsSync(p) ? statSync(p).size : 0 }
     if (logSize < 0) logSize = existsSync(p) ? statSync(p).size : 0
-    if (logSize > LOG_MAX_BYTES) { console.log('[log] 文件超过 ' + Math.round(LOG_MAX_BYTES/1048576) + 'MB，丢弃后续日志（防磁盘打爆）'); return }
+    if (logSize > LOG_MAX_BYTES) {
+      rotateLog(p)
+      logSize = 0
+      console.log('[log] 超过 ' + Math.round(LOG_MAX_BYTES / 1048576) + 'MB → 已轮转（保留 ' + LOG_KEEP + ' 份）')
+    }
     appendFileSync(p, line + '\n')
-    logSize += line.length + 1
+    logSize += Buffer.byteLength(line) + 1
   } catch { /* ignore */ }
 }
 

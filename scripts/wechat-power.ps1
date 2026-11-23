@@ -79,12 +79,23 @@ function Get-WechatProcs {
 }
 
 function Test-HookAlive {
+  # ① 首选 hook 自己的 HTTP（有的版本 30001 可用）
   try {
     $r = Invoke-RestMethod ("http://127.0.0.1:" + $ApiPort + "/QueryDB/status") -Method Get -TimeoutSec 5 -EA Stop
-    return @{ alive = $true; isLogin = [int]$r.IsLogin }
-  } catch {
-    return @{ alive = $false; isLogin = 0 }
+    if ($r) { return @{ alive = $true; isLogin = [int]$r.IsLogin; via = 'hook-http' } }
+  } catch { }
+  # ② ★ 2026-11-24：这套环境 hook 只走文件队列，30001 恒为 000（实测），
+  #    以前这里就判"没登录" → 一键启动永远认为 hook 挂了。
+  #    改用**桥的轮询状态**作为证据：shard 解析成功 + 连续失败少 = hook 真的在供数据。
+  foreach ($port in @(17300, 17301)) {
+    try {
+      $s = Invoke-RestMethod ("http://127.0.0.1:" + $port + "/api/pollStatus") -Method Get -TimeoutSec 5 -EA Stop
+      if ($s -and $s.shard -and ([int]$s.consecFail -lt 3)) {
+        return @{ alive = $true; isLogin = 1; via = ('bridge:' + $port) }
+      }
+    } catch { }
   }
+  return @{ alive = $false; isLogin = 0; via = 'none' }
 }
 
 # ── status ────────────────────────────────────────────────────────────────

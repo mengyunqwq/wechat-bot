@@ -20,12 +20,12 @@ import { createRequire } from 'node:module'
 // 插件是 ESM（type: module），没有全局 require；node:sqlite 只能同步 require，
 // 所以这里造一个 require 出来（2026-11-16 接梗百科时踩到）
 const require = createRequire(import.meta.url)
-import * as MV2 from './memory-v2.mjs?v=vmwrwsut1'   // 艾宾浩斯遗忘曲线 + 情绪加权（?v= 用于打破 ESM 缓存）
+import * as MV2 from './memory-v2.mjs?v=vmwtruu2j'   // 艾宾浩斯遗忘曲线 + 情绪加权（?v= 用于打破 ESM 缓存）
 import * as ST from './style.mjs'   // 口气：标点规约 / 口语碎片 / 情绪→语气
 import * as H3 from './human3.mjs'   // 第三轮：情景示例/幽默三招/不重复/收尾日记/羁绊
 import * as OB from './outbox.mjs'   // 统一出站队列（节流/去重/重试退避）
 import * as H2 from './human2.mjs'   // 第二轮人性化：承诺/纠错/沉默/追话/联想/自己的事
-import * as PS from './persona.mjs?v=vmwrwsut1'      // 性格四件套 + 自传（?v= 打破 ESM 缓存）
+import * as PS from './persona.mjs?v=vmwtruu2j'      // 性格四件套 + 自传（?v= 打破 ESM 缓存）
 import net from 'node:net'
 import { request as httpsRequest } from 'node:https'
 import { join, dirname } from 'node:path'
@@ -8711,19 +8711,17 @@ ${cur.text}`
         }
       }
       case 'startAll': {
-        // ═══════════════════════════════════════════════════════════
-        //  一键启动（2026-11-11 用户要求："hook 经常挂不上，想一键起来"）
+        // ══════════════════════════════════════════════
+        //  一键启动（2026-11-24 重写）
         //
-        //  设计原则：**能跳过的就跳过**，只补缺的那一环。
-        //    ① 微信客户端：进程在 + hook 通 → 跳过；进程不在 → 启动（含 UIA 点「进入微信」）
-        //    ② hook：直接读 /QueryDB/status，IsLogin=1 才算就绪
-        //    ③ 桥：17300 能应答 → 跳过；不在 → spawn server.mjs 并等监听
-        //    ④ 插件↔桥：检查 WS 是否已 identify
-        //
-        //  为什么不在"hook 挂了但客户端在跑"时自动杀客户端：
-        //    R1 定了「绝不强杀微信」（杀一次 = 全部库句柄重来 + 可能丢未落盘数据）。
-        //    这里只**报告** needClientRestart，由用户在面板上再点一次「重启客户端」。
-        // ═══════════════════════════════════════════════════════════
+        //  设计原则：**不管哪一环挂了都要能救回来**，包括桥本身。
+        //    ① 微信客户端：桥优先查状态；桥不可用就直接跑 wechat-power.ps1
+        //    ② hook 就绪：以**桥的 pollStatus**为准（shard + 连续失败），
+        //       因为这套 hook 只走文件队列，30001 的 HTTP 恒为 000（curl 实测）
+        //    ③ 客户端在跑但 hook 不健康 → 直接做**安全重启**（deploy-hook）
+        //    ④ 桥：不在就直接 spawn（不经桥）
+        //    ⑤ 插件↔桥：等 identify
+        // ══════════════════════════════════════════════
         const steps = []
         const t0 = Date.now()
         const push = (step, state, detail, extra = {}) => steps.push({ step, state, detail, at: Date.now() - t0, ...extra })
@@ -8734,75 +8732,63 @@ ${cur.text}`
             return { up: true, status: r.status, text: (await r.text()).slice(0, 300) }
           } catch { return { up: false } }
         }
-        // ── ① 微信客户端 ────────────────────────────────────────
-        let procs = 0, hookAlive = false, isLogin = 0
-        try {
-          const st = await client.call('wechatPower', { action: 'status' }, 20000)
-          procs = Number(st?.procs) || 0
-          hookAlive = st?.hook === true || st?.hook === 1 || (Number(st?.isLogin) === 1)
-          isLogin = Number(st?.isLogin) || 0
-        } catch (e) {
-          push('微信客户端', 'warn', '状态查询失败（' + String(e?.message || e).slice(0, 60) + '），按未运行处理')
+        // 直接跑 PowerShell 脚本（不经过桥 —— 桥挂了也能用）
+        const psRun = async (script, args = [], ms = 180000) => {
+          const { execFile } = await import('node:child_process')
+          return await new Promise((resolve) => {
+            execFile('powershell.exe',
+              ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', script, ...args],
+              { timeout: ms, windowsHide: true, maxBuffer: 8 * 1024 * 1024 },
+              (err, stdout, stderr) => {
+                resolve({
+                  err: err ? String(err.message || err).slice(0, 200) : '',
+                  out: String(stdout || ''),
+                  errOut: String(stderr || ''),
+                })
+              })
+          })
         }
-        let needClientRestart = false
-        if (procs > 0 && hookAlive) {
-          push('微信客户端', 'skip', `已在运行（${procs} 个进程，已登录）→ 跳过`)
-        } else if (procs > 0 && !hookAlive) {
-          // 进程在但 hook 不通：**不杀**，只提示
-          needClientRestart = true
-          push('微信客户端', 'warn', `进程在（${procs} 个）但 hook 没挂上 → 需要重启客户端才能重新加载 version.dll`)
-        } else {
-          push('微信客户端', 'run', '未运行 → 正在启动（会等「进入微信」按钮点完 + hook 就绪，最长 3 分钟）')
+        const lastJson = (txt) => {
+          const lines = String(txt || '').split(/\r?\n/).filter((l) => l.trim().startsWith('{'))
+          for (let k = lines.length - 1; k >= 0; k--) {
+            try { return JSON.parse(lines[k]) } catch { /* 继续往前找 */ }
+          }
+          return null
+        }
+        const bridgePoll = async () => {
           try {
-            const r = await client.call('wechatPower', { action: 'start' }, 190000)
-            const ok = r?.ok !== false && (Number(r?.isLogin) === 1 || r?.hook === true)
-            push('微信客户端', ok ? 'ok' : 'fail',
-              ok ? `已启动（${Number(r?.procs) || '?'} 进程，hook=${r?.hook ? '就绪' : '未知'}）` : '启动失败：' + String(r?.error || r?.note || '未知').slice(0, 80))
-            if (ok) { procs = Number(r?.procs) || procs; hookAlive = true; isLogin = Number(r?.isLogin) || 1 }
-          } catch (e) {
-            push('微信客户端', 'fail', '启动异常：' + String(e?.message || e).slice(0, 80))
-          }
+            const r = await fetch('http://127.0.0.1:17300/api/pollStatus', { signal: AbortSignal.timeout(3000) })
+            return await r.json()
+          } catch { return null }
         }
 
-        // ── ② hook ────────────────────────────────────────────
-        let hook = await httpUp('http://127.0.0.1:30001/QueryDB/status', 4000)
-        let hookLogin = 0
-        try { hookLogin = Number(JSON.parse(hook.text || '{}').IsLogin) || 0 } catch { hookLogin = 0 }
-        if (hook.up && hookLogin === 1) {
-          push('hook 接口', 'skip', '30001 已就绪（IsLogin=1）→ 跳过')
-        } else if (hook.up) {
-          push('hook 接口', 'warn', '30001 有应答但未登录（IsLogin=0）→ 可能还在登录页')
-        } else {
-          // 给 40 秒宽限（刚启动的客户端要时间加载 DLL）
-          let waited = 0
-          push('hook 接口', 'run', '30001 无应答 → 等待客户端加载 hook（最多 40 秒）')
-          while (waited < 40000) {
-            await new Promise((r) => setTimeout(r, 2000)); waited += 2000
-            hook = await httpUp('http://127.0.0.1:30001/QueryDB/status', 3000)
-            if (hook.up) break
-          }
-          if (hook.up) {
-            try { hookLogin = Number(JSON.parse(hook.text || '{}').IsLogin) || 0 } catch { /* ignore */ }
-            push('hook 接口', 'ok', '30001 已就绪' + (hookLogin === 1 ? '（已登录）' : '（未登录）'))
-          } else {
-            needClientRestart = true
-            push('hook 接口', 'fail', '30001 仍无应答：客户端没加载 version.dll（检查客户端目录里的 version.dll），或客户端在登录页')
-          }
+        // ── ① 微信客户端状态 ─────────────────────────────
+        let procs = 0
+        let isLogin = 0
+        let stSrc = ''
+        try {
+          const st = await client.call('wechatPower', { action: 'status' }, 15000)
+          if (st) { procs = Number(st.procs) || 0; isLogin = Number(st.isLogin) || 0; stSrc = '桥' }
+        } catch { /* 桥可能没起来，下面走直连 */ }
+        if (!stSrc) {
+          const r = await psRun(join(BOT_HOME, 'scripts', 'wechat-power.ps1'), ['-Action', 'status'], 45000)
+          const st = lastJson(r.out)
+          if (st) { procs = Number(st.procs) || 0; isLogin = Number(st.isLogin) || 0; stSrc = '脚本直连' }
+          else push('微信客户端', 'warn', '状态查询失败（桥和脚本都没返回）：' + String(r.err || r.errOut || '').slice(0, 70))
         }
 
-        // ── ③ 桥 ──────────────────────────────────────────────
+        // ── ② 桥（必须先起：hook 是否健康要靠桥的轮询来判） ─────────────────────────────────────────
         let bridgeUp = (await httpUp('http://127.0.0.1:17300/api/status', 3000)).up
         if (bridgeUp) {
           push('接入层桥', 'skip', '17300 已在监听 → 跳过')
         } else {
           push('接入层桥', 'run', '17300 无应答 → 拉起 wx-bridge/server.mjs')
           try {
-            const base = BOT_HOME
-            const bridgeDir = join(base, 'wx-bridge')
-            const wechatExe = process.env.WECHAT_EXE || (detectWechatDir() ? join(detectWechatDir(), 'Weixin.exe') : '')
+            const bridgeDir = join(BOT_HOME, 'wx-bridge')
+            const wxDir = detectWechatDir()
             const argv = ['server.mjs', '--transport=wechat-hook', '--api-port=30001', '--cb-port=18998',
-              '--data-dir=' + join(base, 'data')]
-            if (wechatExe) argv.push('--wechat=' + wechatExe)
+              '--data-dir=' + join(BOT_HOME, 'data')]
+            if (wxDir) argv.push('--wechat=' + join(wxDir, 'Weixin.exe'))
             const { spawn } = await import('node:child_process')
             const child = spawn(process.execPath, argv, { cwd: bridgeDir, detached: true, stdio: 'ignore', windowsHide: true })
             child.on('error', (e) => log('一键启动：拉起桥失败 ' + String(e?.message || e).slice(0, 120)))
@@ -8820,15 +8806,76 @@ ${cur.text}`
           }
         }
 
-        // ── ④ 插件 ↔ 桥 ────────────────────────────────────────
+        // ── ③ hook 就绪（以桥的 pollStatus 为准）──────────
+        let ps0 = await bridgePoll()
+        let hookOk = !!(ps0 && ps0.shard && Number(ps0.consecFail || 0) < 3 && !ps0.hardStopped)
+        let hookVia = hookOk ? '桥轮询正常（shard=' + ps0.shard + '）' : ''
+        if (!hookOk) {
+          const h = await httpUp('http://127.0.0.1:30001/QueryDB/status', 4000)
+          let lgn = 0
+          try { lgn = Number(JSON.parse(h.text || '{}').IsLogin) || 0 } catch { /* ignore */ }
+          if (h.up && lgn === 1) { hookOk = true; hookVia = 'hook HTTP 30001（IsLogin=1）' }
+        }
+
+        let needClientRestart = false
+        if (procs > 0 && hookOk) {
+          push('微信客户端', 'skip', `已在运行（${procs} 个进程）+ hook 就绪（${hookVia}）→ 跳过`)
+        } else if (procs > 0 && !hookOk) {
+          // ★ 关键改动：不再只"报告"，而是直接做安全重启（这就是"一键启动"该干的事）
+          push('微信客户端', 'run', `进程在（${procs} 个）但 hook 不健康 → 正在安全重启（等 WAL 静止再杀，约 2 分钟）`)
+          const dllCands = [
+            'E:\\wxhook-src\\WeChat-Hook\\x64\\Release\\version.dll',
+            join(detectWechatDir() || '', 'version.dll'),
+          ].filter(Boolean)
+          const dll = dllCands.find((p) => { try { return existsSync(p) } catch { return false } }) || ''
+          const args = dll ? ['-Dll', dll] : []
+          const r = await psRun(join(BOT_HOME, 'scripts', 'deploy-hook.ps1'), args, 240000)
+          const okLine = /部署完成|walSafe"\s*:\s*true/.test(r.out)
+          push('微信客户端', okLine ? 'ok' : 'fail',
+            okLine ? '已安全重启并登录（deploy-hook）' : ('重启失败：' + String(r.err || r.errOut || r.out).slice(-80)))
+          if (okLine) {
+            // 重启后桥会被 deploy-hook 一起拉起，给几秒
+            for (let k = 0; k < 10; k++) {
+              await new Promise((rr) => setTimeout(rr, 2000))
+              ps0 = await bridgePoll()
+              if (ps0 && ps0.shard && Number(ps0.consecFail || 0) < 3) { hookOk = true; break }
+            }
+            procs = Number(ps0?.procs) || procs
+          } else {
+            needClientRestart = true
+          }
+        } else {
+          push('微信客户端', 'run', '未运行 → 正在启动（会等「进入微信」点完 + hook 就绪，最长 3 分钟）')
+          let r = null
+          let via = '桥'
+          try {
+            r = await client.call('wechatPower', { action: 'start' }, 190000)
+          } catch (e) {
+            via = '脚本直连'
+            const rr = await psRun(join(BOT_HOME, 'scripts', 'wechat-power.ps1'), ['-Action', 'start'], 200000)
+            r = lastJson(rr.out) || { ok: false, error: String(rr.err || rr.errOut || '').slice(0, 120) }
+          }
+          const ok = r && r.ok !== false && (Number(r.isLogin) === 1 || r.hook === true)
+          push('微信客户端', ok ? 'ok' : 'fail',
+            ok ? `已启动（${Number(r.procs) || '?'} 进程，经${via}）` : '启动失败：' + String(r?.error || r?.note || '未知').slice(0, 90))
+          if (ok) { procs = Number(r.procs) || procs; isLogin = Number(r.isLogin) || 1; hookOk = true; hookVia = '启动脚本报告已登录' }
+          else needClientRestart = true
+        }
+
+        // ── ④ hook 结论 ──────────────────────────────────
+        if (hookOk) {
+          push('hook 就绪', 'ok', hookVia || 'hook 可用')
+        } else {
+          push('hook 就绪', 'fail', '桥轮询与 30001 都不可用：版本 DLL 可能没加载，或客户端还在登录页')
+          needClientRestart = true
+        }
+
+        // ── ⑤ 插件 ↔ 桥 ───────────────────────────────────
         if (bridgeUp) {
           let linked = !!bridge.loggedIn
-          if (!linked) {
-            // 给 WS 一点重连时间
-            for (let i = 0; i < 6 && !linked; i++) {
-              await new Promise((r) => setTimeout(r, 1000))
-              linked = !!bridge.loggedIn
-            }
+          for (let i = 0; i < 8 && !linked; i++) {
+            await new Promise((r) => setTimeout(r, 1000))
+            linked = !!bridge.loggedIn
           }
           push('插件↔桥', linked ? 'ok' : 'warn',
             linked ? `已连上（self=${bridge.self || '?'}）` : '桥在但插件还没 identify（等几秒会自动重连；仍不行就重启 DSH）')
@@ -8842,10 +8889,9 @@ ${cur.text}`
         log('一键启动：' + steps.map((x) => `${x.step}=${x.state}`).join('｜'))
         return {
           ok: bad === 0,
-          summary, steps,
-          needClientRestart,
+          summary, steps, needClientRestart,
           hint: needClientRestart
-            ? 'hook 没挂上时只有重启客户端才能重新加载 version.dll（点下面的「重启客户端」）'
+            ? 'hook 仍不可用：可能版本 DLL 没加载或客户端停在登录页，点「重启客户端」再试一次'
             : (warn ? '看下面哪一步是 ⚠️' : '都好了，去群里说句话试试'),
           elapsedMs: Date.now() - t0,
         }
@@ -8885,7 +8931,29 @@ ${cur.text}`
           log('[wechatPower] ' + action + ' → ' + JSON.stringify(r).slice(0, 200))
           return r
         } catch (e) {
-          return { ok: false, error: String(e?.message || e).slice(0, 200) }
+          // ★ 桥不可用时直连脚本（否则"桥挂了就连客户端也起不来"）
+          log('[wechatPower] 经桥失败（' + String(e?.message || e).slice(0, 80) + '）→ 改为直连脚本')
+          try {
+            const { execFile } = await import('node:child_process')
+            const script = join(BOT_HOME, 'scripts', 'wechat-power.ps1')
+            const out = await new Promise((resolve) => {
+              execFile('powershell.exe',
+                ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', script, '-Action', action],
+                { timeout, windowsHide: true, maxBuffer: 8 * 1024 * 1024 },
+                (err, stdout, stderr) => resolve({ err: String(err?.message || ''), out: String(stdout || ''), errOut: String(stderr || '') }))
+            })
+            const lines = out.out.split(/\r?\n/).filter((l) => l.trim().startsWith('{'))
+            for (let k = lines.length - 1; k >= 0; k--) {
+              try {
+                const j = JSON.parse(lines[k])
+                log('[wechatPower] ' + action + '（直连）→ ' + JSON.stringify(j).slice(0, 160))
+                return j
+              } catch { /* 继续 */ }
+            }
+            return { ok: false, error: '直连脚本也没返回 JSON：' + String(out.err || out.errOut).slice(0, 120) }
+          } catch (e2) {
+            return { ok: false, error: String(e2?.message || e2).slice(0, 200) }
+          }
         }
       }
       case 'usage': {

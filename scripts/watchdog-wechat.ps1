@@ -171,6 +171,37 @@ function Write-State($s) {
 $state = Read-State
 $now = [DateTime]::UtcNow.Ticks / 10000   # epoch ms
 
+# ── ⓪ 磁盘清理（每天一次，2026-11-24 加）────────────────────────────
+#   背景：桥日志曾一天写出 103MB（EPIPE 刷屏），sing-work 堆了 3.2GB，
+#   微信自己的日志 310MB —— 不清理迟早打满盘。
+#   现在每天最多跑一次（state 里记时间），失败不影响其它检查。
+try {
+  $lastClean = 0
+  try { $lastClean = [int64]$state.lastDiskClean } catch { $lastClean = 0 }
+  $nowMsD = [int64]((Get-Date).ToUniversalTime() - (Get-Date '1970-01-01')).TotalMilliseconds
+  if (($nowMsD - $lastClean) -gt 24 * 3600 * 1000) {
+    $py = 'D:\Python311\python.exe'
+    $sc = 'D:\微信deepseek\data\disk-clean.py'
+    if ((Test-Path $py) -and (Test-Path $sc)) {
+      # 先切 UTF-8，否则 python 的中文输出按 GBK 解会变乱码
+      $prevEnc = [Console]::OutputEncoding
+      try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch { }
+      $out = & $py '-X' 'utf8' $sc 2>&1 | Select-Object -Last 2
+      try { [Console]::OutputEncoding = $prevEnc } catch { }
+      $summary = (($out | Out-String).Trim() -replace '\s+', ' ')
+      if ($summary.Length -gt 180) { $summary = $summary.Substring(0, 180) }
+      Log ('磁盘清理：' + $summary)
+      # ★ 必须写回**同一个** $state 对象：之前用独立快照，
+      #   后面 ① / ③.8 各自 Read-State 再 Write-State，会把 lastDiskClean 冲掉
+      #   → 清理条件每次都成立（或永远不记录）。实测踩过。
+      $state | Add-Member -NotePropertyName lastDiskClean -NotePropertyValue $nowMsD -Force
+      Write-State $state
+    }
+  }
+} catch {
+  Log ('磁盘清理失败（不影响其它检查）：' + $_.Exception.Message)
+}
+
 # ── ① 微信进程 ──────────────────────────────────────────────────────
 $procs = @(Get-Process Weixin -ErrorAction SilentlyContinue)
 if ($procs.Count -lt 3) {
@@ -206,7 +237,13 @@ if ($procs.Count -lt 3) {
     } else {
       Log '⚠️ 代启后 hook 仍未就绪 → 改用 deploy-hook 完整重启（带齐参数 + 换 DLL）'
       try {
-        & (Join-Path (Split-Path $PSScriptRoot -Parent) 'scripts\deploy-hook.ps1') 2>&1 |
+        # 必须显式给 -Dll（deploy-hook 里是 Mandatory；不给会报
+        # "无法将参数绑定到参数 Dll，因为该参数为空字符串" —— 11-24 实测）
+        $dllPath = 'E:\wxhook-src\WeChat-Hookd\Releaseersion.dll'
+        if (-not (Test-Path $dllPath)) {
+          $dllPath = 'D:\wxhook\wx4110ersion.dll'   # 退回客户端目录里现有的 DLL
+        }
+        & (Join-Path (Split-Path $PSScriptRoot -Parent) 'scripts\deploy-hook.ps1') -Dll $dllPath 2>&1 |
           ForEach-Object { Log ('  deploy: ' + $_) }
       } catch {
         Log ('deploy-hook 失败：' + $_.Exception.Message)

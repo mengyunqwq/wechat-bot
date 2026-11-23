@@ -23,7 +23,7 @@
 #   powershell -File deploy-hook.ps1 -Dll ... -WalTimeoutSec 120 -NoLogin
 
 param(
-  [Parameter(Mandatory = $true)][string]$Dll,
+  [Parameter(Mandatory = $false)][string]$Dll = '',   # 可选：不给就用客户端目录里现有的 version.dll（只做安全重启）
   [string]$ClientDir = 'D:\wxhook\wx4110',
   [string]$DbRoot    = '',
   [string]$BridgeDir = 'D:\微信deepseek\wx-bridge',
@@ -170,6 +170,11 @@ function Get-WalInfo {
 }
 
 # ── 0) 前置检查 ──────────────────────────────────────────────────────
+# 没给 -Dll → 复用客户端里现有的 DLL（这样「安全重启」不需要外部 DLL 路径）
+if (-not $Dll) {
+  $Dll = Join-Path $ClientDir 'version.dll'
+  Log ('未指定 -Dll → 复用客户端现有 DLL：' + $Dll)
+}
 if (-not (Test-Path $Dll)) { Log ('❌ DLL 不存在: ' + $Dll); exit 1 }
 $dllMd5 = (Get-FileHash $Dll -Algorithm MD5).Hash.ToLower()
 Log ('部署源: ' + $Dll + '  md5=' + $dllMd5.Substring(0, 8))
